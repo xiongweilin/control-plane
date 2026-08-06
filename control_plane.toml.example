@@ -1,0 +1,46 @@
+# 复制为 control_plane.toml（不入库）并按需调整。
+
+[server]
+host = "0.0.0.0"
+port = 18083
+
+[agent]
+opencodex_base_url = "http://127.0.0.1:10100/v1"
+model = "deepseek/deepseek-v4-flash"
+opencodex_timeout_seconds = 120
+max_agent_calls_per_repair = 8
+
+[policy]
+cooldown_seconds = 600
+max_attempts = 2
+daily_agent_budget = 20
+per_repair_timeout_seconds = 600
+max_concurrent = 1
+paused = false
+
+[projects]
+allowed_auto = ["dify", "docker", "feedback-analysis-agent", "catalog-ops-automation"]
+allowed_repo_roots = ["/srv/stack", "/mnt/d/download/agent", "/mnt/d/download/ratio"]
+allowed_url_origins = [
+  "http://127.0.0.1",
+  "http://localhost",
+  "https://metratio.com",
+  "https://dify.metratio.com",
+  "https://grafana.metratio.com",
+  "https://prometheus.metratio.com",
+]
+
+[projects.project_dirs]
+docker = "/srv/stack/dify/docker"
+dify = "/srv/stack/dify/docker"
+feedback-analysis-agent = "/srv/stack/feishu-dify-gateway"
+catalog-ops-automation = "/srv/stack/catalog-ops-automation"
+
+[evidence]
+candidate_trial_days = 90
+candidate_wip_limit = 20
+default_disposition = "archive"
+
+[notifications]
+enabled = true
+feishu_notify_script = "C:\\Users\\metra\\.local\\bin\\feishu-notify.ps1"
