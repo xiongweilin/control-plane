@@ -13,8 +13,9 @@ if (-not [Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY', 'User'))
     throw "CONTROL_PLANE_API_KEY user environment variable is not set."
 }
 
-$python = Join-Path $ProjectDir '.venv\Scripts\python.exe'
-$action = New-ScheduledTaskAction -Execute $python -Argument '-m control_plane --log-level info' -WorkingDirectory $ProjectDir
+$wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+$wrapper = Join-Path $PSScriptRoot 'Start-ControlPlaneHidden.vbs'
+$action = New-ScheduledTaskAction -Execute $wscript -Argument "`"$wrapper`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
