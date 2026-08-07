@@ -4,6 +4,8 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -477,6 +479,158 @@ class RepairService:
             hour, minute = (int(part) for part in self.config.digest_time.split(":", 1))
         except (ValueError, AttributeError):
             hour, minute = 21, 30
+        now = dt.datetime.now().astimezone()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += dt.timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+
+    async def run_env_scan(self) -> list[str]:
+        """Daily environment scan. Returns a list of differences; empty means all healthy."""
+        differences: list[str] = []
+
+        # ---- local disks ----
+        for drive in ("C:\\", "D:\\"):
+            try:
+                usage = shutil.disk_usage(drive)
+                free_gb = usage.free / 1024**3
+                if free_gb < self.config.scan_disk_free_gb_min:
+                    differences.append(f"本地磁盘 {drive} 剩余仅 {free_gb:.1f}G")
+            except OSError as exc:
+                differences.append(f"本地磁盘 {drive} 检查失败：{exc}")
+
+        # ---- local docker containers ----
+        try:
+            output = await self.executor.run(
+                [
+                    "docker",
+                    "ps",
+                    "--format",
+                    "{{.Names}}\t{{.Status}}",
+                ],
+                timeout=30,
+            )
+            for line in output.splitlines():
+                if not line.strip():
+                    continue
+                status = line.split("\t")[-1]
+                if "unhealthy" in status or "restarting" in status:
+                    differences.append(f"Docker 容器异常：{line.strip()}")
+        except ToolError as exc:
+            differences.append(f"Docker 状态检查失败：{exc}")
+
+        # ---- prometheus ----
+        try:
+            response = await self.http.get(f"{self.config.prometheus_url}/-/ready", timeout=15)
+            if response.status_code != 200:
+                differences.append(f"Prometheus 未就绪（HTTP {response.status_code}）")
+        except httpx.HTTPError as exc:
+            differences.append(f"Prometheus 不可达：{exc}")
+        try:
+            response = await self.http.get(f"{self.config.prometheus_url}/api/v1/alerts", timeout=15)
+            body = response.json()
+            firing = [
+                alert.get("labels", {}).get("alertname", "?")
+                for alert in body.get("data", {}).get("alerts", [])
+                if alert.get("state") == "firing"
+            ]
+            if firing:
+                differences.append(f"Prometheus 有 firing 告警：{', '.join(sorted(set(firing))[:8])}")
+        except (httpx.HTTPError, ValueError) as exc:
+            differences.append(f"Prometheus 告警查询失败：{exc}")
+
+        # ---- cloud via ssh metratio ----
+        async def cloud(cmd: list[str], timeout: int = 30) -> str:
+            return await self.executor.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "metratio", *cmd],
+                timeout=timeout,
+            )
+
+        try:
+            disk = await cloud(["df", "-h", "/"])
+            last = [line for line in disk.splitlines() if line.strip()][-1]
+            parts = last.split()
+            if len(parts) >= 4:
+                used_pct = parts[4].rstrip("%")
+                try:
+                    if int(used_pct) > 85:
+                        differences.append(f"云端磁盘使用率 {used_pct}%：{last}")
+                except ValueError:
+                    pass
+        except ToolError as exc:
+            differences.append(f"云端磁盘检查失败：{exc}")
+
+        try:
+            cert = await cloud(
+                ["openssl", "x509", "-enddate", "-noout", "-in", "/srv/stack/nginx/ssl/fullchain.pem"]
+            )
+            match = re.search(r"notAfter=([A-Za-z]{3} [0-9]{1,2} [0-9:]{8} [0-9]{4})", cert)
+            if match:
+                expires = dt.datetime.strptime(match.group(1), "%b %d %H:%M:%S %Y").replace(tzinfo=dt.UTC)
+                days = (expires - dt.datetime.now(dt.UTC)).days
+                if days < self.config.scan_cert_days_warn:
+                    differences.append(f"云端证书 {days} 天后到期")
+        except (ToolError, ValueError) as exc:
+            differences.append(f"云端证书检查失败：{exc}")
+
+        try:
+            relay = (await cloud(["systemctl", "is-active", "webhook-relay"])).strip()
+            if relay != "active":
+                differences.append(f"云端 webhook-relay 状态：{relay}")
+        except ToolError as exc:
+            differences.append(f"云端 relay 检查失败：{exc}")
+
+        try:
+            fw = await cloud(["sudo", "-n", "firewall-cmd", "--list-all"])
+            if "100.64.0.0/10" not in fw or "22/tcp" in fw:
+                differences.append("云端防火墙 SSH 规则异常（应仅允许 Tailscale 源）")
+        except ToolError as exc:
+            differences.append(f"云端防火墙检查失败：{exc}")
+
+        try:
+            nginx_status = await cloud(["docker", "ps", "--filter", "name=gateway-nginx", "--format", "{{.Status}}"])
+            if not any(
+                line.split("\t")[-1].startswith("Up")
+                for line in nginx_status.splitlines()
+                if line.strip()
+            ):
+                differences.append("云端 gateway-nginx 未运行")
+        except ToolError as exc:
+            differences.append(f"云端 gateway-nginx 检查失败：{exc}")
+
+        try:
+            updates = await cloud(["sudo", "-n", "dnf", "check-update", "-q", "--security"], timeout=120)
+            count = len([line for line in updates.splitlines() if line.strip()])
+            if count:
+                differences.append(f"云端有 {count} 个安全更新待安装")
+        except ToolError as exc:
+            differences.append(f"云端安全更新检查失败：{exc}")
+
+        if differences:
+            await self._notify(
+                "warning",
+                "每日环境自检发现差异",
+                "；\n".join(differences),
+            )
+        return differences
+
+    async def scan_loop(self) -> None:
+        if not self.config.scan_enabled:
+            return
+        while True:
+            await self._sleep_until_time(self.config.scan_time, fallback=(6, 0))
+            try:
+                differences = await self.run_env_scan()
+                logger.info("env scan finished with %s differences", len(differences))
+            except Exception:
+                logger.exception("daily env scan failed")
+            await asyncio.sleep(86_400)
+
+    async def _sleep_until_time(self, time_spec: str, fallback: tuple[int, int]) -> None:
+        try:
+            hour, minute = (int(part) for part in time_spec.split(":", 1))
+        except (ValueError, AttributeError):
+            hour, minute = fallback
         now = dt.datetime.now().astimezone()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:

@@ -140,3 +140,17 @@ observability、feishu-dify-gateway）执行 `docker compose restart / up -d`、
   `/cp promote <id>` 晋升、`/cp dismiss <id>` 归档；无沉淀或无价值时发送简短确认。
 
 配置：`digest_enabled`、`digest_time`、`digest_max_candidates`。
+
+## 每日环境自检
+
+控制平面每日 06:00 自动运行一次环境自检（`POST /v1/scan` 可手动触发）：
+
+- 本地：C/D 盘剩余空间、Docker 容器 unhealthy/restarting、Prometheus 就绪与 firing 告警；
+- 云端（经 `ssh metratio`）：磁盘使用率、证书到期天数、webhook-relay 状态、
+  SSH 防火墙规则（应仅允许 Tailscale 源）、gateway-nginx 运行状态、待装安全更新数；
+- 无差异时静默（仅记录日志）；有差异时向飞书推送一次汇总。
+
+配置：`scan_enabled`、`scan_time`、`scan_disk_free_gb_min`、`scan_cloud_free_gb_min`、`scan_cert_days_warn`。
+
+控制平面默认只监听 `127.0.0.1:18083`（`control_plane.toml` 的 `[server] host`），
+Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
