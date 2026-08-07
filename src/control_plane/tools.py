@@ -127,14 +127,25 @@ def resolve_repo(value: str, allowed_roots: tuple[str, ...]) -> str:
     return normalized
 
 
-async def _probe(http: httpx.AsyncClient, url: str, timeout: int = 20) -> tuple[bool, str]:
+async def _probe(
+    http: httpx.AsyncClient,
+    url: str,
+    timeout: int = 20,
+    expected: set[int] | None = None,
+    body_contains: str | None = None,
+) -> tuple[bool, str]:
     try:
         response = await http.get(url, timeout=timeout, follow_redirects=False)
     except httpx.HTTPError as exc:
         return False, f"probe failed: {exc}"
-    if response.status_code in {200, 401}:
-        return True, f"HTTP {response.status_code}"
-    return False, f"HTTP {response.status_code}"
+    allowed = expected if expected is not None else {200, 301, 302, 307, 401}
+    if response.status_code not in allowed:
+        return False, f"HTTP {response.status_code} (expected {sorted(allowed)})"
+    if body_contains:
+        body = (await response.aread())[:8_192].decode("utf-8", errors="replace")
+        if body_contains not in body:
+            return False, f"HTTP {response.status_code} but body missing {body_contains!r}"
+    return True, f"HTTP {response.status_code}"
 
 
 async def _run_cmd(ctx: ToolContext, args: list[str], cwd: str | None = None) -> str:

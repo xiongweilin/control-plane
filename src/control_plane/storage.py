@@ -411,6 +411,16 @@ class Store:
                 (candidate_id, now),
             )
 
+    def dismiss_candidate(self, candidate_id: str) -> bool:
+        now = int(time.time())
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE candidates SET status='archived', updated_at=? "
+                "WHERE id=? AND status='candidate'",
+                (now, candidate_id),
+            )
+            return cursor.rowcount > 0
+
     def list_playbooks(self) -> list[sqlite3.Row]:
         with self._lock:
             return list(

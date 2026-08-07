@@ -77,13 +77,29 @@ class Verifier:
             checks.append(CheckResult("container_status", ok, message, ref))
 
         probe_urls = tool_results.get("probe_urls", [])
-        for url in probe_urls:
-            ok, message, ref = await self._probe(url)
+        for entry in probe_urls:
+            if isinstance(entry, dict):
+                url = str(entry["url"])
+                kwargs: dict[str, Any] = {}
+                if entry.get("expected"):
+                    kwargs["expected"] = set(entry["expected"])
+                if entry.get("body_contains"):
+                    kwargs["body_contains"] = entry["body_contains"]
+            else:
+                url = str(entry)
+                kwargs = {}
+            ok, message, ref = await self._probe(url, **kwargs)
             checks.append(CheckResult(f"probe:{url}", ok, message, ref))
 
         promql_checks = tool_results.get("promql", {})
         for label, query in promql_checks.items():
-            ok, message, ref = await self._promql(query)
+            if isinstance(query, dict):
+                promql_query = str(query["query"])
+                expected = query.get("expected")
+            else:
+                promql_query = str(query)
+                expected = None
+            ok, message, ref = await self._promql(promql_query, expected)
             checks.append(CheckResult(f"promql:{label}", ok, message, ref))
 
         repos = tool_results.get("repos", [])
@@ -92,8 +108,16 @@ class Verifier:
             checks.append(CheckResult(f"git:{repo}", ok, message, ref))
 
         error_log_targets = tool_results.get("error_log_targets", [])
-        for target in error_log_targets:
-            ok, message, ref = await self._logs(target)
+        for entry in error_log_targets:
+            if isinstance(entry, dict):
+                target = str(entry["target"])
+                log_kwargs = {
+                    key: entry[key] for key in ("since_minutes", "patterns") if key in entry
+                }
+            else:
+                target = str(entry)
+                log_kwargs = {}
+            ok, message, ref = await self._logs(target, **log_kwargs)
             checks.append(CheckResult(f"logs:{target}", ok, message, ref))
 
         if not checks:
