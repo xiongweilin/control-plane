@@ -26,7 +26,7 @@ class ControlPlaneConfig:
     api_key: str = ""
 
     opencodex_base_url: str = "http://127.0.0.1:10100/v1"
-    model: str = "deepseek/deepseek-v4-flash"
+    model: str = "opencode-go/deepseek-v4-flash"
     codex_cli: Path = (
         Path(os.getenv("USERPROFILE", "C:\\Users\\metra"))
         / "AppData"
@@ -63,16 +63,16 @@ class ControlPlaneConfig:
     )
     project_dirs: dict[str, str] = field(
         default_factory=lambda: {
-            "docker": "/srv/stack/dify/docker",
-            "dify": "/srv/stack/dify/docker",
-            "feedback-analysis-agent": "/srv/stack/feishu-dify-gateway",
-            "catalog-ops-automation": "/srv/stack/catalog-ops-automation",
+            "docker": "D:\\infrastructure\\compose\\dify",
+            "dify": "D:\\infrastructure\\compose\\dify",
+            "feedback-analysis-agent": "D:\\infrastructure\\compose\\feedback-analysis-agent",
+            "catalog-ops-automation": "D:\\infrastructure\\compose\\catalog-ops-automation",
         }
     )
     allowed_repo_roots: tuple[str, ...] = (
-        "/srv/stack",
-        "/mnt/d/download/agent",
-        "/mnt/d/download/ratio",
+        "D:\\infrastructure\\compose",
+        "D:\\download\\agent",
+        "D:\\download\\ratio",
     )
     allowed_url_origins: tuple[str, ...] = (
         "http://127.0.0.1",
@@ -102,8 +102,6 @@ class ControlPlaneConfig:
     )
     notification_enabled: bool = True
 
-    wsl_distro: str = "Ubuntu-22.04"
-    wsl_user: str = "ratio"
     prometheus_url: str = "http://127.0.0.1:19090"
 
     extra: dict[str, object] = field(default_factory=dict)
