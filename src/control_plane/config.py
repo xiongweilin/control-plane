@@ -21,7 +21,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ControlPlaneConfig:
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 18083
     api_key: str = ""
 
@@ -114,6 +114,11 @@ class ControlPlaneConfig:
     digest_enabled: bool = True
     digest_time: str = "21:30"
     digest_max_candidates: int = 20
+    scan_enabled: bool = True
+    scan_time: str = "06:00"
+    scan_disk_free_gb_min: float = 30.0
+    scan_cloud_free_gb_min: float = 10.0
+    scan_cert_days_warn: int = 30
 
     prometheus_url: str = "http://127.0.0.1:19090"
 

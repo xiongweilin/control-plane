@@ -79,6 +79,39 @@ class FakeExecutorUnhealthy(FakeExecutor):
         return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
 
 
+class FakeExecutorScan(FakeExecutor):
+    async def run(
+        self,
+        args: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: int = 60,
+        input_text: str | None = None,
+    ) -> str:
+        joined = " ".join(args)
+        if joined.startswith("ssh "):
+            if "df -h /" in joined:
+                return "/dev/vda1  40G  9.6G  28G  26% /"
+            if "openssl" in joined:
+                return "notAfter=Oct 31 08:03:33 2026 GMT"
+            if "systemctl is-active" in joined:
+                return "active"
+            if "firewall-cmd --list-all" in joined:
+                return (
+                    "ports: 443/tcp 80/tcp\n"
+                    'rich rules:\n\trule family="ipv4" source address="100.64.0.0/10" '
+                    'port port="22" protocol="tcp" accept'
+                )
+            if "docker ps" in joined:
+                return "gateway-nginx\tUp 2 hours"
+            if "dnf check-update" in joined:
+                return ""
+            return ""
+        if "docker ps" in joined:
+            return "grafana\tUp 2 minutes (healthy)\nprometheus\tUp 2 minutes (healthy)"
+        return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
+
+
 class FakeCodexRunner:
     def __init__(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
@@ -427,6 +460,36 @@ async def test_git_check_skips_non_git_repo(tmp_path) -> None:
     assert ok is True
     assert "skipping" in message
     assert kind == "git"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_env_scan_all_healthy(tmp_path) -> None:
+    config = replace(_config(tmp_path), scan_disk_free_gb_min=0.0, notification_enabled=False)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutorScan()
+    agent = FakeCodexRunner()
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/-/ready":
+            return httpx.Response(200, text="Prometheus Server is Ready.")
+        return httpx.Response(200, json={"status": "success", "data": {"alerts": []}})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    differences = await service.run_env_scan()
+    assert differences == []
     await service.close()
     store.close()
 
