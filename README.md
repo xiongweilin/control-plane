@@ -49,9 +49,31 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 ```text
 /cp status
 /cp approve <repair_id> | reject <repair_id> | rollback <repair_id>
+/cp policy <fingerprint> auto|manual|ignore
+/cp run <fingerprint>
+/cp ignore <fingerprint>
+/cp evidence
 /cp pause | resume
 /cp promote <candidate_id>
+/task <描述> 派发任务给 Agent 执行
 ```
+
+飞书普通消息（非命令）会走 Dify Chatflow 对话；`/new` 开始新会话。
+`/task <描述>` 会把任务派发给控制平面的 Codex Agent（deepseek-v4-flash），
+执行过程同样推送：任务已接收 → Agent 启动 → 心跳 → 完成/失败。
+
+告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
+`manual`（收到告警后等你决定，`/cp run` 执行或 `/cp ignore` 忽略）或 `ignore`（直接忽略）。
+告警恢复后，该指纹的自动修复尝试计数会重置。
+
+沉淀文件位置（可直接打开）：
+
+- `D:\download\agent\control-plane\data\agent-sessions\{repair_id}.jsonl` 与 `-last.md`（Codex 会话原文与摘要）
+- `D:\download\agent\control-plane\data\evidence\`（EvidenceRecord JSON）
+- `D:\download\agent\control-plane\data\patches\`（候选补丁）
+- `D:\download\agent\control-plane\data\control-plane.db`（repairs/actions/candidates/playbooks）
+
+也可用 `/cp evidence` 或 `GET /v1/evidence`（需 X-Control-Plane-Key）查看最近证据。
 
 ## 交互体验
 
@@ -83,3 +105,12 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 - 成功修复自动创建 candidate（90 天期限，默认到期归档）。
 - 候选只进入 Agent 推理上下文，不自动取得修改权限。
 - `/cp promote <candidate_id>` 需要飞书审批授权；晋升后进入 official playbook 并参与自动工具决策。
+
+## Agent 操作边界
+
+Agent 可对运行中的 Compose 项目（dify、feedback-analysis-agent、catalog-ops-automation、
+observability、feishu-dify-gateway）执行 `docker compose restart / up -d`、`docker restart`
+与只读诊断，以及 URL 探针与 PromQL 查询。禁止不可逆操作：删除/清空数据卷或数据库
+（`docker compose down -v`、`docker volume rm`、DROP/TRUNCATE、删除持久化数据）、
+`docker compose down`、`git push --force` 或删除 main/受保护分支、修改凭据/防火墙/sshd、
+停止或删除含持久化数据的容器。

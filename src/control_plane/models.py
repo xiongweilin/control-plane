@@ -35,6 +35,12 @@ class AlertResponse(BaseModel):
     budget_limited: int
     paused: int = 0
     ignored: int = 0
+    pending: int = 0
+
+
+class AlertPolicyRequest(BaseModel):
+    policy: Literal["auto", "manual", "ignore"]
+    note: str = Field(default="", max_length=512)
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -50,6 +56,17 @@ class ApprovalDecisionResponse(BaseModel):
 
 class ControlRequest(BaseModel):
     reason: str = Field(default="", max_length=512)
+
+
+class TaskRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4_000)
+    repo: str = Field(default="", max_length=1_024)
+    project: str = Field(default="", max_length=128)
+
+
+class TaskDispatchResponse(BaseModel):
+    task_id: str
+    message: str
 
 
 class ErrorDetail(BaseModel):

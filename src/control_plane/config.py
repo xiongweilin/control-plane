@@ -60,6 +60,8 @@ class ControlPlaneConfig:
         "docker",
         "feedback-analysis-agent",
         "catalog-ops-automation",
+        "observability",
+        "feishu-dify-gateway",
     )
     project_dirs: dict[str, str] = field(
         default_factory=lambda: {
@@ -67,6 +69,8 @@ class ControlPlaneConfig:
             "dify": "D:\\infrastructure\\compose\\dify",
             "feedback-analysis-agent": "D:\\infrastructure\\compose\\feedback-analysis-agent",
             "catalog-ops-automation": "D:\\infrastructure\\compose\\catalog-ops-automation",
+            "observability": "D:\\infrastructure\\compose\\observability",
+            "feishu-dify-gateway": "D:\\infrastructure\\compose\\feishu-dify-gateway",
         }
     )
     allowed_repo_roots: tuple[str, ...] = (
@@ -101,6 +105,7 @@ class ControlPlaneConfig:
         / "feishu-notify.ps1"
     )
     notification_enabled: bool = True
+    default_alert_policy: str = "auto"
     notify_heartbeat_seconds: int = 120
     notify_cooldown_skip: bool = True
     notify_ignored_noise: bool = True

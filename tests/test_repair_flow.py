@@ -6,6 +6,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.codex_runner import CodexSessionResult
@@ -182,6 +183,175 @@ async def test_smoke_instance_alert_ignored(tmp_path) -> None:
     response = await service.ingest(payload)
     assert response.ignored == 1
     assert response.accepted == 0
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_ignore_skips_repair(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = _payload()
+    fingerprint = alert_fingerprint(payload.alerts[0])
+    await service.set_alert_policy(fingerprint, "ignore")
+    response = await service.ingest(payload)
+    assert response.ignored == 1
+    assert response.accepted == 0
+    assert executor.calls == []
+    assert store.list_repairs() == []
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_manual_pending_then_run(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = _payload()
+    fingerprint = alert_fingerprint(payload.alerts[0])
+    await service.set_alert_policy(fingerprint, "manual")
+    response = await service.ingest(payload)
+    assert response.pending == 1
+    assert response.accepted == 0
+    assert store.list_repairs() == []
+
+    message = await service.run_manual(fingerprint)
+    assert "已启动修复" in message
+    for _ in range(200):
+        rows = store.list_repairs()
+        if rows and rows[0]["status"] in {"closed", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+    rows = store.list_repairs()
+    assert rows and rows[0]["status"] == "closed"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_attempt_count_resets_after_resolution(tmp_path) -> None:
+    config = replace(_config(tmp_path), max_attempts=1, cooldown_seconds=0)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = _payload()
+    fingerprint = alert_fingerprint(payload.alerts[0])
+
+    response = await service.ingest(payload)
+    assert response.accepted == 1
+    for _ in range(200):
+        rows = store.list_repairs()
+        if rows and rows[0]["status"] in {"closed", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+
+    # 第二次触发：attempt 2 > max_attempts=1 → 升级，不再创建修复
+    response2 = await service.ingest(payload)
+    assert response2.cooldown == 1
+    assert response2.accepted == 0
+    assert len(store.list_repairs()) == 1
+
+    # 告警恢复 → 尝试计数重置
+    resolved = AlertmanagerPayload.model_validate(
+        {
+            "status": "resolved",
+            "alerts": [
+                {
+                    "status": "resolved",
+                    "labels": {"alertname": "HighCPU", "instance": "node1", "project": "dify"},
+                    "annotations": {"summary": "cpu high"},
+                    "startsAt": "2026-08-06T00:00:00Z",
+                    "endsAt": "2026-08-07T00:00:00Z",
+                    "fingerprint": fingerprint,
+                }
+            ],
+        }
+    )
+    await service.ingest(resolved)
+
+    # 再次触发：计数已重置 → 重新接受
+    response3 = await service.ingest(payload)
+    assert response3.accepted == 1
+    for _ in range(200):
+        rows = store.list_repairs()
+        if len(rows) == 2 and rows[0]["status"] in {"closed", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+    assert len(store.list_repairs()) == 2
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    task_id, message = await service.dispatch_task("帮我看看磁盘使用")
+    assert task_id.startswith("task-")
+    assert "已派发" in message
+    for _ in range(200):
+        row = store.get_repair(task_id)
+        if row and row["status"] in {"closed", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+    row = store.get_repair(task_id)
+    assert row is not None
+    assert row["status"] == "closed"
+    assert row["result"]
     await service.close()
     store.close()
 
