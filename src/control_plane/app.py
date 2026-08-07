@@ -76,6 +76,16 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         expired = store.expire_candidates(int(__import__("time").time()))
         if expired:
             logger.info("expired %s candidates", expired)
+        now = int(__import__("time").time())
+        for row in store.list_repairs(limit=1_000):
+            if row["status"] not in {"closed", "failed", "interrupted", "rolled_back"}:
+                store.set_repair_status(
+                    row["id"],
+                    "interrupted",
+                    error="control plane restarted",
+                    finished_at=now,
+                )
+                logger.info("reconciled stale repair %s -> interrupted", row["id"])
         if not store.get_setting("usage_hint_sent"):
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")

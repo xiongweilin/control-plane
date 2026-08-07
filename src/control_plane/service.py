@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ class RepairService:
         self._owns_http = http is None
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._repair_tasks: dict[str, asyncio.Task[Any]] = {}
 
     @property
     def paused(self) -> bool:
@@ -107,6 +109,7 @@ class RepairService:
         if alert.status == "resolved":
             self.store.mark_alert_resolved(fingerprint, int(alert.ends_at.timestamp()) if alert.ends_at else None)
             self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
+            await self._cancel_in_progress_repairs(fingerprint)
             await self._notify("info", f"告警已恢复：{alertname}", self._describe(alert))
             return {"deduplicated": 1}
 
@@ -220,8 +223,18 @@ class RepairService:
         )
         task = asyncio.create_task(self._run_repair(repair_id, fingerprint, alert))
         self._tasks.add(task)
+        self._repair_tasks[fingerprint] = task
+        task.add_done_callback(lambda _t: self._repair_tasks.pop(fingerprint, None))
         task.add_done_callback(self._tasks.discard)
         return {"accepted": 1}
+
+    async def _cancel_in_progress_repairs(self, fingerprint: str) -> None:
+        task = self._repair_tasks.get(fingerprint)
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
 
     async def set_alert_policy(self, fingerprint: str, policy: str) -> str:
         if policy not in {"auto", "manual", "ignore"}:
@@ -657,9 +670,20 @@ class RepairService:
                     raise RuntimeError(f"Verification failed:\n{report.summary}")
                 self._transition(repair_id, RepairState.VERIFIED)
                 await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
-                await self._create_candidate(ctx, repair_id, fingerprint, alert)
+                if self._alert_is_firing(fingerprint):
+                    await self._create_candidate(ctx, repair_id, fingerprint, alert)
+                else:
+                    await self._notify(
+                        "info",
+                        "告警已恢复，跳过候选沉淀",
+                        f"repair_id={repair_id}\n告警在修复完成前已恢复，不沉淀候选经验。",
+                    )
                 branch = proposal.get("branch")
-                rollback = f"\n回滚：切回 main 并删除分支 {branch}" if branch else ""
+                rollback = (
+                    f"\n回滚：切回 main 并删除分支 {branch}"
+                    if branch and proposal.get("code_changed")
+                    else ""
+                )
                 await self._notify(
                     "info",
                     f"修复完成：{alert.labels.get('alertname', 'unknown')}",
@@ -699,6 +723,7 @@ class RepairService:
         self._transition(repair_id, RepairState.PROPOSING)
         repo = await self._pick_repo(alert)
         branch = f"{self.config.codex_branch_prefix}{repair_id}"
+        fingerprint = alert_fingerprint(alert)
         await self._notify(
             "info",
             "Agent 启动",
@@ -707,7 +732,7 @@ class RepairService:
         before = await self._capture_repo_state(repo)
         prompt = self._build_agent_prompt(alert, repo, repair_id, branch)
         start_ts = time.time()
-        heartbeat = asyncio.create_task(self._heartbeat(repair_id, start_ts))
+        heartbeat = asyncio.create_task(self._heartbeat(repair_id, start_ts, fingerprint))
         try:
             result = await self.agent.run_task(
                 repair_id=repair_id,
@@ -736,12 +761,15 @@ class RepairService:
         )
         return {"code_changed": changed, "branch": branch, "summary": result.last_message}
 
-    async def _heartbeat(self, repair_id: str, start_ts: float) -> None:
+    async def _heartbeat(self, repair_id: str, start_ts: float, fingerprint: str | None = None) -> None:
         interval = self.config.notify_heartbeat_seconds
         if interval <= 0:
             return
         while True:
             await asyncio.sleep(interval)
+            if fingerprint is not None:
+                if not self._alert_is_firing(fingerprint):
+                    return
             elapsed = int(time.time() - start_ts)
             await self._notify(
                 "info",
@@ -1148,6 +1176,10 @@ class RepairService:
     def _alert_policy(self, fingerprint: str) -> str:
         raw = self.store.get_setting(f"policy:{fingerprint}")
         return raw if raw in {"auto", "manual", "ignore"} else self.config.default_alert_policy
+
+    def _alert_is_firing(self, fingerprint: str) -> bool:
+        row = self.store.get_alert(fingerprint)
+        return row is not None and row["status"] == "firing"
 
     def _policy_notify_due(self, fingerprint: str, suffix: str, ttl: int) -> bool:
         key = f"notified:policy:{fingerprint}:{suffix}"
