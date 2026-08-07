@@ -71,6 +71,7 @@ class RepairService:
         cooldown = 0
         budget_limited = 0
         paused = 0
+        ignored = 0
         for alert in payload.alerts:
             decision = await self._ingest_alert(alert)
             accepted += decision.get("accepted", 0)
@@ -78,12 +79,14 @@ class RepairService:
             cooldown += decision.get("cooldown", 0)
             budget_limited += decision.get("budget_limited", 0)
             paused += decision.get("paused", 0)
+            ignored += decision.get("ignored", 0)
         return AlertResponse(
             accepted=accepted,
             deduplicated=deduplicated,
             cooldown=cooldown,
             budget_limited=budget_limited,
             paused=paused,
+            ignored=ignored,
         )
 
     async def _ingest_alert(self, alert: Alert) -> dict[str, int]:
@@ -99,13 +102,23 @@ class RepairService:
             await self._notify("info", f"告警已恢复：{alertname}", self._describe(alert))
             return {"deduplicated": 1}
 
+        known = self.store.get_alert(fingerprint)
         self.store.upsert_alert(fingerprint, alertname, instance, project, container, "firing", starts_at)
+
+        if self._is_noise_alert(alert):
+            if known is None and self.config.notify_ignored_noise:
+                await self._notify(
+                    "info",
+                    f"已忽略测试/噪音告警：{alertname}",
+                    f"{self._describe(alert)}\n不触发自动修复（instance={instance or '-'}）。",
+                )
+            return {"ignored": 1}
 
         if self.paused:
             await self._notify("warning", "控制平面已暂停，告警未处理", f"{alertname}: {self._describe(alert)}")
             return {"paused": 1}
 
-        existing = self.store.get_alert(fingerprint)
+        existing = known
         if existing and self.store.get_repair_state_for_fingerprint(fingerprint) == "in_progress":
             return {"deduplicated": 1}
 
@@ -114,6 +127,14 @@ class RepairService:
         if latest is not None:
             finished_at = int(latest["finished_at"] or 0)
             if finished_at and now - finished_at < self.config.cooldown_seconds:
+                if self.config.notify_cooldown_skip and self._cooldown_notify_due(fingerprint):
+                    remaining_min = max(1, (self.config.cooldown_seconds - (now - finished_at)) // 60)
+                    await self._notify(
+                        "info",
+                        f"冷却中，暂不重复修复：{alertname}",
+                        f"{self._describe(alert)}\n剩余约 {remaining_min} 分钟，重复告警将被自动跳过。",
+                    )
+                    self.store.set_setting(f"notified:cooldown:{fingerprint}", str(now))
                 return {"cooldown": 1}
 
         attempt = 1
@@ -135,7 +156,16 @@ class RepairService:
         payload_json = json.dumps(alert.model_dump(mode="json"), ensure_ascii=False)
         self.store.create_repair(repair_id, fingerprint, payload_json, attempt)
         self.store.set_setting(f"repair:{repair_id}:fingerprint", fingerprint)
-        await self._notify("info", f"开始修复：{alertname}", f"repair_id={repair_id}\n{self._describe(alert)}")
+        pattern = fingerprint_pattern(alert)
+        known_candidate = self.store.find_candidate(pattern, ("candidate", "official"))
+        hint = ""
+        if known_candidate is not None:
+            hint = f"\n已知模式：{pattern}（已支持 {known_candidate['times_supported']} 次）"
+        await self._notify(
+            "info",
+            f"开始修复：{alertname}",
+            f"repair_id={repair_id}\n{self._describe(alert)}\n今日 Agent 预算剩余：{self.budget.remaining()}{hint}",
+        )
         task = asyncio.create_task(self._run_repair(repair_id, fingerprint, alert))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -160,11 +190,14 @@ class RepairService:
                 if not report.all_passed:
                     raise RuntimeError(f"Verification failed:\n{report.summary}")
                 self._transition(repair_id, RepairState.VERIFIED)
+                await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
                 await self._create_candidate(ctx, repair_id, fingerprint, alert)
+                branch = proposal.get("branch")
+                rollback = f"\n回滚：切回 main 并删除分支 {branch}" if branch else ""
                 await self._notify(
                     "info",
                     f"修复完成：{alert.labels.get('alertname', 'unknown')}",
-                    f"repair_id={repair_id}\n{report.summary}",
+                    f"repair_id={repair_id}\n{report.summary}{rollback}",
                 )
                 self._transition(repair_id, RepairState.CLOSED, finished_at=int(time.time()), result=report.summary)
             except asyncio.CancelledError:
@@ -181,7 +214,13 @@ class RepairService:
                     error=str(exc)[:2_000],
                     finished_at=int(time.time()),
                 )
-                await self._notify("critical", "修复失败", f"repair_id={repair_id}\n{exc}")
+                await self._notify(
+                    "critical",
+                    "修复失败",
+                    f"repair_id={repair_id}\n{exc}\n\n"
+                    f"下一步：查看会话摘要 data/agent-sessions/{repair_id}-last.md；"
+                    "如需人工介入可调用 /v1/control/pause 暂停控制平面。",
+                )
             finally:
                 await ctx.close()
 
@@ -194,13 +233,23 @@ class RepairService:
         self._transition(repair_id, RepairState.PROPOSING)
         repo = await self._pick_repo(alert)
         branch = f"{self.config.codex_branch_prefix}{repair_id}"
+        await self._notify(
+            "info",
+            "Agent 启动",
+            f"repair_id={repair_id}\n目标仓库: {repo}\n分支: {branch}\n模型: {self.config.model}",
+        )
         before = await self._capture_repo_state(repo)
         prompt = self._build_agent_prompt(alert, repo, repair_id, branch)
-        result = await self.agent.run_task(
-            repair_id=repair_id,
-            repo=repo,
-            prompt=prompt,
-        )
+        start_ts = time.time()
+        heartbeat = asyncio.create_task(self._heartbeat(repair_id, start_ts))
+        try:
+            result = await self.agent.run_task(
+                repair_id=repair_id,
+                repo=repo,
+                prompt=prompt,
+            )
+        finally:
+            heartbeat.cancel()
         self.store.increment_agent_calls(repair_id)
         self.budget.spend()
         if result.timed_out:
@@ -220,6 +269,19 @@ class RepairService:
             changed=changed,
         )
         return {"code_changed": changed, "branch": branch, "summary": result.last_message}
+
+    async def _heartbeat(self, repair_id: str, start_ts: float) -> None:
+        interval = self.config.notify_heartbeat_seconds
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            elapsed = int(time.time() - start_ts)
+            await self._notify(
+                "info",
+                "修复仍在进行",
+                f"repair_id={repair_id}\n已运行 {elapsed} 秒，Agent 正在诊断/修改，请稍候。",
+            )
 
     def _build_agent_prompt(
         self,
@@ -296,23 +358,18 @@ class RepairService:
 
     async def _capture_repo_state(self, repo: str) -> dict[str, str]:
         try:
-            head = await self.executor.run(
-                ["bash", "-lc", f"cd {repo} && git rev-parse --short HEAD 2>/dev/null || echo no-git"]
-            )
+            head = await self.executor.run(["git", "-C", repo, "rev-parse", "--short", "HEAD"])
         except ToolError:
             head = "no-git"
-        return {"git_head": head}
+        return {"git_head": head.strip()}
 
     async def _code_changed(self, repo: str, branch: str) -> tuple[bool, str]:
         try:
-            output = await self.executor.run(
-                [
-                    "bash",
-                    "-lc",
-                    f"cd {repo} && git rev-parse --verify {branch} >/dev/null 2>&1 && "
-                    f"git diff --stat main...{branch} 2>/dev/null || true",
-                ]
-            )
+            await self.executor.run(["git", "-C", repo, "rev-parse", "--verify", branch])
+        except ToolError:
+            return False, ""
+        try:
+            output = await self.executor.run(["git", "-C", repo, "diff", "--stat", f"main...{branch}"])
         except ToolError:
             return False, ""
         stat_lines = [line for line in output.splitlines() if "|" in line]
@@ -366,7 +423,10 @@ class RepairService:
         await self._notify(
             "warning",
             "待审批：控制平面修复",
-            f"repair_id={repair_id}\n请回复 /cp approve {repair_id} 或 /cp reject {repair_id}。",
+            f"repair_id={repair_id}\n"
+            f"请回复 /cp approve {repair_id} 或 /cp reject {repair_id}；\n"
+            f"或调用 POST /v1/approvals/{repair_id}/decision"
+            "（action=approve|reject|rollback，需 X-Control-Plane-Key）。",
         )
         decision = await self.approvals.wait(repair_id)
         await self.approvals.remove(repair_id)
@@ -397,13 +457,12 @@ class RepairService:
             if not repo:
                 continue
             branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
-            script = (
-                f"cd {repo} && "
-                f"git checkout -q main && "
-                f"git merge --ff-only {branch} 2>/dev/null || git merge -q --no-edit {branch} && "
-                f"git push -q origin main"
-            )
-            await self.executor.run(["bash", "-lc", script], timeout=300)
+            await self.executor.run(["git", "-C", repo, "checkout", "-q", "main"], timeout=120)
+            try:
+                await self.executor.run(["git", "-C", repo, "merge", "--ff-only", branch], timeout=120)
+            except ToolError:
+                await self.executor.run(["git", "-C", repo, "merge", "-q", "--no-edit", branch], timeout=120)
+            await self.executor.run(["git", "-C", repo, "push", "-q", "origin", "main"], timeout=120)
             await self._notify("info", "代码候选已合并到 main", f"repair_id={repair_id}\nrepo={repo}")
 
     async def _verify(
@@ -516,12 +575,8 @@ class RepairService:
 
     async def _check_git(self, repo: str, branch: str) -> tuple[bool, str, str]:
         try:
-            diff = await self.executor.run(
-                ["bash", "-lc", f"cd {repo} && git diff main...{branch} --stat 2>/dev/null || true"]
-            )
-            dirty = await self.executor.run(
-                ["bash", "-lc", f"cd {repo} && git status --porcelain 2>/dev/null || true"]
-            )
+            diff = await self.executor.run(["git", "-C", repo, "diff", f"main...{branch}", "--stat"])
+            dirty = await self.executor.run(["git", "-C", repo, "status", "--porcelain"])
         except ToolError as exc:
             return False, f"git check failed: {exc}", "git"
         allowed, message = Verifier.diff_allowed(repo, diff)
@@ -530,6 +585,24 @@ class RepairService:
         if dirty.strip():
             return False, f"workspace is dirty after repair: {dirty.strip()[:200]}", "git"
         return True, message, "git"
+
+    def _is_noise_alert(self, alert: Alert) -> bool:
+        alertname = alert.labels.get("alertname", "")
+        instance = alert.labels.get("instance", "")
+        if alertname in self.config.test_alert_alertnames:
+            return True
+        return any(instance.startswith(prefix) for prefix in self.config.test_alert_instance_prefixes)
+
+    def _cooldown_notify_due(self, fingerprint: str) -> bool:
+        key = f"notified:cooldown:{fingerprint}"
+        raw = self.store.get_setting(key)
+        if not raw:
+            return True
+        try:
+            last = int(raw)
+        except ValueError:
+            return True
+        return int(time.time()) - last >= self.config.cooldown_seconds
 
     async def _rollback(self, ctx: ToolContext, repair_id: str) -> None:
         try:
@@ -606,6 +679,11 @@ class RepairService:
                     times_supported=int(existing["times_supported"]) + 1,
                     tool_sequence=tool_sequence,
                 )
+                await self._notify(
+                    "info",
+                    "已知模式再次复现",
+                    f"pattern={pattern}\n已更新候选经验（第 {int(existing['times_supported']) + 1} 次支持）。",
+                )
             return
         candidate_id = f"cand-{uuid.uuid4().hex[:12]}"
         deadline = int(time.time()) + self.config.candidate_trial_days * 86_400
@@ -621,6 +699,11 @@ class RepairService:
             "",
             "environment change or same alert pattern after 90 days",
             repair_id,
+        )
+        await self._notify(
+            "info",
+            "已沉淀候选经验",
+            f"pattern={pattern}\ncandidate_id={candidate_id}\n试运行 {self.config.candidate_trial_days} 天。",
         )
         write_evidence(
             self.config.evidence_dir,
