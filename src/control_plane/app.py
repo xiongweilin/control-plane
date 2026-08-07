@@ -80,7 +80,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")
         digest_task = asyncio.create_task(service.digest_loop())
+        scan_task = asyncio.create_task(service.scan_loop())
         yield
+        scan_task.cancel()
         digest_task.cancel()
         await service.close()
         store.close()
@@ -158,6 +160,16 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         await require_key(x_control_plane_key)
         message = await service.run_digest()
         return ApprovalDecisionResponse(accepted=True, message=message)
+
+    @app.post("/v1/scan")
+    async def env_scan(
+        x_control_plane_key: str = Header(default=""),
+    ) -> ApprovalDecisionResponse:
+        await require_key(x_control_plane_key)
+        differences = await service.run_env_scan()
+        if differences:
+            return ApprovalDecisionResponse(accepted=True, message="；\n".join(differences))
+        return ApprovalDecisionResponse(accepted=True, message="环境自检通过，无差异")
 
     @app.post("/v1/candidates/{candidate_id}/dismiss")
     async def dismiss_candidate(
