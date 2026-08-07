@@ -494,6 +494,85 @@ async def test_env_scan_all_healthy(tmp_path) -> None:
     store.close()
 
 
+def test_alert_is_firing(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    now = int(time.time())
+    store.upsert_alert("fp-a", "DevEnvironmentUnhealthy", "node-exporter:9100", "", "", "firing", now)
+    store.upsert_alert("fp-b", "DevEnvironmentUnhealthy", "node-exporter:9100", "", "", "resolved", now)
+    assert service._alert_is_firing("fp-a") is True
+    assert service._alert_is_firing("fp-b") is False
+    assert service._alert_is_firing("fp-none") is False
+    service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stops_when_alert_resolved(tmp_path) -> None:
+    config = replace(_config(tmp_path), notify_heartbeat_seconds=1)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    store.upsert_alert("fp-hb", "DevEnvironmentUnhealthy", "node-exporter:9100", "", "", "resolved", int(time.time()))
+    start = time.time()
+    await service._heartbeat("repair-x", start, "fp-hb")
+    assert time.time() - start < 5
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_in_progress_repair(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    task = asyncio.create_task(asyncio.sleep(1_000))
+    service._repair_tasks["fp-cancel"] = task
+    await service._cancel_in_progress_repairs("fp-cancel")
+    assert task.cancelled()
+    await service.close()
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
     config = _config(tmp_path)
