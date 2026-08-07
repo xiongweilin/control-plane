@@ -101,6 +101,11 @@ class ControlPlaneConfig:
         / "feishu-notify.ps1"
     )
     notification_enabled: bool = True
+    notify_heartbeat_seconds: int = 120
+    notify_cooldown_skip: bool = True
+    notify_ignored_noise: bool = True
+    test_alert_alertnames: tuple[str, ...] = ("AlertmanagerE2E",)
+    test_alert_instance_prefixes: tuple[str, ...] = ("smoke-",)
 
     prometheus_url: str = "http://127.0.0.1:19090"
 

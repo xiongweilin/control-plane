@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from pydantic import BaseModel
 
 from .approvals import ApprovalManager
 from .budget import Budget
 from .codex_runner import CodexRunner
 from .config import ControlPlaneConfig
+from .metrics import ControlPlaneCollector
 from .models import (
     AlertmanagerPayload,
     AlertResponse,
@@ -47,6 +48,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     notifier = Notifier(cfg)
     agent = CodexRunner(cfg)
     service = RepairService(cfg, store, budget, agent, approvals, notifier)
+    with suppress(ValueError):
+        # skip if already registered (e.g. test app created twice)
+        REGISTRY.register(ControlPlaneCollector(store, budget.remaining))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

@@ -32,17 +32,17 @@ class FakeExecutor:
     ) -> str:
         self.calls.append((args, cwd))
         joined = " ".join(args)
-        if "git rev-parse --short HEAD" in joined:
+        if "rev-parse --short HEAD" in joined:
             return "abc123"
         if "docker ps" in joined:
             return "Up 2 minutes\nUp 5 minutes"
-        if "fix/control-plane-" in joined and "git diff --stat main" in joined:
+        if "fix/control-plane-" in joined and "diff --stat main" in joined:
             return "a.txt | 1 +\n" if self.branch_exists else ""
-        if "git diff main...fix/control-plane-" in joined:
+        if "diff main...fix/control-plane-" in joined:
             return "a.txt | 1 +\n" if self.branch_exists else ""
-        if "git status --porcelain" in joined:
+        if "status --porcelain" in joined:
             return ""
-        if "git rev-parse --verify fix/control-plane-" in joined:
+        if "rev-parse --verify fix/control-plane-" in joined:
             if self.branch_exists:
                 return "abc123\n"
             raise ToolError("branch missing")
@@ -106,6 +106,87 @@ def _payload() -> AlertmanagerPayload:
 
 
 @pytest.mark.asyncio
+async def test_noise_alert_ignored(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = AlertmanagerPayload.model_validate(
+        {
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {"alertname": "AlertmanagerE2E", "instance": "am-e2e", "project": "dify"},
+                    "annotations": {},
+                    "startsAt": "2026-08-07T00:00:00Z",
+                    "endsAt": None,
+                    "fingerprint": "fp-noise-1",
+                }
+            ],
+        }
+    )
+    response = await service.ingest(payload)
+    assert response.ignored == 1
+    assert response.accepted == 0
+    assert executor.calls == []
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_smoke_instance_alert_ignored(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = AlertmanagerPayload.model_validate(
+        {
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {"alertname": "HighCPU", "instance": "smoke-node", "project": "dify"},
+                    "annotations": {},
+                    "startsAt": "2026-08-07T00:00:00Z",
+                    "endsAt": None,
+                    "fingerprint": "fp-noise-2",
+                }
+            ],
+        }
+    )
+    response = await service.ingest(payload)
+    assert response.ignored == 1
+    assert response.accepted == 0
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_repair_flow_with_approval(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
@@ -147,7 +228,7 @@ async def test_repair_flow_with_approval(tmp_path) -> None:
     assert len(candidates) == 1
     assert candidates[0]["pattern"] == "HighCPU|dify|*"
     assert store.list_actions(repair_id)[0]["tool"] == "codex_agent"
-    assert any("git merge" in " ".join(args) for args, _ in executor.calls)
+    assert any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
     await service.close()
     store.close()
 
