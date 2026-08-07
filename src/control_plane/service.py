@@ -72,6 +72,7 @@ class RepairService:
         budget_limited = 0
         paused = 0
         ignored = 0
+        pending = 0
         for alert in payload.alerts:
             decision = await self._ingest_alert(alert)
             accepted += decision.get("accepted", 0)
@@ -80,6 +81,7 @@ class RepairService:
             budget_limited += decision.get("budget_limited", 0)
             paused += decision.get("paused", 0)
             ignored += decision.get("ignored", 0)
+            pending += decision.get("pending", 0)
         return AlertResponse(
             accepted=accepted,
             deduplicated=deduplicated,
@@ -87,6 +89,7 @@ class RepairService:
             budget_limited=budget_limited,
             paused=paused,
             ignored=ignored,
+            pending=pending,
         )
 
     async def _ingest_alert(self, alert: Alert) -> dict[str, int]:
@@ -99,11 +102,16 @@ class RepairService:
 
         if alert.status == "resolved":
             self.store.mark_alert_resolved(fingerprint, int(alert.ends_at.timestamp()) if alert.ends_at else None)
+            self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
             await self._notify("info", f"告警已恢复：{alertname}", self._describe(alert))
             return {"deduplicated": 1}
 
         known = self.store.get_alert(fingerprint)
         self.store.upsert_alert(fingerprint, alertname, instance, project, container, "firing", starts_at)
+        self.store.set_setting(
+            f"alert_payload:{fingerprint}",
+            json.dumps(alert.model_dump(mode="json", by_alias=True), ensure_ascii=False),
+        )
 
         if self._is_noise_alert(alert):
             if known is None and self.config.notify_ignored_noise:
@@ -137,17 +145,55 @@ class RepairService:
                     self.store.set_setting(f"notified:cooldown:{fingerprint}", str(now))
                 return {"cooldown": 1}
 
+        policy = self._alert_policy(fingerprint)
+        if policy == "ignore":
+            if self._policy_notify_due(fingerprint, "ignore", ttl=6 * 3600):
+                await self._notify(
+                    "info",
+                    f"已忽略告警（策略）：{alertname}",
+                    f"{self._describe(alert)}\n如需恢复自动修复：/cp policy {fingerprint} auto",
+                )
+                self.store.set_setting(f"notified:policy:{fingerprint}:ignore", str(now))
+            return {"ignored": 1}
+        if policy == "manual":
+            pending_raw = self.store.get_setting(f"pending:{fingerprint}")
+            if pending_raw and now - int(pending_raw or 0) < 600:
+                return {"pending": 1}
+            self.store.set_setting(f"pending:{fingerprint}", str(now))
+            await self._notify(
+                "warning",
+                f"告警待决定（手动策略）：{alertname}",
+                f"{self._describe(alert)}\n"
+                f"选项：\n/cp run {fingerprint} 让模型执行\n"
+                f"/cp ignore {fingerprint} 忽略\n"
+                f"/cp policy {fingerprint} auto 恢复自动修复",
+            )
+            return {"pending": 1}
+
         attempt = 1
         if latest is not None:
-            attempt = int(latest["attempt"]) + 1
+            reset_raw = self.store.get_setting(f"attempt_reset:{fingerprint}")
+            try:
+                reset_at = int(reset_raw) if reset_raw else 0
+            except ValueError:
+                reset_at = 0
+            # 告警已恢复过则重置尝试计数
+            attempt = (
+                1 if reset_at >= int(latest["finished_at"] or 0) else int(latest["attempt"]) + 1
+            )
             if attempt > self.config.max_attempts:
                 await self._notify(
                     "critical",
                     f"告警达到最大尝试次数：{alertname}",
-                    f"{self._describe(alert)}\n已升级，不再自动重试。",
+                    f"{self._describe(alert)}\nfingerprint={fingerprint}\n已升级，不再自动重试。",
                 )
                 return {"cooldown": 1}
 
+        return await self._start_repair(alert, attempt)
+
+    async def _start_repair(self, alert: Alert, attempt: int) -> dict[str, int]:
+        fingerprint = alert_fingerprint(alert)
+        alertname = alert.labels.get("alertname", "unknown")
         if not self.budget.can_spend():
             await self._notify("warning", "Agent 调用预算已耗尽", self._describe(alert))
             return {"budget_limited": 1}
@@ -164,12 +210,149 @@ class RepairService:
         await self._notify(
             "info",
             f"开始修复：{alertname}",
-            f"repair_id={repair_id}\n{self._describe(alert)}\n今日 Agent 预算剩余：{self.budget.remaining()}{hint}",
+            f"repair_id={repair_id}\n{self._describe(alert)}\n"
+            f"今日 Agent 预算剩余：{self.budget.remaining()}{hint}\n"
+            f"选项：/cp policy {fingerprint} manual|ignore 可改为手动或忽略",
         )
         task = asyncio.create_task(self._run_repair(repair_id, fingerprint, alert))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return {"accepted": 1}
+
+    async def set_alert_policy(self, fingerprint: str, policy: str) -> str:
+        if policy not in {"auto", "manual", "ignore"}:
+            raise ValueError("policy must be auto|manual|ignore")
+        self.store.set_setting(f"policy:{fingerprint}", policy)
+        self.store.set_setting(f"pending:{fingerprint}", "")
+        await self._notify(
+            "info",
+            "告警策略已更新",
+            f"fingerprint={fingerprint}\n策略：{policy}",
+        )
+        return f"已设置 {fingerprint} 的策略为 {policy}"
+
+    async def run_manual(self, fingerprint: str) -> str:
+        raw = self.store.get_setting(f"alert_payload:{fingerprint}")
+        if not raw:
+            return f"没有可执行的告警数据：{fingerprint}"
+        try:
+            alert = Alert.model_validate(json.loads(raw))
+        except (json.JSONDecodeError, ValueError) as exc:
+            return f"告警数据无效：{exc}"
+        self.store.set_setting(f"pending:{fingerprint}", "")
+        result = await self._start_repair(alert, 1)
+        if result.get("accepted"):
+            return f"已启动修复：{fingerprint}"
+        return "未启动（预算不足或已忽略）"
+
+    async def dispatch_task(self, prompt: str, repo: str = "", project: str = "") -> tuple[str, str]:
+        prompt = prompt.strip()
+        if not prompt:
+            return "", "任务描述为空"
+        if len(prompt) > 4_000:
+            return "", "任务描述过长（最多 4000 字）"
+        if not self.budget.can_spend():
+            return "", f"Agent 调用预算已耗尽（今日剩余 0/{self.config.daily_agent_budget}）"
+        target = await self._pick_task_repo(repo, project)
+        task_id = f"task-{uuid.uuid4().hex[:12]}"
+        fingerprint = f"task:{task_id}"
+        payload_json = json.dumps(
+            {"kind": "task", "prompt": prompt, "repo": target},
+            ensure_ascii=False,
+        )
+        self.store.create_repair(task_id, fingerprint, payload_json, 1)
+        await self._notify(
+            "info",
+            "任务已接收",
+            f"task_id={task_id}\n{prompt[:500]}\n目标：{target}\n今日预算剩余：{self.budget.remaining()}",
+        )
+        task = asyncio.create_task(self._run_task(task_id, target, prompt))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task_id, f"任务已派发：{task_id}\n目标：{target}"
+
+    async def _pick_task_repo(self, repo: str, project: str) -> str:
+        if project:
+            resolved = self._resolve_project(project)
+            if resolved in self.config.allowed_auto_projects:
+                candidate = self.config.project_dirs.get(
+                    resolved, f"D:\\infrastructure\\compose\\{resolved}"
+                )
+                if await self._path_exists(candidate):
+                    return candidate
+        if repo:
+            try:
+                return resolve_repo(repo, self.config.allowed_repo_roots)
+            except ToolError:
+                pass
+        for root in self.config.allowed_repo_roots:
+            if await self._path_exists(root):
+                return root
+        return self.config.allowed_repo_roots[0]
+
+    async def _run_task(self, task_id: str, repo: str, prompt: str) -> None:
+        try:
+            self.store.set_repair_status(task_id, RepairState.PROPOSING.value)
+            await self._notify(
+                "info",
+                "任务 Agent 启动",
+                f"task_id={task_id}\n目标: {repo}\n模型: {self.config.model}",
+            )
+            branch = f"task/{task_id}"
+            task_prompt = (
+                "你是个人平台的任务 Agent，运行在完整 Codex 工具环境中。\n"
+                f"task_id: {task_id}\n工作目录: {repo}\n"
+                "用户任务：\n"
+                f"{prompt}\n\n"
+                "硬约束：\n"
+                "- 代码/配置修改必须从 main 创建分支并提交（git checkout -b <branch>；"
+                "禁止 push、禁止 force push、禁止删除 main）。\n"
+                "- 禁止不可逆操作：删除/清空数据卷或数据库（docker compose down -v、"
+                "docker volume rm、DROP/TRUNCATE、删除持久化数据）、"
+                "修改凭据/防火墙/sshd、停机或删除含持久化数据的容器。\n"
+                "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
+                "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
+            )
+            start_ts = time.time()
+            heartbeat = asyncio.create_task(self._heartbeat(task_id, start_ts))
+            try:
+                result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt=task_prompt)
+            finally:
+                heartbeat.cancel()
+            self.store.increment_agent_calls(task_id)
+            self.budget.spend()
+            if result.timed_out:
+                raise RuntimeError("任务 Agent 超时")
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    f"任务 Agent 失败（exit {result.exit_code}）: {result.stderr_tail[-1_500:]}"
+                )
+            summary = (result.last_message or "（无摘要）")[:4_000]
+            self.store.set_repair_status(
+                task_id,
+                RepairState.CLOSED.value,
+                finished_at=int(time.time()),
+                result=summary,
+            )
+            await self._notify(
+                "info",
+                "任务完成",
+                f"task_id={task_id}\n{summary}\n回滚：切回 main 并删除分支 {branch}（如已创建）",
+            )
+        except Exception as exc:
+            logger.exception("task failed: %s", task_id)
+            self.store.set_repair_status(
+                task_id,
+                RepairState.FAILED.value,
+                error=str(exc)[:2_000],
+                finished_at=int(time.time()),
+            )
+            await self._notify(
+                "critical",
+                "任务失败",
+                f"task_id={task_id}\n{exc}\n"
+                f"下一步：查看会话摘要 data/agent-sessions/{task_id}-last.md",
+            )
 
     async def _run_repair(self, repair_id: str, fingerprint: str, alert: Alert) -> None:
         async with self._semaphore:
@@ -307,8 +490,12 @@ class RepairService:
             f"git checkout -b {branch}；完成后 git add -A && git commit。禁止 push。",
             "- 禁止修改：验证器、告警规则（alert.rules.yml / prometheus.yml / alertmanager.yml）、"
             "权限、AGENTS.md、凭据、control-plane 自身代码与数据。",
-            "- 运维只允许：白名单 compose 项目（dify、feedback-analysis-agent、catalog-ops-automation）"
-            "的 docker compose restart / up -d、只读 docker 诊断、URL 探针与 PromQL 查询。",
+            "- 运维允许：对任何运行中的 Compose 项目（dify、feedback-analysis-agent、"
+            "catalog-ops-automation、observability、feishu-dify-gateway）执行 "
+            "docker compose restart / up -d、docker restart 与只读 docker 诊断；URL 探针与 PromQL 查询。",
+            "- 禁止不可逆操作：删除/清空数据卷或数据库（docker compose down -v、docker volume rm、"
+            "DROP/TRUNCATE、删除持久化数据）、docker compose down、git push --force 或删除 main/受保护分支、"
+            "修改凭据/防火墙/sshd、停止或删除含持久化数据的容器（先验证备份再做）。",
             "- 诊断优先只读；无法确认的失败不要伪装成功；不制造无意义的新告警。",
             "- 候选经验与 official playbook 只作为推理参考，不自动取得执行权限。",
         ]
@@ -603,6 +790,21 @@ class RepairService:
         except ValueError:
             return True
         return int(time.time()) - last >= self.config.cooldown_seconds
+
+    def _alert_policy(self, fingerprint: str) -> str:
+        raw = self.store.get_setting(f"policy:{fingerprint}")
+        return raw if raw in {"auto", "manual", "ignore"} else self.config.default_alert_policy
+
+    def _policy_notify_due(self, fingerprint: str, suffix: str, ttl: int) -> bool:
+        key = f"notified:policy:{fingerprint}:{suffix}"
+        raw = self.store.get_setting(key)
+        if not raw:
+            return True
+        try:
+            last = int(raw)
+        except ValueError:
+            return True
+        return int(time.time()) - last >= ttl
 
     async def _rollback(self, ctx: ToolContext, repair_id: str) -> None:
         try:
