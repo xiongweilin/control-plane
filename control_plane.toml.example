@@ -14,8 +14,8 @@ max_agent_calls_per_repair = 8
 cooldown_seconds = 600
 max_attempts = 2
 daily_agent_budget = 20
-per_repair_timeout_seconds = 600
-max_concurrent = 1
+per_repair_timeout_seconds = 900
+max_concurrent = 2
 paused = false
 
 [projects]
