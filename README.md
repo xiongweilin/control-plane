@@ -55,6 +55,7 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 /cp evidence
 /cp pause | resume
 /cp promote <candidate_id>
+/cp dismiss <candidate_id>
 /task <描述> 派发任务给 Agent 执行
 ```
 
@@ -114,3 +115,28 @@ observability、feishu-dify-gateway）执行 `docker compose restart / up -d`、
 （`docker compose down -v`、`docker volume rm`、DROP/TRUNCATE、删除持久化数据）、
 `docker compose down`、`git push --force` 或删除 main/受保护分支、修改凭据/防火墙/sshd、
 停止或删除含持久化数据的容器。
+
+## 验证器（确定性检查）
+
+修复完成后由确定性模块验证，不接受模型自述：
+
+- 容器：`docker ps` 状态必须 `Up`，`unhealthy` / `restarting` 判失败；无容器判失败。
+- 探针：HTTP 状态码需在期望集合内（默认 200/301/302/307/401），可校验响应体关键字。
+- PromQL：查询必须有结果；指定 `expected` 时所有样本值必须等于期望值。
+- 日志：按时间窗口（默认近 10 分钟、200 行）扫描致命模式（Traceback/panic/FATAL 等，可配置）。
+- Git：仅当 Agent 实际改动代码（记录 branch）才做 diff 校验；非 git 目录跳过 diff。
+
+按告警类型自动推导证据：`ServiceDown`（实例为 URL）→ 探针 + `probe_success == 1`；
+`PrometheusScrapeFailed` → `up{instance=...} == 1`；无代码/探针证据的纯运维修复
+回退到白名单项目容器基线。无任何确定性检查时判失败（minimum_evidence）。
+
+## 每日沉淀整理
+
+控制平面每日 21:30 自动运行一次沉淀整理（`POST /v1/digest` 可手动触发）：
+
+- 用模型审阅候选经验、近期证据文件与会话摘要；
+- `DROP` 的候选自动归档，`KEEP` 的候选保留；
+- 无论结果如何都会向飞书发送一次消息：有保留项时列出候选并提示
+  `/cp promote <id>` 晋升、`/cp dismiss <id>` 归档；无沉淀或无价值时发送简短确认。
+
+配置：`digest_enabled`、`digest_time`、`digest_max_candidates`。

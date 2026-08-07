@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import time
@@ -355,6 +356,133 @@ class RepairService:
                 f"下一步：查看会话摘要 data/agent-sessions/{task_id}-last.md",
             )
 
+    def dismiss_candidate(self, candidate_id: str) -> str:
+        if self.store.dismiss_candidate(candidate_id):
+            return f"候选已归档：{candidate_id}"
+        return f"候选不存在或不是 candidate 状态：{candidate_id}"
+
+    async def run_digest(self) -> str:
+        today = dt.date.today().isoformat()
+        if self.store.get_setting("digest:last_date") == today:
+            return "今日已整理过"
+        candidates = self.store.list_candidates("candidate")[: self.config.digest_max_candidates]
+        evidence_files = self._recent_files(self.config.evidence_dir, "*.json", 10)
+        sessions = self._recent_files(self.config.data_dir / "agent-sessions", "*-last.md", 5)
+        if not candidates and not evidence_files and not sessions:
+            await self._notify("info", "每日沉淀整理", "今日无沉淀记录，定时整理任务已执行。")
+            self.store.set_setting("digest:last_date", today)
+            return "无沉淀记录"
+        if not self.budget.can_spend():
+            await self._notify("warning", "沉淀整理已跳过", "Agent 调用预算已耗尽。")
+            return "预算不足，跳过整理"
+
+        repo = await self._pick_task_repo("", "")
+        lines = [
+            "你是控制平面的沉淀整理 Agent。审阅以下候选经验、证据文件与会话摘要，输出整理建议。",
+            f"今日日期：{today}",
+            "硬约束：只输出 KEEP/DROP 行，id 必须来自下面的候选列表；不要发明 id；不要修改任何文件。",
+            "",
+            "现有候选：",
+        ]
+        for row in candidates:
+            seq = (row["tool_sequence"] or "")[:300]
+            lines.append(
+                f"- {row['id']} | pattern={row['pattern']} | 支持次数={row['times_supported']} | seq={seq}"
+            )
+        lines.append("近期证据文件：")
+        lines.extend(f"- {path}" for path in evidence_files)
+        lines.append("近期会话摘要：")
+        lines.extend(f"- {path}" for path in sessions)
+        lines.append(
+            "输出格式：每条候选一行 `KEEP <id>: <理由>` 或 `DROP <id>: <理由>`；"
+            "最后一行给一句总体建议。"
+        )
+
+        task_id = f"digest-{today}"
+        start_ts = time.time()
+        heartbeat = asyncio.create_task(self._heartbeat(task_id, start_ts))
+        try:
+            result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt="\n".join(lines))
+        finally:
+            heartbeat.cancel()
+        self.budget.spend()
+        if result.timed_out or result.exit_code != 0:
+            await self._notify(
+                "warning",
+                "沉淀整理失败",
+                f"exit={result.exit_code}\n{result.stderr_tail[-500:]}",
+            )
+            return "整理失败"
+
+        summary = result.last_message or ""
+        candidate_ids = {row["id"] for row in candidates}
+        kept: list[str] = []
+        dropped: list[str] = []
+        for line in summary.splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2 or ":" not in parts[1]:
+                continue
+            action, rest = parts
+            candidate_id = rest.split(":", 1)[0].strip()
+            if candidate_id not in candidate_ids:
+                continue
+            if action.upper() == "KEEP" and candidate_id not in kept:
+                kept.append(candidate_id)
+            elif (
+                action.upper() == "DROP"
+                and candidate_id not in dropped
+                and self.store.dismiss_candidate(candidate_id)
+            ):
+                dropped.append(candidate_id)
+
+        kept_rows = [row for row in candidates if row["id"] in kept]
+        if kept_rows:
+            text = (
+                f"今日沉淀整理：共 {len(candidates)} 条候选，归档 {len(dropped)} 条，保留 {len(kept)} 条。\n"
+                + "\n".join(f"- {row['id']} | {row['pattern']}" for row in kept_rows)
+                + "\n回复 /cp promote <id> 晋升，/cp dismiss <id> 归档。"
+            )
+        else:
+            text = f"今日沉淀整理：共 {len(candidates)} 条候选，归档 {len(dropped)} 条，无保留项。"
+        await self._notify("info", "每日沉淀整理结果", text)
+        self.store.set_setting("digest:last_date", today)
+        return text
+
+    @staticmethod
+    def _recent_files(directory: Path, pattern: str, limit: int) -> list[str]:
+        if not directory.is_dir():
+            return []
+        return [
+            str(path)
+            for path in sorted(
+                directory.glob(pattern),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:limit]
+        ]
+
+    async def digest_loop(self) -> None:
+        if not self.config.digest_enabled:
+            return
+        while True:
+            await self._sleep_until_digest_time()
+            try:
+                await self.run_digest()
+            except Exception:
+                logger.exception("daily digest failed")
+            await asyncio.sleep(86_400)
+
+    async def _sleep_until_digest_time(self) -> None:
+        try:
+            hour, minute = (int(part) for part in self.config.digest_time.split(":", 1))
+        except (ValueError, AttributeError):
+            hour, minute = 21, 30
+        now = dt.datetime.now().astimezone()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += dt.timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+
     async def _run_repair(self, repair_id: str, fingerprint: str, alert: Alert) -> None:
         async with self._semaphore:
             ctx = ToolContext(
@@ -686,9 +814,28 @@ class RepairService:
             "error_log_targets": [],
         }
 
-        # 语义证据：告警实例本身是 URL 时直接探测（ServiceDown 等）
+        # 语义证据：按告警类型推导确定性检查
+        alertname = alert.labels.get("alertname", "")
         instance = alert.labels.get("instance", "")
-        if instance.startswith(("http://", "https://")):
+        if alertname == "ServiceDown" and instance.startswith(("http://", "https://")):
+            try:
+                validate_url(instance, self.config.allowed_url_origins)
+                tool_results["probe_urls"].append(
+                    {"url": instance, "expected": [200, 301, 302, 307, 401]}
+                )
+                if alert.labels.get("job") == "blackbox":
+                    tool_results["promql"][f"probe_success:{instance}"] = {
+                        "query": f'probe_success{{instance="{instance}"}}',
+                        "expected": 1,
+                    }
+            except ToolError:
+                pass
+        elif alertname == "PrometheusScrapeFailed" and ":" in instance:
+            tool_results["promql"][f"up:{instance}"] = {
+                "query": f'up{{instance="{instance}"}}',
+                "expected": 1,
+            }
+        elif instance.startswith(("http://", "https://")):
             try:
                 validate_url(instance, self.config.allowed_url_origins)
                 tool_results["probe_urls"].append(instance)
@@ -727,19 +874,31 @@ class RepairService:
                         "--filter",
                         f"label=com.docker.compose.project={project}",
                         "--format",
-                        "{{.Status}}",
+                        "{{.Names}}\t{{.Status}}",
                     ]
                 )
             except ToolError as exc:
                 failures.append(f"{project}: {exc}")
                 continue
-            if not any(line.startswith("Up") for line in output.splitlines()):
+            lines = [line for line in output.splitlines() if line.strip()]
+            if not lines:
                 failures.append(f"{project}: no running containers")
+                continue
+            for line in lines:
+                status = line.split("\t")[-1]
+                if not status.startswith("Up"):
+                    failures.append(f"{project}: container not up ({status})")
+                elif "unhealthy" in status or "restarting" in status:
+                    failures.append(f"{project}: container unhealthy/restarting ({status})")
         if failures:
             return False, "; ".join(failures), "container_status"
         return True, "all target containers running", "container_status"
 
-    async def _check_promql(self, query: str) -> tuple[bool, str, str]:
+    async def _check_promql(
+        self,
+        query: str,
+        expected: float | None = None,
+    ) -> tuple[bool, str, str]:
         try:
             response = await self.http.get(
                 f"{self.config.prometheus_url}/api/v1/query",
@@ -753,9 +912,22 @@ class RepairService:
             return False, f"promql error: {exc}", "promql"
         if not results:
             return False, f"no result for query: {query}", "promql"
+        if expected is not None:
+            for result in results:
+                try:
+                    value = float(result["value"][1])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    return False, f"invalid sample for query: {query}", "promql"
+                if abs(value - expected) > 1e-9:
+                    return False, f"value {value} != expected {expected} ({query})", "promql"
         return True, "query returned results", "promql"
 
-    async def _check_logs(self, target: str) -> tuple[bool, str, str]:
+    async def _check_logs(
+        self,
+        target: str,
+        since_minutes: int = 10,
+        patterns: tuple[str, ...] = ("Traceback", "panic:", "FATAL"),
+    ) -> tuple[bool, str, str]:
         if ":" not in target:
             return True, "no log target", "logs"
         project, service = target.split(":", 1)
@@ -764,8 +936,10 @@ class RepairService:
                 [
                     "docker",
                     "logs",
+                    "--since",
+                    f"{since_minutes}m",
                     "--tail",
-                    "50",
+                    "200",
                     "--format",
                     "{{.Name}}\t{{.Message}}",
                     "--filter",
@@ -776,7 +950,7 @@ class RepairService:
             )
         except ToolError as exc:
             return False, f"log fetch failed: {exc}", "logs"
-        for pattern in ("Traceback", "panic:", "FATAL"):
+        for pattern in patterns:
             if pattern in output:
                 return False, f"log contains {pattern}", "logs"
         return True, "no fatal patterns in recent logs", "logs"

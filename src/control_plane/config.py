@@ -111,6 +111,9 @@ class ControlPlaneConfig:
     notify_ignored_noise: bool = True
     test_alert_alertnames: tuple[str, ...] = ("AlertmanagerE2E",)
     test_alert_instance_prefixes: tuple[str, ...] = ("smoke-",)
+    digest_enabled: bool = True
+    digest_time: str = "21:30"
+    digest_max_candidates: int = 20
 
     prometheus_url: str = "http://127.0.0.1:19090"
 
