@@ -37,7 +37,7 @@ uv run python -m control_plane
 控制平面启动的是原生 `codex.exe`（npm 包内 `@openai/codex-win32-x64`）：
 
 ```text
-codex exec -m deepseek/deepseek-v4-flash -C <项目 Windows 路径>
+codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
   --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
   --json -o <会话摘要> -
 ```
@@ -52,6 +52,23 @@ codex exec -m deepseek/deepseek-v4-flash -C <项目 Windows 路径>
 /cp pause | resume
 /cp promote <candidate_id>
 ```
+
+## 交互体验
+
+修复生命周期通过飞书分阶段通知，减少“静默等待”：
+
+- 开始修复：repair_id、告警描述、今日 Agent 预算剩余；已知模式会提示已支持次数。
+- Agent 启动：目标仓库 / 分支 / 模型；运行中默认每 120 秒发一次心跳。
+- 验证通过 → 修复完成（验证摘要 + 回滚命令）；失败则说明原因与下一步指引。
+- 噪音分级：测试/烟雾告警（AlertmanagerE2E、smoke-* 等）只记录不触发修复；
+  冷却期跳过会提示剩余时间；候选再次复现提示“已知模式第 N 次”。
+- 审批：代码变更后等待 `/cp approve|reject|rollback`，或直接调用
+  `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
+- 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
+  已接入 Prometheus 与 Metratio Overview 看板。
+
+相关配置：`notify_heartbeat_seconds`、`notify_cooldown_skip`、
+`notify_ignored_noise`、`test_alert_alertnames`、`test_alert_instance_prefixes`。
 
 ## 部署
 

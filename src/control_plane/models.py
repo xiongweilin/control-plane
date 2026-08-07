@@ -34,6 +34,7 @@ class AlertResponse(BaseModel):
     cooldown: int
     budget_limited: int
     paused: int = 0
+    ignored: int = 0
 
 
 class ApprovalDecisionRequest(BaseModel):
