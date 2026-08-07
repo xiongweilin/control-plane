@@ -42,7 +42,7 @@ codex exec -m deepseek/deepseek-v4-flash -C <项目 Windows 路径>
   --json -o <会话摘要> -
 ```
 
-工作目录是 WSL 路径时自动转换为 `\\wsl.localhost\Ubuntu-22.04\...` 或 `D:\...`。控制平面是权威边界：它注入硬约束、独立验证结果、把关代码合并审批并执行回滚；`--dangerously-bypass-approvals-and-sandbox` 只让会话在控制平面内部自动执行，不绕过控制平面自身的门禁。
+工作目录使用 Windows 原生路径（WSL 已于 2026-08-07 退役）。控制平面是权威边界：它注入硬约束、独立验证结果、把关代码合并审批并执行回滚；`--dangerously-bypass-approvals-and-sandbox` 只让会话在控制平面内部自动执行，不绕过控制平面自身的门禁。
 
 ## 飞书命令
 

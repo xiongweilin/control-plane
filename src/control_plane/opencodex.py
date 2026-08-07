@@ -26,7 +26,7 @@ class AgentResult:
 
 
 class OpenCodexClient:
-    """Minimal Responses API client for deepseek-v4-flash through the local OpenCodex proxy."""
+    """Minimal Responses API client for deepseek-v4-flash through the local OpenCodex proxy (OpenCode Go upstream)."""
 
     def __init__(
         self,

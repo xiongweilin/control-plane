@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass
 
 from .config import ControlPlaneConfig
@@ -10,14 +9,9 @@ from .config import ControlPlaneConfig
 logger = logging.getLogger(__name__)
 
 
-def wsl_path_to_windows(path: str, wsl_distro: str = "Ubuntu-22.04") -> str:
-    """Convert a WSL path to a Windows-accessible path for native executables."""
-    drive = re.match(r"^/mnt/([a-zA-Z])/(.*)$", path)
-    if drive:
-        return f"{drive.group(1).upper()}:\\{drive.group(2).replace('/', '\\')}"
-    if path.startswith("/"):
-        return f"\\\\wsl.localhost\\{wsl_distro}\\{path.lstrip('/').replace('/', '\\')}"
-    return path
+def repo_path_to_windows(path: str) -> str:
+    """Normalize a repo path for native Windows executables (WSL retired 2026-08-07)."""
+    return path.replace("/", "\\")
 
 
 @dataclass(slots=True)
@@ -51,7 +45,7 @@ class CodexRunner:
         session_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = session_dir / f"{repair_id}.jsonl"
         last_path = session_dir / f"{repair_id}-last.md"
-        windows_repo = wsl_path_to_windows(repo, self.config.wsl_distro)
+        windows_repo = repo_path_to_windows(repo)
         args = [
             str(self.config.codex_cli),
             "exec",

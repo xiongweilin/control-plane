@@ -12,8 +12,8 @@ def test_validate_url_origin() -> None:
 
 
 def test_resolve_repo_allowed_and_denied() -> None:
-    allowed = ("/srv/stack", "/mnt/d/download/agent")
-    assert resolve_repo("/srv/stack/dify", allowed) == "/srv/stack/dify"
-    assert resolve_repo("D:\\download\\agent\\control-plane", allowed) == "/mnt/d/download/agent/control-plane"
+    allowed = ("D:\\infrastructure\\compose", "D:\\download\\agent")
+    assert resolve_repo("D:\\infrastructure\\compose\\dify", allowed) == "D:/infrastructure/compose/dify"
+    assert resolve_repo("D:/download/agent/control-plane", allowed) == "D:/download/agent/control-plane"
     with pytest.raises(ToolError):
-        resolve_repo("/etc/ssh", allowed)
+        resolve_repo("C:\\Windows\\System32", allowed)

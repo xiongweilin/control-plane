@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import re
-import shlex
 import urllib.parse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -71,7 +69,7 @@ def container_status_args(project: str) -> list[str]:
 
 
 class CommandExecutor:
-    """Thin wrapper around wsl.exe; commands are built from validated identifiers only."""
+    """Runs native Windows commands (Docker Desktop, git) directly; WSL retired 2026-08-07."""
 
     def __init__(self, config: ControlPlaneConfig) -> None:
         self.config = config
@@ -84,21 +82,9 @@ class CommandExecutor:
         timeout: int = 60,
         input_text: str | None = None,
     ) -> str:
-        base = [
-            "wsl.exe",
-            "-d",
-            self.config.wsl_distro,
-            "-u",
-            self.config.wsl_user,
-        ]
-        if cwd is None:
-            command = base + ["--exec"] + args
-        else:
-            quoted_args = " ".join(shlex.quote(str(arg)) for arg in args)
-            script = f"cd {shlex.quote(cwd)} && {quoted_args}"
-            command = base + ["--", "bash", "-lc", script]
         proc = await asyncio.create_subprocess_exec(
-            *command,
+            *args,
+            cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
@@ -134,13 +120,9 @@ def validate_url(value: str, allowed_origins: tuple[str, ...]) -> str:
 
 
 def resolve_repo(value: str, allowed_roots: tuple[str, ...]) -> str:
-    raw = value.replace("\\", "/").rstrip("/")
-    normalized = raw
-    drive = re.match(r"^([A-Za-z]):/(.*)$", raw)
-    if drive:
-        letter = drive.group(1).lower()
-        normalized = f"/mnt/{letter}/{drive.group(2)}"
-    if not any(normalized.startswith(root.rstrip("/")) for root in allowed_roots):
+    normalized = value.replace("\\", "/").rstrip("/")
+    allowed = tuple(root.replace("\\", "/").rstrip("/") for root in allowed_roots)
+    if not any(normalized == root or normalized.startswith(root + "/") for root in allowed):
         raise ToolError(f"Repository path not allowed: {value}")
     return normalized
 
@@ -155,7 +137,7 @@ async def _probe(http: httpx.AsyncClient, url: str, timeout: int = 20) -> tuple[
     return False, f"HTTP {response.status_code}"
 
 
-async def _wsl_read(ctx: ToolContext, args: list[str], cwd: str | None = None) -> str:
+async def _run_cmd(ctx: ToolContext, args: list[str], cwd: str | None = None) -> str:
     return await ctx.executor.run(args, cwd=cwd)
 
 
@@ -163,7 +145,7 @@ async def _container_status_tool(ctx: ToolContext, arguments: dict[str, Any]) ->
     project = validate_identifier(str(arguments.get("project", "")), "project")
     if project not in ctx.config.allowed_auto_projects:
         raise ToolError(f"Project not allowed for inspection: {project}")
-    output = await _wsl_read(
+    output = await _run_cmd(
         ctx,
         container_status_args(project),
     )
@@ -176,7 +158,7 @@ async def _read_logs_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolRe
         raise ToolError(f"Project not allowed for logs: {project}")
     service = validate_identifier(str(arguments.get("service", "")), "service")
     lines = max(1, min(int(arguments.get("lines", 100)), 500))
-    output = await _wsl_read(
+    output = await _run_cmd(
         ctx,
         [
             "docker",
@@ -227,7 +209,7 @@ async def _promql_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResul
 
 async def _git_status_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
     repo = resolve_repo(str(arguments.get("repo", "")), ctx.config.allowed_repo_roots)
-    output = await _wsl_read(ctx, ["git", "-C", repo, "status", "--short", "--branch"])
+    output = await _run_cmd(ctx, ["git", "-C", repo, "status", "--short", "--branch"])
     return ToolResult(output=output or "(clean)", target_kind="inspection")
 
 
@@ -236,16 +218,16 @@ async def _restart_service_tool(ctx: ToolContext, arguments: dict[str, Any]) -> 
     if project not in ctx.config.allowed_auto_projects:
         raise ToolError(f"Project not allowed for restart: {project}")
     service = validate_identifier(str(arguments.get("service", "")), "service")
-    project_dir = ctx.config.project_dirs.get(project, f"/srv/stack/{project}")
-    before = await _wsl_read(
+    project_dir = ctx.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
+    before = await _run_cmd(
         ctx,
         container_status_args(project),
     )
     if service:
-        await _wsl_read(ctx, ["docker", "compose", "restart", service], cwd=str(project_dir), timeout=180)
+        await _run_cmd(ctx, ["docker", "compose", "restart", service], cwd=str(project_dir), timeout=180)
     else:
-        await _wsl_read(ctx, ["docker", "compose", "restart"], cwd=str(project_dir), timeout=180)
-    after = await _wsl_read(
+        await _run_cmd(ctx, ["docker", "compose", "restart"], cwd=str(project_dir), timeout=180)
+    after = await _run_cmd(
         ctx,
         container_status_args(project),
     )
@@ -261,13 +243,13 @@ async def _compose_up_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolR
     project = validate_identifier(str(arguments.get("project", "")), "project")
     if project not in ctx.config.allowed_auto_projects:
         raise ToolError(f"Project not allowed for compose up: {project}")
-    project_dir = ctx.config.project_dirs.get(project, f"/srv/stack/{project}")
-    before = await _wsl_read(
+    project_dir = ctx.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
+    before = await _run_cmd(
         ctx,
         container_status_args(project),
     )
-    await _wsl_read(ctx, ["docker", "compose", "up", "-d"], cwd=str(project_dir), timeout=300)
-    after = await _wsl_read(
+    await _run_cmd(ctx, ["docker", "compose", "up", "-d"], cwd=str(project_dir), timeout=300)
+    after = await _run_cmd(
         ctx,
         container_status_args(project),
     )
@@ -297,7 +279,7 @@ async def _cleanup_docker_tool(ctx: ToolContext, arguments: dict[str, Any]) -> T
     if mode not in {"builder", "images"}:
         raise ToolError(f"Unsupported cleanup mode: {mode}")
     dry_run = bool(arguments.get("dry_run", True))
-    system_df = await _wsl_read(ctx, ["docker", "system", "df", "--format", "{{json .}}"])
+    system_df = await _run_cmd(ctx, ["docker", "system", "df", "--format", "{{json .}}"])
     reclaimable_gb = 0.0
     try:
         data = json.loads(system_df)
@@ -319,7 +301,7 @@ async def _cleanup_docker_tool(ctx: ToolContext, arguments: dict[str, Any]) -> T
             target_kind="maintenance",
         )
     command = ["docker", "builder", "prune", "-f"] if mode == "builder" else ["docker", "image", "prune", "-f"]
-    await _wsl_read(ctx, command, timeout=600)
+    await _run_cmd(ctx, command, timeout=600)
     return ToolResult(
         output=f"Pruned {mode}",
         before={"reclaimable_gb": reclaimable_gb},
@@ -337,17 +319,15 @@ async def _stage_code_candidate_tool(ctx: ToolContext, arguments: dict[str, Any]
     if not patch:
         raise ToolError("Missing patch")
     branch = f"fix/control-plane-{ctx.repair_id}"
-    patch_b64 = base64.b64encode(patch.encode("utf-8")).decode("ascii")
-    script = (
-        f"echo {patch_b64} | base64 -d > /tmp/cp-{ctx.repair_id}.patch && "
-        f"cd {shlex.quote(repo)} && "
-        f"git checkout -B {shlex.quote(branch)} && "
-        f"git apply --check /tmp/cp-{ctx.repair_id}.patch && "
-        f"git apply /tmp/cp-{ctx.repair_id}.patch && "
-        f"git add -A && git commit -m {shlex.quote(f'control-plane: {summary}')} && "
-        f"git rev-parse HEAD"
-    )
-    output = await ctx.executor.run(["bash", "-lc", script], timeout=300)
+    patch_path = ctx.config.patch_dir / f"cp-{ctx.repair_id}.patch"
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(patch, encoding="utf-8")
+    await ctx.executor.run(["git", "checkout", "-B", branch], cwd=repo, timeout=60)
+    await ctx.executor.run(["git", "apply", "--check", str(patch_path)], cwd=repo, timeout=60)
+    await ctx.executor.run(["git", "apply", str(patch_path)], cwd=repo, timeout=60)
+    await ctx.executor.run(["git", "add", "-A"], cwd=repo, timeout=60)
+    await ctx.executor.run(["git", "commit", "-m", f"control-plane: {summary}"], cwd=repo, timeout=60)
+    output = await ctx.executor.run(["git", "rev-parse", "HEAD"], cwd=repo, timeout=30)
     return ToolResult(
         output=f"Candidate branch {branch} created: {output}",
         before={"repo": repo},

@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -270,7 +271,7 @@ class RepairService:
         resolved = self._resolve_project(project)
         if resolved in self.config.allowed_auto_projects:
             candidate = self.config.project_dirs.get(
-                resolved, f"/srv/stack/{resolved}"
+                resolved, f"D:\\infrastructure\\compose\\{resolved}"
             )
             if await self._path_exists(candidate):
                 return candidate
@@ -291,11 +292,7 @@ class RepairService:
         return project
 
     async def _path_exists(self, path: str) -> bool:
-        try:
-            await self.executor.run(["test", "-d", path])
-            return True
-        except ToolError:
-            return False
+        return Path(path).is_dir()
 
     async def _capture_repo_state(self, repo: str) -> dict[str, str]:
         try:
@@ -547,18 +544,21 @@ class RepairService:
                 repo = row["target"]
                 branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
                 try:
-                    script = (
-                        f"cd {repo} && git checkout -q main && "
-                        f"git branch -D {branch} 2>/dev/null || true"
-                    )
-                    await self.executor.run(["bash", "-lc", script], timeout=120)
+                    for git_args in (
+                        ["git", "-C", repo, "checkout", "-q", "main"],
+                        ["git", "-C", repo, "branch", "-D", branch],
+                    ):
+                        try:
+                            await self.executor.run(git_args, timeout=120)
+                        except ToolError:
+                            logger.warning("candidate branch cleanup step failed for %s", row["id"])
                 except ToolError:
                     logger.warning("candidate branch cleanup failed for %s", row["id"])
         resolved_project = self._resolve_project(project)
         if resolved_project in self.config.allowed_auto_projects:
             try:
                 project_dir = self.config.project_dirs.get(
-                    resolved_project, f"/srv/stack/{resolved_project}"
+                    resolved_project, f"D:\\infrastructure\\compose\\{resolved_project}"
                 )
                 await self.executor.run(
                     ["docker", "compose", "restart"],
