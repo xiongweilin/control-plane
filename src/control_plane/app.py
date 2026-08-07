@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -78,7 +79,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not store.get_setting("usage_hint_sent"):
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")
+        digest_task = asyncio.create_task(service.digest_loop())
         yield
+        digest_task.cancel()
         await service.close()
         store.close()
 
@@ -147,6 +150,30 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         await require_key(x_control_plane_key)
         task_id, message = await service.dispatch_task(body.prompt, body.repo, body.project)
         return TaskDispatchResponse(task_id=task_id, message=message)
+
+    @app.post("/v1/digest")
+    async def run_digest(
+        x_control_plane_key: str = Header(default=""),
+    ) -> ApprovalDecisionResponse:
+        await require_key(x_control_plane_key)
+        message = await service.run_digest()
+        return ApprovalDecisionResponse(accepted=True, message=message)
+
+    @app.post("/v1/candidates/{candidate_id}/dismiss")
+    async def dismiss_candidate(
+        candidate_id: str,
+        body: PromoteRequest,
+        x_control_plane_key: str = Header(default=""),
+    ) -> ApprovalDecisionResponse:
+        await require_key(x_control_plane_key)
+        message = service.dismiss_candidate(candidate_id)
+        if message.startswith("候选已归档"):
+            await notifier.notify(
+                "info",
+                "候选已归档",
+                f"candidate_id={candidate_id}\ndecided_by={body.decided_by or 'unknown'}",
+            )
+        return ApprovalDecisionResponse(accepted=True, message=message)
 
     @app.get("/v1/evidence")
     async def evidence_view(x_control_plane_key: str = Header(default="")) -> dict[str, Any]:

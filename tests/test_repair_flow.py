@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 
 import httpx
@@ -64,6 +65,20 @@ class FakeExecutorNoGit(FakeExecutor):
         return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
 
 
+class FakeExecutorUnhealthy(FakeExecutor):
+    async def run(
+        self,
+        args: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: int = 60,
+        input_text: str | None = None,
+    ) -> str:
+        if "docker ps" in " ".join(args):
+            return "grafana\tUp 2 minutes (unhealthy)"
+        return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
+
+
 class FakeCodexRunner:
     def __init__(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
@@ -80,6 +95,26 @@ class FakeCodexRunner:
         return CodexSessionResult(
             exit_code=self.exit_code,
             last_message=f"fixed {repair_id}",
+        )
+
+
+class FakeCodexRunnerWithSummary(FakeCodexRunner):
+    def __init__(self, summary: str = "KEEP cand-1: 有价值\nDROP cand-2: 无价值") -> None:
+        super().__init__(exit_code=0)
+        self.summary = summary
+
+    async def run_task(
+        self,
+        *,
+        repair_id: str,
+        repo: str,
+        prompt: str,
+    ) -> CodexSessionResult:
+        return CodexSessionResult(
+            exit_code=0,
+            last_message=self.summary,
+            timed_out=False,
+            stderr_tail="",
         )
 
 
@@ -392,6 +427,132 @@ async def test_git_check_skips_non_git_repo(tmp_path) -> None:
     assert ok is True
     assert "skipping" in message
     assert kind == "git"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutorUnhealthy()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    ok, message, kind = await service._check_containers(["observability"])
+    assert ok is False
+    assert "unhealthy" in message
+    assert kind == "container_status"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_check_promql_expected_mismatch(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "vector",
+                        "result": [{"metric": {}, "value": [0, "0"]}],
+                    },
+                },
+            )
+        )
+    )
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    ok, message, kind = await service._check_promql('up{instance="x"}', expected=1)
+    assert ok is False
+    assert "!= expected 1" in message
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_digest_no_records(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    message = await service.run_digest()
+    assert message == "无沉淀记录"
+    assert store.get_setting("digest:last_date") != ""
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_digest_drops_candidate(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor()
+    agent = FakeCodexRunnerWithSummary("DROP cand-x: 无价值，重复且无证据\nKEEP cand-y: 有真实证据")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    now = int(time.time())
+    store.create_candidate(
+        "cand-x", "ServiceDown|*|*", "control-plane", "[]", "probe", "candidate",
+        now + 86400 * 90, "archive", "", "env change", "repair-1",
+    )
+    store.create_candidate(
+        "cand-y", "HighCPU|*|*", "control-plane", "[]", "probe", "candidate",
+        now + 86400 * 90, "archive", "", "env change", "repair-2",
+    )
+    message = await service.run_digest()
+    assert "归档 1 条" in message
+    assert "cand-y" in message
+    statuses = {row["id"]: row["status"] for row in store.list_candidates()}
+    assert statuses["cand-x"] == "archived"
+    assert statuses["cand-y"] == "candidate"
     await service.close()
     store.close()
 
