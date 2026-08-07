@@ -1003,9 +1003,10 @@ class RepairService:
         elif not tool_results["probe_urls"] and not tool_results["promql"] and not tool_results["repos"]:
             # 无代码/探针证据时，用环境容器基线作为确定性证据
             for allowed in self.config.allowed_auto_projects:
+                resolved = self._resolve_project(allowed)
                 project_dir = self.config.project_dirs.get(allowed)
                 if project_dir and await self._path_exists(project_dir):
-                    actions.append({"tool": "container_status", "target": allowed})
+                    actions.append({"tool": "container_status", "target": resolved})
         for row in self.store.list_actions(repair_id):
             after = json.loads(row["after_json"]) if row["after_json"] else {}
             if row["tool"] == "codex_agent" and after.get("branch"):

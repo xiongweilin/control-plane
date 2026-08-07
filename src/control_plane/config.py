@@ -51,8 +51,8 @@ class ControlPlaneConfig:
     cooldown_seconds: int = 600
     max_attempts: int = 2
     daily_agent_budget: int = 20
-    per_repair_timeout_seconds: int = 600
-    max_concurrent: int = 1
+    per_repair_timeout_seconds: int = 900
+    max_concurrent: int = 2
     paused: bool = False
 
     allowed_auto_projects: tuple[str, ...] = (
