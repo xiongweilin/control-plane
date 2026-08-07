@@ -767,9 +767,8 @@ class RepairService:
             return
         while True:
             await asyncio.sleep(interval)
-            if fingerprint is not None:
-                if not self._alert_is_firing(fingerprint):
-                    return
+            if fingerprint is not None and not self._alert_is_firing(fingerprint):
+                return
             elapsed = int(time.time() - start_ts)
             await self._notify(
                 "info",

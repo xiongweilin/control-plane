@@ -85,6 +85,8 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 - 验证通过 → 修复完成（验证摘要 + 回滚命令）；失败则说明原因与下一步指引。
 - 噪音分级：测试/烟雾告警（AlertmanagerE2E、smoke-* 等）只记录不触发修复；
   冷却期跳过会提示剩余时间；候选再次复现提示“已知模式第 N 次”。
+- 告警恢复：自动中断进行中修复并停止心跳（不再出现“告警已恢复仍报正在诊断”）；
+  已恢复告警不沉淀候选经验。
 - 审批：代码变更后等待 `/cp approve|reject|rollback`，或直接调用
   `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
