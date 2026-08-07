@@ -6,7 +6,7 @@ port = 18083
 
 [agent]
 opencodex_base_url = "http://127.0.0.1:10100/v1"
-model = "deepseek/deepseek-v4-flash"
+model = "opencode-go/deepseek-v4-flash"
 opencodex_timeout_seconds = 120
 max_agent_calls_per_repair = 8
 
@@ -20,7 +20,7 @@ paused = false
 
 [projects]
 allowed_auto = ["dify", "docker", "feedback-analysis-agent", "catalog-ops-automation"]
-allowed_repo_roots = ["/srv/stack", "/mnt/d/download/agent", "/mnt/d/download/ratio"]
+allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\download\\agent", "D:\\download\\ratio"]
 allowed_url_origins = [
   "http://127.0.0.1",
   "http://localhost",
@@ -31,10 +31,10 @@ allowed_url_origins = [
 ]
 
 [projects.project_dirs]
-docker = "/srv/stack/dify/docker"
-dify = "/srv/stack/dify/docker"
-feedback-analysis-agent = "/srv/stack/feishu-dify-gateway"
-catalog-ops-automation = "/srv/stack/catalog-ops-automation"
+docker = "D:\\infrastructure\\compose\\dify"
+dify = "D:\\infrastructure\\compose\\dify"
+feedback-analysis-agent = "D:\\infrastructure\\compose\\feedback-analysis-agent"
+catalog-ops-automation = "D:\\infrastructure\\compose\\catalog-ops-automation"
 
 [evidence]
 candidate_trial_days = 90

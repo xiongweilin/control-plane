@@ -32,8 +32,6 @@ class FakeExecutor:
     ) -> str:
         self.calls.append((args, cwd))
         joined = " ".join(args)
-        if joined == "test -d /srv/stack/dify":
-            return ""
         if "git rev-parse --short HEAD" in joined:
             return "abc123"
         if "docker ps" in joined:
@@ -71,6 +69,8 @@ class FakeCodexRunner:
 
 
 def _config(tmp_path) -> ControlPlaneConfig:
+    (tmp_path / "dify").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repos").mkdir(parents=True, exist_ok=True)
     return replace(
         ControlPlaneConfig(),
         api_key="test-key",
@@ -80,7 +80,8 @@ def _config(tmp_path) -> ControlPlaneConfig:
         state_db=tmp_path / "data" / "control-plane.db",
         notification_enabled=False,
         allowed_auto_projects=("dify",),
-        allowed_repo_roots=("/srv/stack",),
+        allowed_repo_roots=(str(tmp_path / "repos"),),
+        project_dirs={"dify": str(tmp_path / "dify")},
         max_agent_calls_per_repair=8,
         candidate_wip_limit=10,
     )
