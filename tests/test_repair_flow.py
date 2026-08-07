@@ -50,6 +50,20 @@ class FakeExecutor:
         return ""
 
 
+class FakeExecutorNoGit(FakeExecutor):
+    async def run(
+        self,
+        args: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: int = 60,
+        input_text: str | None = None,
+    ) -> str:
+        if "rev-parse --is-inside-work-tree" in " ".join(args):
+            raise ToolError("not a git repository")
+        return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
+
+
 class FakeCodexRunner:
     def __init__(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
@@ -352,6 +366,32 @@ async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
     assert row is not None
     assert row["status"] == "closed"
     assert row["result"]
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_git_check_skips_non_git_repo(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutorNoGit()
+    agent = FakeCodexRunner()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    ok, message, kind = await service._check_git(str(tmp_path / "norepo"), "fix/test")
+    assert ok is True
+    assert "skipping" in message
+    assert kind == "git"
     await service.close()
     store.close()
 

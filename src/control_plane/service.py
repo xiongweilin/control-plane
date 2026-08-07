@@ -27,6 +27,7 @@ from .tools import (
     ToolResult,
     _probe,
     resolve_repo,
+    validate_url,
 )
 from .verifier import Verifier
 
@@ -581,7 +582,11 @@ class RepairService:
             repo,
             "needs_approval" if changed else "ok",
             before=before,
-            after={"branch": branch, "diff_stat": diff_stat, "summary": summary[:4_000]},
+            after={
+                **({"branch": branch} if changed else {}),
+                "diff_stat": diff_stat,
+                "summary": summary[:4_000],
+            },
             output=summary[:10_000],
         )
 
@@ -680,10 +685,26 @@ class RepairService:
             "repos": [],
             "error_log_targets": [],
         }
+
+        # 语义证据：告警实例本身是 URL 时直接探测（ServiceDown 等）
+        instance = alert.labels.get("instance", "")
+        if instance.startswith(("http://", "https://")):
+            try:
+                validate_url(instance, self.config.allowed_url_origins)
+                tool_results["probe_urls"].append(instance)
+            except ToolError:
+                pass
+
         project = alert.labels.get("project", "")
         resolved_project = self._resolve_project(project)
         if resolved_project in self.config.allowed_auto_projects:
             actions.append({"tool": "container_status", "target": resolved_project})
+        elif not tool_results["probe_urls"] and not tool_results["promql"] and not tool_results["repos"]:
+            # 无代码/探针证据时，用环境容器基线作为确定性证据
+            for allowed in self.config.allowed_auto_projects:
+                project_dir = self.config.project_dirs.get(allowed)
+                if project_dir and await self._path_exists(project_dir):
+                    actions.append({"tool": "container_status", "target": allowed})
         for row in self.store.list_actions(repair_id):
             after = json.loads(row["after_json"]) if row["after_json"] else {}
             if row["tool"] == "codex_agent" and after.get("branch"):
@@ -761,6 +782,10 @@ class RepairService:
         return True, "no fatal patterns in recent logs", "logs"
 
     async def _check_git(self, repo: str, branch: str) -> tuple[bool, str, str]:
+        try:
+            await self.executor.run(["git", "-C", repo, "rev-parse", "--is-inside-work-tree"])
+        except ToolError:
+            return True, "not a git repository; skipping git diff", "git"
         try:
             diff = await self.executor.run(["git", "-C", repo, "diff", f"main...{branch}", "--stat"])
             dirty = await self.executor.run(["git", "-C", repo, "status", "--porcelain"])
