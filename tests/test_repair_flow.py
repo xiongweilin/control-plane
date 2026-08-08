@@ -522,32 +522,6 @@ def test_alert_is_firing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_stops_when_alert_resolved(tmp_path) -> None:
-    config = replace(_config(tmp_path), notify_heartbeat_seconds=1)
-    store = Store(config.state_db)
-    approvals = ApprovalManager()
-    executor = FakeExecutor()
-    agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
-    service = RepairService(
-        config,
-        store,
-        Budget(store, 100, 8),
-        agent,
-        approvals,
-        Notifier(config),
-        executor=executor,
-        http=http,
-    )
-    store.upsert_alert("fp-hb", "DevEnvironmentUnhealthy", "node-exporter:9100", "", "", "resolved", int(time.time()))
-    start = time.time()
-    await service._heartbeat("repair-x", start, "fp-hb")
-    assert time.time() - start < 5
-    await service.close()
-    store.close()
-
-
-@pytest.mark.asyncio
 async def test_cancel_in_progress_repair(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)

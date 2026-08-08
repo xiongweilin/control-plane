@@ -330,12 +330,7 @@ class RepairService:
                 "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
                 "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
             )
-            start_ts = time.time()
-            heartbeat = asyncio.create_task(self._heartbeat(task_id, start_ts))
-            try:
-                result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt=task_prompt)
-            finally:
-                heartbeat.cancel()
+            result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt=task_prompt)
             self.store.increment_agent_calls(task_id)
             self.budget.spend()
             if result.timed_out:
@@ -414,12 +409,7 @@ class RepairService:
         )
 
         task_id = f"digest-{today}"
-        start_ts = time.time()
-        heartbeat = asyncio.create_task(self._heartbeat(task_id, start_ts))
-        try:
-            result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt="\n".join(lines))
-        finally:
-            heartbeat.cancel()
+        result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt="\n".join(lines))
         self.budget.spend()
         if result.timed_out or result.exit_code != 0:
             await self._notify(
@@ -723,7 +713,6 @@ class RepairService:
         self._transition(repair_id, RepairState.PROPOSING)
         repo = await self._pick_repo(alert)
         branch = f"{self.config.codex_branch_prefix}{repair_id}"
-        fingerprint = alert_fingerprint(alert)
         await self._notify(
             "info",
             "Agent 启动",
@@ -731,16 +720,11 @@ class RepairService:
         )
         before = await self._capture_repo_state(repo)
         prompt = self._build_agent_prompt(alert, repo, repair_id, branch)
-        start_ts = time.time()
-        heartbeat = asyncio.create_task(self._heartbeat(repair_id, start_ts, fingerprint))
-        try:
-            result = await self.agent.run_task(
-                repair_id=repair_id,
-                repo=repo,
-                prompt=prompt,
-            )
-        finally:
-            heartbeat.cancel()
+        result = await self.agent.run_task(
+            repair_id=repair_id,
+            repo=repo,
+            prompt=prompt,
+        )
         self.store.increment_agent_calls(repair_id)
         self.budget.spend()
         if result.timed_out:
@@ -760,21 +744,6 @@ class RepairService:
             changed=changed,
         )
         return {"code_changed": changed, "branch": branch, "summary": result.last_message}
-
-    async def _heartbeat(self, repair_id: str, start_ts: float, fingerprint: str | None = None) -> None:
-        interval = self.config.notify_heartbeat_seconds
-        if interval <= 0:
-            return
-        while True:
-            await asyncio.sleep(interval)
-            if fingerprint is not None and not self._alert_is_firing(fingerprint):
-                return
-            elapsed = int(time.time() - start_ts)
-            await self._notify(
-                "info",
-                "修复仍在进行",
-                f"repair_id={repair_id}\n已运行 {elapsed} 秒，Agent 正在诊断/修改，请稍候。",
-            )
 
     def _build_agent_prompt(
         self,
