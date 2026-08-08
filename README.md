@@ -61,7 +61,7 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 
 飞书普通消息（非命令）会走 Dify Chatflow 对话；`/new` 开始新会话。
 `/task <描述>` 会把任务派发给控制平面的 Codex Agent（deepseek-v4-flash），
-执行过程同样推送：任务已接收 → Agent 启动 → 心跳 → 完成/失败。
+执行过程同样推送：任务已接收 → Agent 启动 → 完成/失败。
 
 告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
 `manual`（收到告警后等你决定，`/cp run` 执行或 `/cp ignore` 忽略）或 `ignore`（直接忽略）。
@@ -81,18 +81,18 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 修复生命周期通过飞书分阶段通知，减少“静默等待”：
 
 - 开始修复：repair_id、告警描述、今日 Agent 预算剩余；已知模式会提示已支持次数。
-- Agent 启动：目标仓库 / 分支 / 模型；运行中默认每 120 秒发一次心跳。
+- Agent 启动：目标仓库 / 分支 / 模型。
 - 验证通过 → 修复完成（验证摘要 + 回滚命令）；失败则说明原因与下一步指引。
 - 噪音分级：测试/烟雾告警（AlertmanagerE2E、smoke-* 等）只记录不触发修复；
   冷却期跳过会提示剩余时间；候选再次复现提示“已知模式第 N 次”。
-- 告警恢复：自动中断进行中修复并停止心跳（不再出现“告警已恢复仍报正在诊断”）；
+- 告警恢复：自动中断进行中修复（不再出现“告警已恢复仍报正在诊断”）；
   已恢复告警不沉淀候选经验。
 - 审批：代码变更后等待 `/cp approve|reject|rollback`，或直接调用
   `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
   已接入 Prometheus 与 Metratio Overview 看板。
 
-相关配置：`notify_heartbeat_seconds`、`notify_cooldown_skip`、
+相关配置：`notify_cooldown_skip`、
 `notify_ignored_noise`、`test_alert_alertnames`、`test_alert_instance_prefixes`。
 
 ## 部署

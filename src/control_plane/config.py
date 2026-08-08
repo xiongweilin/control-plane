@@ -106,7 +106,6 @@ class ControlPlaneConfig:
     )
     notification_enabled: bool = True
     default_alert_policy: str = "auto"
-    notify_heartbeat_seconds: int = 120
     notify_cooldown_skip: bool = True
     notify_ignored_noise: bool = True
     test_alert_alertnames: tuple[str, ...] = ("AlertmanagerE2E",)

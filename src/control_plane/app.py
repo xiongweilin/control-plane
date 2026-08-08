@@ -46,7 +46,7 @@ USAGE_HINT = (
     "/cp pause | resume 暂停/恢复控制平面\n"
     "/task <描述> 或直接发送任意消息：派发任务给 Agent 执行\n"
     "/status /alerts /help 网关只读状态\n"
-    "修复过程会自动推送：开始修复 → Agent 启动 → 心跳 → 验证 → 完成/失败。"
+    "修复过程会自动推送：开始修复 → Agent 启动 → 验证 → 完成/失败。"
 )
 
 
