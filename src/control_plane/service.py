@@ -373,7 +373,11 @@ class RepairService:
                     return candidate
         if repo:
             try:
-                return resolve_repo(repo, self.config.allowed_repo_roots)
+                return resolve_repo(
+                    repo,
+                    self.config.allowed_repo_roots,
+                    blocked=self.config.blocked_paths,
+                )
             except ToolError:
                 pass
         for root in self.config.allowed_repo_roots:
@@ -1115,7 +1119,11 @@ class RepairService:
         repo = alert.labels.get("repo", "")
         if repo:
             try:
-                return resolve_repo(repo, self.config.allowed_repo_roots)
+                return resolve_repo(
+                    repo,
+                    self.config.allowed_repo_roots,
+                    blocked=self.config.blocked_paths,
+                )
             except ToolError:
                 pass
         for root in self.config.allowed_repo_roots:
@@ -1411,6 +1419,7 @@ class RepairService:
                     lines.append(f"commit={commit}")
                 except ToolError:
                     pass
+                diff_stat = ""
                 try:
                     diff_stat = await self.executor.run(
                         ["git", "-C", repo, "diff", "--stat", f"main...{branch}"],
@@ -1430,6 +1439,16 @@ class RepairService:
                         lines.append(f"涉及文件: {', '.join(names)}")
                 except ToolError:
                     pass
+                if branch and self._dependency_scope_detected(diff_stat, summary):
+                    packages = await self._dependency_packages(repo, branch)
+                    info = await asyncio.to_thread(fetch_security_advisories, packages)
+                    if info.status == "ok":
+                        lines.append(
+                            f"安全公告: {len(info.advisories)} 条已知公告（{info.source}）；"
+                            f"涉及包: {', '.join(packages[:6]) or '未知'}"
+                        )
+                    else:
+                        lines.append(f"安全公告: 无法获取（{info.error}）")
             if summary:
                 lines.append(f"说明: {summary[:300]}")
         return "\n".join(lines) or "（无候选摘要）"
@@ -1641,6 +1660,7 @@ class RepairService:
             "pip",
             "依赖",
             "dependency",
+            "dependencies",
         )
         return any(marker in material for marker in markers)
 

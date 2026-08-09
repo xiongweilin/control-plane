@@ -10,6 +10,7 @@ import httpx
 import pytest
 from prometheus_client import REGISTRY
 
+from control_plane.advisories import AdvisoryInfo
 from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
@@ -60,6 +61,8 @@ class FakeExecutor:
             if self.branch_exists:
                 return "abc123"
             raise ToolError("branch missing")
+        if " show " in joined and "requirements.txt" in joined:
+            return "requests==2.31.0\nflask>=2.0\n"
         return ""
 
 
@@ -277,6 +280,113 @@ async def test_codex_runner_audits_and_writes_run_header(tmp_path) -> None:
     assert session_file.is_file()
     header = session_file.read_text(encoding="utf-8").splitlines()[0]
     assert '"run_id": "run-audit-1"' in header
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_redacts_session_before_write(tmp_path, monkeypatch) -> None:
+    config = replace(_config(tmp_path), codex_cli=Path(sys.executable))
+    store = Store(config.state_db)
+    runner = CodexRunner(config)
+    runner.attach_store(store)
+
+    class FakeProc:
+        pid = 12345
+        returncode = 0
+
+        async def communicate(self, data: bytes) -> tuple[bytes, bytes]:
+            return b'{"role": "user", "data": {"api_key": "sk-live"}}\n', b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN002, ANN003
+        return FakeProc()
+
+    monkeypatch.setattr("control_plane.codex_runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    result = await runner.run_task(
+        repair_id="repair-redact",
+        repo=str(tmp_path),
+        prompt="p",
+        run_id="run-redact",
+    )
+    assert result.exit_code == 0
+    content = (config.agent_session_dir / "repair-redact.jsonl").read_text(encoding="utf-8")
+    assert '"api_key": "***"' in content
+    assert "sk-live" not in content
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_summary_includes_dependency_advisories(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = _make_service(config, store, FakeExecutor(branch_exists=True))
+    store.create_repair("repair-ad", "fp-ad", "{}", attempt=1)
+    store.add_action(
+        "act-ad",
+        "repair-ad",
+        "codex_agent",
+        str(tmp_path / "repos"),
+        "needs_approval",
+        before={"repo": str(tmp_path / "repos"), "git_ref": "main"},
+        after={
+            "branch": "fix/control-plane-repair-ad",
+            "diff_stat": "requirements.txt | 2 +-",
+            "summary": "upgrade dependencies for CVE",
+        },
+    )
+
+    def fake_fetch(packages: list[str]) -> AdvisoryInfo:
+        return AdvisoryInfo(
+            status="ok",
+            advisories=[
+                {
+                    "ghsa_id": "GHSA-x",
+                    "summary": "vuln",
+                    "severity": "high",
+                    "package": "requests",
+                }
+            ],
+            source="github-advisories-api",
+        )
+
+    monkeypatch.setattr("control_plane.service.fetch_security_advisories", fake_fetch)
+    summary = await service._pending_review_summary("repair-ad")
+    assert "安全公告: 1 条已知公告" in summary
+    assert "requests" in summary
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_summary_advisory_unavailable_degradation(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = _make_service(config, store, FakeExecutor(branch_exists=True))
+    store.create_repair("repair-ad2", "fp-ad2", "{}", attempt=1)
+    store.add_action(
+        "act-ad2",
+        "repair-ad2",
+        "codex_agent",
+        str(tmp_path / "repos"),
+        "needs_approval",
+        before={"repo": str(tmp_path / "repos"), "git_ref": "main"},
+        after={
+            "branch": "fix/control-plane-repair-ad2",
+            "diff_stat": "pyproject.toml | 2 +-",
+            "summary": "dependency bump",
+        },
+    )
+
+    def fake_fetch_unavailable(packages: list[str]) -> AdvisoryInfo:
+        return AdvisoryInfo(
+            status="unavailable",
+            error="unable to fetch security advisories: timeout",
+            source="github-advisories-api",
+        )
+
+    monkeypatch.setattr("control_plane.service.fetch_security_advisories", fake_fetch_unavailable)
+    summary = await service._pending_review_summary("repair-ad2")
+    assert "安全公告: 无法获取" in summary
+    await service.close()
     store.close()
 
 
