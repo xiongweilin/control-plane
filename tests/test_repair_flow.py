@@ -131,6 +131,7 @@ class FakeCodexRunner:
         repair_id: str,
         repo: str,
         prompt: str,
+        run_id: str = "",
     ) -> CodexSessionResult:
         self.calls += 1
         return CodexSessionResult(
@@ -150,6 +151,7 @@ class FakeCodexRunnerWithSummary(FakeCodexRunner):
         repair_id: str,
         repo: str,
         prompt: str,
+        run_id: str = "",
     ) -> CodexSessionResult:
         return CodexSessionResult(
             exit_code=0,
@@ -170,6 +172,7 @@ class FakeTimedOutCodexRunner(FakeCodexRunner):
         repair_id: str,
         repo: str,
         prompt: str,
+        run_id: str = "",
     ) -> CodexSessionResult:
         self.calls += 1
         self.executor.current_branch = f"fix/control-plane-{repair_id}"

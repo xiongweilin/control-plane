@@ -41,6 +41,12 @@ class Store:
                     status TEXT NOT NULL,
                     attempt INTEGER NOT NULL DEFAULT 1,
                     agent_call_count INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT NOT NULL DEFAULT '',
+                    lease_expires_at INTEGER,
+                    error_class TEXT NOT NULL DEFAULT '',
+                    original_error TEXT NOT NULL DEFAULT '',
+                    recovery_error TEXT NOT NULL DEFAULT '',
+                    timeout_kind TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     finished_at INTEGER,
@@ -103,12 +109,63 @@ class Store:
                     calls INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS run_records (
+                    run_id TEXT PRIMARY KEY,
+                    pid INTEGER NOT NULL,
+                    hostname TEXT NOT NULL DEFAULT '',
+                    python_version TEXT NOT NULL DEFAULT '',
+                    started_at INTEGER NOT NULL,
+                    stopped_at INTEGER,
+                    status TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS command_audit (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    repair_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    argv_json TEXT NOT NULL,
+                    exit_code INTEGER,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    truncated INTEGER NOT NULL DEFAULT 0,
+                    error_class TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_repair ON command_audit(repair_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_run ON command_audit(run_id);
+
+                CREATE TABLE IF NOT EXISTS leases (
+                    fingerprint TEXT PRIMARY KEY,
+                    owner_run_id TEXT NOT NULL,
+                    repair_id TEXT NOT NULL,
+                    acquired_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
                 """
             )
+        self._ensure_column("repairs", "lease_owner", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("repairs", "lease_expires_at", "INTEGER")
+        self._ensure_column("repairs", "error_class", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("repairs", "original_error", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("repairs", "recovery_error", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("repairs", "timeout_kind", "TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        """Add a column to an existing table when it is missing (SQLite has no IF NOT EXISTS)."""
+        with self._lock:
+            existing = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({table})")  # noqa: S608
+            }
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"  # noqa: S608
+                )
 
     # ---- alerts ----
 
@@ -187,7 +244,19 @@ class Store:
             ).fetchone()
 
     def set_repair_status(self, repair_id: str, status: str, **fields: Any) -> None:
-        allowed = {"attempt", "agent_call_count", "result", "error", "finished_at"}
+        allowed = {
+            "attempt",
+            "agent_call_count",
+            "result",
+            "error",
+            "finished_at",
+            "lease_owner",
+            "lease_expires_at",
+            "error_class",
+            "original_error",
+            "recovery_error",
+            "timeout_kind",
+        }
         columns = ["status=?", "updated_at=?"]
         values: list[Any] = [status, int(time.time())]
         for key, value in fields.items():
@@ -464,6 +533,169 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    # ---- run records (stable run id) ----
+
+    def start_run_record(
+        self,
+        run_id: str,
+        pid: int,
+        hostname: str,
+        python_version: str,
+    ) -> None:
+        with self._lock:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO run_records(run_id, pid, hostname, python_version, "
+                "started_at, status) VALUES (?, ?, ?, ?, ?, 'running')",
+                (run_id, pid, hostname, python_version, int(time.time())),
+            )
+
+    def stop_run_record(self, run_id: str) -> None:
+        with self._lock:
+            self._connection.execute(
+                "UPDATE run_records SET status='stopped', stopped_at=? WHERE run_id=?",
+                (int(time.time()), run_id),
+            )
+
+    def get_run_record(self, run_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self._connection.execute(
+                "SELECT * FROM run_records WHERE run_id=?", (run_id,)
+            ).fetchone()
+
+    def list_run_records(self, limit: int = 20) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(
+                self._connection.execute(
+                    "SELECT * FROM run_records ORDER BY started_at DESC LIMIT ?", (limit,)
+                )
+            )
+
+    # ---- command audit (redacted) ----
+
+    def add_audit_entry(
+        self,
+        audit_id: str,
+        *,
+        run_id: str,
+        repair_id: str,
+        kind: str,
+        argv_json: str,
+        exit_code: int | None,
+        duration_ms: int,
+        truncated: bool = False,
+        error_class: str = "",
+    ) -> None:
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO command_audit(id, run_id, repair_id, kind, argv_json, exit_code, "
+                "duration_ms, truncated, error_class, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    audit_id,
+                    run_id,
+                    repair_id,
+                    kind,
+                    argv_json[:8_000],
+                    exit_code,
+                    duration_ms,
+                    1 if truncated else 0,
+                    error_class,
+                    int(time.time()),
+                ),
+            )
+
+    def list_audit(self, repair_id: str = "", limit: int = 200) -> list[sqlite3.Row]:
+        with self._lock:
+            if repair_id:
+                return list(
+                    self._connection.execute(
+                        "SELECT * FROM command_audit WHERE repair_id=? "
+                        "ORDER BY created_at DESC LIMIT ?",
+                        (repair_id, limit),
+                    )
+                )
+            return list(
+                self._connection.execute(
+                    "SELECT * FROM command_audit ORDER BY created_at DESC LIMIT ?", (limit,)
+                )
+            )
+
+    # ---- mutual-exclusion leases (multi-instance guard) ----
+
+    def acquire_lease(
+        self,
+        fingerprint: str,
+        owner_run_id: str,
+        repair_id: str,
+        ttl_seconds: int,
+    ) -> bool:
+        now = int(time.time())
+        with self._lock:
+            existing = self._connection.execute(
+                "SELECT owner_run_id, repair_id FROM leases WHERE fingerprint=? AND expires_at > ?",
+                (fingerprint, now),
+            ).fetchone()
+            if existing is not None:
+                return False
+            self._connection.execute(
+                "INSERT OR REPLACE INTO leases(fingerprint, owner_run_id, repair_id, "
+                "acquired_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (fingerprint, owner_run_id, repair_id, now, now + ttl_seconds),
+            )
+            self._connection.execute(
+                "UPDATE repairs SET lease_owner=?, lease_expires_at=? WHERE id=?",
+                (owner_run_id, now + ttl_seconds, repair_id),
+            )
+            return True
+
+    def renew_lease(self, fingerprint: str, owner_run_id: str, ttl_seconds: int) -> bool:
+        now = int(time.time())
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE leases SET expires_at=? WHERE fingerprint=? AND owner_run_id=?",
+                (now + ttl_seconds, fingerprint, owner_run_id),
+            )
+            return cursor.rowcount == 1
+
+    def release_lease(self, fingerprint: str, owner_run_id: str) -> None:
+        with self._lock:
+            self._connection.execute(
+                "DELETE FROM leases WHERE fingerprint=? AND owner_run_id=?",
+                (fingerprint, owner_run_id),
+            )
+
+    def get_lease_owner(self, fingerprint: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self._connection.execute(
+                "SELECT * FROM leases WHERE fingerprint=?", (fingerprint,)
+            ).fetchone()
+
+    # ---- restart recovery ----
+
+    def list_repairs_in_states(self, statuses: tuple[str, ...], limit: int = 200) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in statuses)
+        with self._lock:
+            return list(
+                self._connection.execute(
+                    f"SELECT * FROM repairs WHERE status IN ({placeholders}) "  # noqa: S608
+                    "ORDER BY updated_at ASC LIMIT ?",
+                    (*statuses, limit),
+                )
+            )
+
+    def check_writable(self) -> bool:
+        """Probe that the SQLite database accepts writes (used by /ready)."""
+        try:
+            with self._lock:
+                self._connection.execute(
+                    "INSERT INTO settings(key, value) VALUES ('health:last_ready', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(int(time.time())),),
+                )
+            return True
+        except sqlite3.Error:
+            return False
 
     def close(self) -> None:
         with self._lock:
