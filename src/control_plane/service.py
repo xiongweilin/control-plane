@@ -44,6 +44,8 @@ from .verifier import Verifier
 
 logger = logging.getLogger(__name__)
 
+HTTP_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
 recovery_retry_failed = Counter(
     "control_plane_recovery_retry_failed_total",
     "Repairs that failed after a previously verified recovery of the same alert",
@@ -78,7 +80,7 @@ class RepairService:
         self.approvals = approvals
         self.notifier = notifier
         self.executor = executor or CommandExecutor(config)
-        self.http = http or httpx.AsyncClient(timeout=30)
+        self.http = http or httpx.AsyncClient(timeout=30, limits=HTTP_LIMITS)
         self._owns_http = http is None
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._tasks: set[asyncio.Task[Any]] = set()
