@@ -749,11 +749,19 @@ class RepairService:
                     await self._await_approval(ctx, repair_id, "apply")
                 await self._complete_repair(repair_id, fingerprint, alert, proposal)
             except asyncio.CancelledError:
+                cancelled_row = self.store.get_repair(repair_id)
+                cancel_kind = (
+                    TimeoutKind.APPROVAL.value
+                    if cancelled_row is not None
+                    and cancelled_row["status"]
+                    in {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
+                    else TimeoutKind.EXEC.value
+                )
                 self.store.set_repair_status(
                     repair_id,
                     RepairState.INTERRUPTED.value,
                     finished_at=int(time.time()),
-                    timeout_kind=TimeoutKind.EXEC.value,
+                    timeout_kind=cancel_kind,
                 )
                 await self._notify("warning", "修复被中断", f"repair_id={repair_id}")
                 raise
