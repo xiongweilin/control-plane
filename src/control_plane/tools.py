@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import urllib.parse
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +13,9 @@ from typing import Any
 
 import httpx
 
+from .audit import redact_args
 from .config import ControlPlaneConfig
+from .runtime import current_run_id, terminate_process_tree_async
 from .storage import Store
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -73,6 +77,10 @@ class CommandExecutor:
 
     def __init__(self, config: ControlPlaneConfig) -> None:
         self.config = config
+        self.store: Store | None = None
+
+    def attach_store(self, store: Store) -> None:
+        self.store = store
 
     async def run(
         self,
@@ -81,10 +89,13 @@ class CommandExecutor:
         cwd: str | None = None,
         timeout: int = 60,
         input_text: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> str:
+        started_at = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *args,
             cwd=cwd,
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
@@ -95,12 +106,37 @@ class CommandExecutor:
                 timeout=timeout,
             )
         except TimeoutError as exc:
-            proc.kill()
+            await terminate_process_tree_async(proc.pid)
+            self._audit(args, None, started_at)
             raise ToolError(f"Command timed out after {timeout}s") from exc
+        except asyncio.CancelledError:
+            await terminate_process_tree_async(proc.pid)
+            self._audit(args, None, started_at)
+            raise
         output = (stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")).strip()
+        self._audit(args, proc.returncode, started_at)
         if proc.returncode != 0:
             raise ToolError(f"Command failed (exit {proc.returncode}): {output[-2000:]}")
         return output
+
+    def _audit(self, args: list[str], exit_code: int | None, started_at: float) -> None:
+        """Best-effort command audit with redacted arguments; never raises."""
+        if self.store is None:
+            return
+        try:
+            self.store.add_audit_entry(
+                f"aud-{uuid.uuid4().hex[:12]}",
+                run_id=current_run_id(),
+                repair_id="",
+                kind="command",
+                argv_json=json.dumps(redact_args(args), ensure_ascii=False),
+                exit_code=exit_code,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
+        except Exception:  # pragma: no cover - audit must never break the repair
+            import logging
+
+            logging.getLogger(__name__).debug("command audit write failed")
 
 
 def validate_identifier(value: str, label: str) -> str:
@@ -119,11 +155,19 @@ def validate_url(value: str, allowed_origins: tuple[str, ...]) -> str:
     return value
 
 
-def resolve_repo(value: str, allowed_roots: tuple[str, ...]) -> str:
+def resolve_repo(
+    value: str,
+    allowed_roots: tuple[str, ...],
+    blocked: tuple[str, ...] = (),
+) -> str:
     normalized = value.replace("\\", "/").rstrip("/")
     allowed = tuple(root.replace("\\", "/").rstrip("/") for root in allowed_roots)
     if not any(normalized == root or normalized.startswith(root + "/") for root in allowed):
         raise ToolError(f"Repository path not allowed: {value}")
+    lowered = normalized.lower()
+    for pattern in blocked:
+        if pattern and pattern.lower() in lowered:
+            raise ToolError(f"Repository path blocked by policy (contains {pattern!r}): {value}")
     return normalized
 
 
@@ -148,8 +192,13 @@ async def _probe(
     return True, f"HTTP {response.status_code}"
 
 
-async def _run_cmd(ctx: ToolContext, args: list[str], cwd: str | None = None) -> str:
-    return await ctx.executor.run(args, cwd=cwd)
+async def _run_cmd(
+    ctx: ToolContext,
+    args: list[str],
+    cwd: str | None = None,
+    timeout: int = 60,
+) -> str:
+    return await ctx.executor.run(args, cwd=cwd, timeout=timeout)
 
 
 async def _container_status_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -219,7 +268,11 @@ async def _promql_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResul
 
 
 async def _git_status_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-    repo = resolve_repo(str(arguments.get("repo", "")), ctx.config.allowed_repo_roots)
+    repo = resolve_repo(
+        str(arguments.get("repo", "")),
+        ctx.config.allowed_repo_roots,
+        blocked=ctx.config.blocked_paths,
+    )
     output = await _run_cmd(ctx, ["git", "-C", repo, "status", "--short", "--branch"])
     return ToolResult(output=output or "(clean)", target_kind="inspection")
 
@@ -228,7 +281,8 @@ async def _restart_service_tool(ctx: ToolContext, arguments: dict[str, Any]) -> 
     project = validate_identifier(str(arguments.get("project", "")), "project")
     if project not in ctx.config.allowed_auto_projects:
         raise ToolError(f"Project not allowed for restart: {project}")
-    service = validate_identifier(str(arguments.get("service", "")), "service")
+    raw_service = str(arguments.get("service", ""))
+    service = validate_identifier(raw_service, "service") if raw_service else ""
     project_dir = ctx.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
     before = await _run_cmd(
         ctx,
@@ -322,14 +376,18 @@ async def _cleanup_docker_tool(ctx: ToolContext, arguments: dict[str, Any]) -> T
 
 
 async def _stage_code_candidate_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-    repo = resolve_repo(str(arguments.get("repo", "")), ctx.config.allowed_repo_roots)
+    repo = resolve_repo(
+        str(arguments.get("repo", "")),
+        ctx.config.allowed_repo_roots,
+        blocked=ctx.config.blocked_paths,
+    )
     summary = str(arguments.get("summary", ""))[:200]
     patch = str(arguments.get("patch", ""))
     if not summary:
         raise ToolError("Missing candidate summary")
     if not patch:
         raise ToolError("Missing patch")
-    branch = f"fix/control-plane-{ctx.repair_id}"
+    branch = f"{ctx.config.candidate_branch_prefix}{ctx.repair_id}"
     patch_path = ctx.config.patch_dir / f"cp-{ctx.repair_id}.patch"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(patch, encoding="utf-8")
@@ -478,4 +536,10 @@ async def execute_tool(
     if spec is None:
         raise ToolError(f"Unknown tool: {name}")
     handler: Callable[[ToolContext, dict[str, Any]], Awaitable[ToolResult]] = spec["handler"]
-    return await handler(ctx, arguments)
+    result = await handler(ctx, arguments)
+    if (
+        ctx.config.external_side_effects_require_approval
+        and name in {"restart_service", "compose_up", "cleanup_docker"}
+    ):
+        result.requires_approval = True
+    return result

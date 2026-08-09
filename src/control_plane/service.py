@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import time
 import uuid
 from contextlib import suppress
@@ -13,15 +14,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from prometheus_client import Counter
 
+from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
 from .codex_runner import CodexRunner
 from .config import ControlPlaneConfig
+from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
+from .gitpush import push_with_ssh_fallback
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
+from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES, RepairState, require_transition
 from .storage import Store
 from .tools import (
@@ -37,9 +43,19 @@ from .verifier import Verifier
 
 logger = logging.getLogger(__name__)
 
+recovery_retry_failed = Counter(
+    "control_plane_recovery_retry_failed_total",
+    "Repairs that failed after a previously verified recovery of the same alert",
+    ["pattern"],
+)
+
 
 class RepairRejectedError(RuntimeError):
     pass
+
+
+class VerificationTimeoutError(RuntimeError):
+    """Raised when the deterministic verifier exceeds verify_timeout_seconds."""
 
 
 class RepairService:
@@ -66,6 +82,12 @@ class RepairService:
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._tasks: set[asyncio.Task[Any]] = set()
         self._repair_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._fingerprint_locks: dict[str, asyncio.Lock] = {}
+        self.run_id = config.run_id or current_run_id()
+        if hasattr(self.executor, "attach_store"):
+            self.executor.attach_store(store)
+        if hasattr(agent, "attach_store"):
+            agent.attach_store(store)
 
     @property
     def paused(self) -> bool:
@@ -166,6 +188,19 @@ class RepairService:
                     )
                     self.store.set_setting(f"notified:cooldown:{fingerprint}", str(now))
                 return {"cooldown": 1}
+            if (latest["error_class"] or "") == ErrorClass.DETERMINISTIC.value:
+                # Deterministic failures will reproduce identically; do not burn
+                # another attempt automatically (batch2 item 10).
+                if self._cooldown_notify_due(fingerprint):
+                    await self._notify(
+                        "critical",
+                        f"确定性失败，不再自动重试：{alertname}",
+                        f"{self._describe(alert)}\n"
+                        f"上一次失败被判定为确定性（{latest['error_class']}），"
+                        "自动重试已抑制；请人工介入。",
+                    )
+                    self.store.set_setting(f"notified:cooldown:{fingerprint}", str(now))
+                return {"cooldown": 1}
 
         policy = self._alert_policy(fingerprint)
         if policy == "ignore":
@@ -221,27 +256,51 @@ class RepairService:
             return {"budget_limited": 1}
 
         repair_id = f"repair-{uuid.uuid4().hex[:12]}"
-        payload_json = json.dumps(alert.model_dump(mode="json"), ensure_ascii=False)
-        self.store.create_repair(repair_id, fingerprint, payload_json, attempt)
-        self.store.set_setting(f"repair:{repair_id}:fingerprint", fingerprint)
-        pattern = fingerprint_pattern(alert)
-        known_candidate = self.store.find_candidate(pattern, ("candidate", "official"))
-        hint = ""
-        if known_candidate is not None:
-            hint = f"\n已知模式：{pattern}（已支持 {known_candidate['times_supported']} 次）"
-        await self._notify(
-            "info",
-            f"开始修复：{alertname}",
-            f"repair_id={repair_id}\n{self._describe(alert)}\n"
-            f"今日 Agent 预算剩余：{self.budget.remaining()}{hint}\n"
-            f"选项：/cp policy {fingerprint} manual|ignore 可改为手动或忽略",
+        payload_json = json.dumps(
+            alert.model_dump(mode="json", by_alias=True),
+            ensure_ascii=False,
         )
-        task = asyncio.create_task(self._run_repair(repair_id, fingerprint, alert))
-        self._tasks.add(task)
-        self._repair_tasks[fingerprint] = task
-        task.add_done_callback(lambda _t: self._repair_tasks.pop(fingerprint, None))
-        task.add_done_callback(self._tasks.discard)
-        return {"accepted": 1}
+        lock = self._fingerprint_locks.setdefault(fingerprint, asyncio.Lock())
+        async with lock:
+            # In-process mutual exclusion (second alert for the same fingerprint
+            # while a repair is active is deduplicated).
+            if self.store.get_repair_state_for_fingerprint(fingerprint) == "in_progress":
+                return {"deduplicated": 1}
+            self.store.create_repair(repair_id, fingerprint, payload_json, attempt)
+            # Persistent lease: guards against a second control-plane instance
+            # picking up the same fingerprint concurrently (batch2 item 10).
+            if not self.store.acquire_lease(
+                fingerprint,
+                self.run_id,
+                repair_id,
+                self.config.lease_ttl_seconds,
+            ):
+                self.store.set_repair_status(
+                    repair_id,
+                    RepairState.INTERRUPTED.value,
+                    error="lease held by another control-plane instance",
+                    finished_at=int(time.time()),
+                )
+                return {"deduplicated": 1}
+            self.store.set_setting(f"repair:{repair_id}:fingerprint", fingerprint)
+            pattern = fingerprint_pattern(alert)
+            known_candidate = self.store.find_candidate(pattern, ("candidate", "official"))
+            hint = ""
+            if known_candidate is not None:
+                hint = f"\n已知模式：{pattern}（已支持 {known_candidate['times_supported']} 次）"
+            await self._notify(
+                "info",
+                f"开始修复：{alertname}",
+                f"repair_id={repair_id}\n{self._describe(alert)}\n"
+                f"今日 Agent 预算剩余：{self.budget.remaining()}{hint}\n"
+                f"选项：/cp policy {fingerprint} manual|ignore 可改为手动或忽略",
+            )
+            task = asyncio.create_task(self._run_repair(repair_id, fingerprint, alert))
+            self._tasks.add(task)
+            self._repair_tasks[fingerprint] = task
+            task.add_done_callback(lambda _t: self._repair_tasks.pop(fingerprint, None))
+            task.add_done_callback(self._tasks.discard)
+            return {"accepted": 1}
 
     async def _cancel_in_progress_repairs(self, fingerprint: str) -> None:
         task = self._repair_tasks.get(fingerprint)
@@ -314,7 +373,11 @@ class RepairService:
                     return candidate
         if repo:
             try:
-                return resolve_repo(repo, self.config.allowed_repo_roots)
+                return resolve_repo(
+                    repo,
+                    self.config.allowed_repo_roots,
+                    blocked=self.config.blocked_paths,
+                )
             except ToolError:
                 pass
         for root in self.config.allowed_repo_roots:
@@ -345,7 +408,12 @@ class RepairService:
                 "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
                 "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
             )
-            result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt=task_prompt)
+            result = await self.agent.run_task(
+                repair_id=task_id,
+                repo=repo,
+                prompt=task_prompt,
+                run_id=self.run_id,
+            )
             self.store.increment_agent_calls(task_id)
             self.budget.spend()
             if result.timed_out:
@@ -424,7 +492,12 @@ class RepairService:
         )
 
         task_id = f"digest-{today}"
-        result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt="\n".join(lines))
+        result = await self.agent.run_task(
+            repair_id=task_id,
+            repo=repo,
+            prompt="\n".join(lines),
+            run_id=self.run_id,
+        )
         self.budget.spend()
         if result.timed_out or result.exit_code != 0:
             await self._notify(
@@ -668,65 +741,185 @@ class RepairService:
             try:
                 self._transition(repair_id, RepairState.DIAGNOSING)
                 proposal = await self._run_codex_agent(ctx, repair_id, alert)
-                if proposal.get("code_changed"):
-                    if proposal.get("timed_out"):
-                        await self._notify(
-                            "warning",
-                            "Agent 超时，候选代码待审批",
-                            f"repair_id={repair_id}\n"
-                            f"repo={proposal.get('repo')}\n"
-                            f"branch={proposal.get('branch')}\n"
-                            "候选提交已保存，工作目录已恢复；不会按 failed 丢弃。",
-                        )
+                needs_approval = proposal.get("code_changed") or any(
+                    row["status"] == "needs_approval"
+                    for row in self.store.list_actions(repair_id)
+                )
+                if needs_approval:
                     await self._await_approval(ctx, repair_id, "apply")
-                report = await self._verify(ctx, repair_id, alert)
-                if not report.all_passed:
-                    raise RuntimeError(f"Verification failed:\n{report.summary}")
-                self._transition(repair_id, RepairState.VERIFIED)
-                await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
-                if self._alert_is_firing(fingerprint):
-                    await self._create_candidate(ctx, repair_id, fingerprint, alert)
-                else:
-                    await self._notify(
-                        "info",
-                        "告警已恢复，跳过候选沉淀",
-                        f"repair_id={repair_id}\n告警在修复完成前已恢复，不沉淀候选经验。",
-                    )
-                branch = proposal.get("branch")
-                rollback = (
-                    f"\n回滚：切回 main 并删除分支 {branch}"
-                    if branch and proposal.get("code_changed")
-                    else ""
-                )
-                await self._notify(
-                    "info",
-                    f"修复完成：{alert.labels.get('alertname', 'unknown')}",
-                    f"repair_id={repair_id}\n{report.summary}{rollback}",
-                )
-                self._transition(repair_id, RepairState.CLOSED, finished_at=int(time.time()), result=report.summary)
+                await self._complete_repair(repair_id, fingerprint, alert, proposal)
             except asyncio.CancelledError:
-                self.store.set_repair_status(repair_id, RepairState.INTERRUPTED.value, finished_at=int(time.time()))
+                cancelled_row = self.store.get_repair(repair_id)
+                cancel_kind = (
+                    TimeoutKind.APPROVAL.value
+                    if cancelled_row is not None
+                    and cancelled_row["status"]
+                    in {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
+                    else TimeoutKind.EXEC.value
+                )
+                self.store.set_repair_status(
+                    repair_id,
+                    RepairState.INTERRUPTED.value,
+                    finished_at=int(time.time()),
+                    timeout_kind=cancel_kind,
+                )
                 await self._notify("warning", "修复被中断", f"repair_id={repair_id}")
                 raise
             except RepairRejectedError:
                 return
             except Exception as exc:
-                logger.exception("repair failed: %s", repair_id)
-                self.store.set_repair_status(
-                    repair_id,
-                    RepairState.FAILED.value,
-                    error=str(exc)[:2_000],
-                    finished_at=int(time.time()),
-                )
-                await self._notify(
-                    "critical",
-                    "修复失败",
-                    f"repair_id={repair_id}\n{exc}\n\n"
-                    f"下一步：查看会话摘要 data/agent-sessions/{repair_id}-last.md；"
-                    "如需人工介入可调用 /v1/control/pause 暂停控制平面。",
-                )
+                await self._record_failure(repair_id, fingerprint, exc)
             finally:
                 await ctx.close()
+                self.store.release_lease(fingerprint, self.run_id)
+
+    async def _complete_repair(
+        self,
+        repair_id: str,
+        fingerprint: str,
+        alert: Alert,
+        proposal: dict[str, Any],
+    ) -> None:
+        """Verify, settle candidate evidence and close a repaired alert."""
+        try:
+            report = await asyncio.wait_for(
+                self._verify(self._tool_context(repair_id), repair_id, alert),
+                timeout=self.config.verify_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise VerificationTimeoutError(
+                f"Verification timed out after {self.config.verify_timeout_seconds}s "
+                "[timeout_kind=verify]"
+            ) from exc
+        if not report.all_passed:
+            raise RuntimeError(f"Verification failed:\n{report.summary}")
+        self._transition(repair_id, RepairState.VERIFIED)
+        await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
+        if self._alert_is_firing(fingerprint):
+            await self._create_candidate(self._tool_context(repair_id), repair_id, fingerprint, alert)
+        else:
+            await self._notify(
+                "info",
+                "告警已恢复，跳过候选沉淀",
+                f"repair_id={repair_id}\n告警在修复完成前已恢复，不沉淀候选经验。",
+            )
+        branch = proposal.get("branch")
+        rollback = (
+            f"\n回滚：切回 main 并删除分支 {branch}"
+            if branch and proposal.get("code_changed")
+            else ""
+        )
+        await self._notify(
+            "info",
+            f"修复完成：{alert.labels.get('alertname', 'unknown')}",
+            f"repair_id={repair_id}\n{report.summary}{rollback}",
+        )
+        self._transition(repair_id, RepairState.CLOSED, finished_at=int(time.time()), result=report.summary)
+
+    def _tool_context(self, repair_id: str) -> ToolContext:
+        return ToolContext(
+            self.config,
+            self.store,
+            repair_id,
+            self.config.patch_dir,
+            executor=self.executor,
+            http=self.http,
+        )
+
+    async def _record_failure(
+        self,
+        repair_id: str,
+        fingerprint: str,
+        exc: Exception,
+    ) -> None:
+        """Record a failure with error class, timeout kind and dual evidence chain."""
+        logger.exception("repair failed: %s", repair_id)
+        row = self.store.get_repair(repair_id)
+        error_text = str(exc)[:2_000]
+        error_class = classify_exec_error(error_text)
+        timeout_kind = self._extract_timeout_kind(error_text)
+        if timeout_kind == TimeoutKind.VERIFY.value or error_text.startswith("Verification failed"):
+            error_class = classify_verify_error(error_text)
+        previous_error = str(row["error"] or "") if row is not None else ""
+        previous_original = str(row["original_error"] or "") if row is not None else ""
+        attempt = int(row["attempt"] or 1) if row is not None else 1
+        if attempt > 1:
+            original_error = previous_original or previous_error or error_text
+            recovery_error = error_text
+        else:
+            original_error = previous_original or error_text
+            recovery_error = ""
+        self.store.set_repair_status(
+            repair_id,
+            RepairState.FAILED.value,
+            error=error_text,
+            error_class=error_class.value,
+            timeout_kind=timeout_kind,
+            original_error=original_error,
+            recovery_error=recovery_error,
+            finished_at=int(time.time()),
+        )
+        write_evidence(
+            self.config.evidence_dir,
+            repair_id,
+            EvidenceRecord(
+                record_type="RepairFailed",
+                scope=f"repair:{repair_id}",
+                epistemic_status="failure",
+                lifecycle_status="failed",
+                run_id=self.run_id,
+                source_refs=[f"fingerprint:{fingerprint}"],
+                detail={
+                    "error_class": error_class.value,
+                    "timeout_kind": timeout_kind,
+                    "original_error": original_error[:2_000],
+                    "recovery_error": recovery_error[:2_000],
+                },
+            ),
+        )
+        try:
+            reset_raw = self.store.get_setting(f"attempt_reset:{fingerprint}")
+            reset_at = int(reset_raw) if reset_raw else 0
+        except ValueError:
+            reset_at = 0
+        created_at = int(row["created_at"] or 0) if row is not None else 0
+        if reset_at and created_at and reset_at <= created_at:
+            recovery_retry_failed.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
+        await self._notify(
+            "critical",
+            "修复失败",
+            f"repair_id={repair_id}\n{exc}\n"
+            f"错误分类：{error_class.value}；超时类型：{timeout_kind or 'none'}\n\n"
+            f"下一步：查看会话摘要 data/agent-sessions/{repair_id}-last.md；"
+            "如需人工介入可调用 /v1/control/pause 暂停控制平面。",
+        )
+
+    @staticmethod
+    def _alert_from_payload(row: Any) -> Alert:
+        try:
+            return Alert.model_validate(json.loads(row["payload_json"]))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return Alert.model_validate(
+                {
+                    "status": "firing",
+                    "labels": {"alertname": "unknown"},
+                    "annotations": {},
+                    "startsAt": "2026-01-01T00:00:00Z",
+                    "endsAt": None,
+                    "fingerprint": "unknown",
+                }
+            )
+
+    @staticmethod
+    def _extract_timeout_kind(message: str) -> str:
+        match = re.search(r"timeout_kind=(\w+)", message)
+        if match:
+            return match.group(1)
+        if "Command timed out" in message:
+            return TimeoutKind.COMM.value
+        if "Verification timed out" in message:
+            return TimeoutKind.VERIFY.value
+        return ""
 
     async def _run_codex_agent(
         self,
@@ -736,28 +929,50 @@ class RepairService:
     ) -> dict[str, Any]:
         self._transition(repair_id, RepairState.PROPOSING)
         repo_root = await self._pick_repo(alert)
+        main_repo = repo_root
         branch = f"{self.config.codex_branch_prefix}{repair_id}"
+        isolated: Path | None = None
+        dirty = await self._check_dirty_workspaces(repo_root)
+        if dirty:
+            if self.config.dirty_worktree_policy == "reject":
+                raise RuntimeError(
+                    f"workspace dirty; refusing to run agent "
+                    f"(dirty_worktree_policy=reject): {', '.join(dirty)}"
+                )
+            repo_root, isolated = await self._create_isolated_worktree(repo_root, branch)
+            await self._notify(
+                "warning",
+                "工作目录存在未提交修改，已隔离 worktree",
+                f"repair_id={repair_id}\ndirty={', '.join(dirty)}\n"
+                f"agent 将在隔离 worktree {isolated} 中运行。",
+            )
         await self._notify(
             "info",
             "Agent 启动",
             f"repair_id={repair_id}\n目标仓库: {repo_root}\n分支: {branch}\n模型: {self.config.model}",
         )
-        workspaces = await self._capture_workspace_states(repo_root)
+        workspaces = await self._capture_workspace_states(main_repo)
         prompt = self._build_agent_prompt(alert, repo_root, repair_id, branch)
         try:
             result = await self.agent.run_task(
                 repair_id=repair_id,
                 repo=repo_root,
                 prompt=prompt,
+                run_id=self.run_id,
             )
             self.store.increment_agent_calls(repair_id)
             self.budget.spend()
 
             changed_workspaces: list[tuple[dict[str, str], str]] = []
-            for before in workspaces:
-                changed, diff_stat = await self._code_changed(before["repo"], branch)
+            if isolated is not None:
+                changed, diff_stat = await self._code_changed(str(isolated), branch)
                 if changed:
-                    changed_workspaces.append((before, diff_stat))
+                    changed_workspaces.append(({"repo": main_repo}, diff_stat))
+            else:
+                for before in workspaces:
+                    changed, diff_stat = await self._code_changed(before["repo"], branch)
+                    if changed:
+                        changed_workspaces.append((before, diff_stat))
             if len(changed_workspaces) > 1:
                 targets = ", ".join(state["repo"] for state, _ in changed_workspaces)
                 raise RuntimeError(f"Agent changed multiple repositories: {targets}")
@@ -788,15 +1003,17 @@ class RepairService:
                 }
 
             if result.timed_out:
-                raise RuntimeError("Codex agent timed out without a committed candidate")
+                raise RuntimeError(
+                    "Codex agent timed out without a committed candidate [timeout_kind=exec]"
+                )
             if result.exit_code != 0:
                 raise RuntimeError(
                     f"Codex agent failed (exit {result.exit_code}): {result.stderr_tail}"
                 )
-            before = workspaces[0] if workspaces else {"git_head": "no-git"}
+            before = workspaces[0] if workspaces else {"git_head": "no-git", "repo": main_repo}
             self._record_codex_action(
                 repair_id,
-                repo_root,
+                main_repo,
                 before,
                 branch,
                 "",
@@ -806,20 +1023,56 @@ class RepairService:
             return {
                 "code_changed": False,
                 "branch": branch,
-                "repo": repo_root,
+                "repo": main_repo,
                 "summary": result.last_message,
                 "timed_out": False,
             }
         finally:
-            restore_errors = await self._restore_workspace_states(workspaces, branch)
-            if restore_errors:
-                detail = "; ".join(restore_errors)
-                await self._notify(
-                    "critical",
-                    "Agent 工作目录恢复失败",
-                    f"repair_id={repair_id}\n{detail}",
+            if isolated is not None:
+                await self._remove_isolated_worktree(main_repo, isolated)
+            else:
+                restore_errors = await self._restore_workspace_states(workspaces, branch)
+                if restore_errors:
+                    detail = "; ".join(restore_errors)
+                    await self._notify(
+                        "critical",
+                        "Agent 工作目录恢复失败",
+                        f"repair_id={repair_id}\n{detail}",
+                    )
+                    raise RuntimeError(f"Failed to restore Agent workspaces: {detail}")
+
+    async def _check_dirty_workspaces(self, repo_root: str) -> list[str]:
+        dirty: list[str] = []
+        for state in await self._capture_workspace_states(repo_root):
+            if state["is_git"] != "1":
+                continue
+            try:
+                output = await self.executor.run(
+                    ["git", "-C", state["repo"], "status", "--porcelain"],
+                    timeout=30,
                 )
-                raise RuntimeError(f"Failed to restore Agent workspaces: {detail}")
+            except ToolError:
+                continue
+            if output.strip():
+                dirty.append(state["repo"])
+        return dirty
+
+    async def _create_isolated_worktree(self, repo: str, branch: str) -> tuple[str, Path]:
+        worktree_dir = Path(tempfile.mkdtemp(prefix="cp-iso-"))
+        await self.executor.run(
+            ["git", "-C", repo, "worktree", "add", "--detach", str(worktree_dir), "main"],
+            timeout=120,
+        )
+        return str(worktree_dir), worktree_dir
+
+    async def _remove_isolated_worktree(self, repo: str, worktree_dir: Path) -> None:
+        try:
+            await self.executor.run(
+                ["git", "-C", repo, "worktree", "remove", "--force", str(worktree_dir)],
+                timeout=120,
+            )
+        except ToolError as exc:
+            logger.warning("isolated worktree removal failed for %s: %s", worktree_dir, exc)
 
     def _build_agent_prompt(
         self,
@@ -884,7 +1137,11 @@ class RepairService:
         repo = alert.labels.get("repo", "")
         if repo:
             try:
-                return resolve_repo(repo, self.config.allowed_repo_roots)
+                return resolve_repo(
+                    repo,
+                    self.config.allowed_repo_roots,
+                    blocked=self.config.blocked_paths,
+                )
             except ToolError:
                 pass
         for root in self.config.allowed_repo_roots:
@@ -960,6 +1217,22 @@ class RepairService:
                     errors.append(
                         f"{repo}: current ref {current['git_ref'] or current['git_head']} "
                         "is neither the original ref nor the candidate branch"
+                    )
+                    continue
+                # Never overwrite uncommitted user changes: abandon the restore
+                # and record the error instead (batch2 item 8).
+                try:
+                    dirty = await self.executor.run(
+                        ["git", "-C", repo, "status", "--porcelain"],
+                        timeout=30,
+                    )
+                except ToolError as exc:
+                    errors.append(f"{repo}: cannot check worktree cleanliness: {exc}")
+                    continue
+                if dirty.strip():
+                    errors.append(
+                        f"{repo}: workspace is dirty; restore abandoned to protect "
+                        f"uncommitted changes: {dirty.strip()[:200]}"
                     )
                     continue
                 if before["git_ref"]:
@@ -1040,24 +1313,82 @@ class RepairService:
             output=result.output[:10_000],
         )
 
-    async def _await_approval(self, ctx: ToolContext, repair_id: str, kind: str) -> None:
+    async def _await_approval(
+        self,
+        ctx: ToolContext | None,
+        repair_id: str,
+        kind: str,
+    ) -> None:
         self._transition(repair_id, RepairState.NEEDS_APPROVAL)
         await self.approvals.register(repair_id)
+        review = await self._pending_review_summary(repair_id)
+        write_evidence(
+            self.config.evidence_dir,
+            repair_id,
+            EvidenceRecord(
+                record_type="PendingReview",
+                scope=f"repair:{repair_id}",
+                epistemic_status="pending",
+                lifecycle_status="needs_approval",
+                run_id=self.run_id,
+                source_refs=[f"repair:{repair_id}"],
+                detail={"summary": review[:8_000]},
+            ),
+        )
         await self._notify(
             "warning",
             "待审批：控制平面修复",
             f"repair_id={repair_id}\n"
+            f"{review}\n"
             f"请回复 /cp approve {repair_id} 或 /cp reject {repair_id}；\n"
             f"或调用 POST /v1/approvals/{repair_id}/decision"
             "（action=approve|reject|rollback，需 X-Control-Plane-Key）。",
         )
-        decision = await self.approvals.wait(repair_id)
+        decision = await self._wait_approval(repair_id)
         await self.approvals.remove(repair_id)
+        await self._apply_approval_decision(repair_id, decision)
+
+    async def _wait_approval(self, repair_id: str) -> str | None:
+        """Wait for a human decision; escalate on approval timeout when configured."""
+        if self.config.approval_timeout_seconds <= 0:
+            return await self.approvals.wait(repair_id)
+        try:
+            return await asyncio.wait_for(
+                self.approvals.wait(repair_id),
+                timeout=self.config.approval_timeout_seconds,
+            )
+        except TimeoutError:
+            self._transition(
+                repair_id,
+                RepairState.ESCALATED,
+                finished_at=int(time.time()),
+                timeout_kind=TimeoutKind.APPROVAL.value,
+                error="approval timeout; escalated for manual intervention",
+            )
+            await self._notify(
+                "critical",
+                "审批超时，修复已升级",
+                f"repair_id={repair_id}\n"
+                f"等待人工审批超过 {self.config.approval_timeout_seconds}s，"
+                "已标记 escalated。可用 /cp approve|reject|rollback 继续处理。",
+            )
+            raise RepairRejectedError() from None
+
+    async def _apply_approval_decision(self, repair_id: str, decision: str | None) -> None:
+        """Apply an approval decision; shared by the live flow and post-restart resume."""
+        approval_row = self.store.get_approval("repair", repair_id, decision or "")
+        decided_by = str(approval_row["decided_by"]) if approval_row else "unknown"
+        note = str(approval_row["note"]) if approval_row else ""
         if decision == "approve":
             self._transition(repair_id, RepairState.APPLYING)
-            await self._apply_code_candidates(ctx, repair_id)
+            self.store.renew_lease(
+                self.store.get_repair(repair_id)["fingerprint"],
+                self.run_id,
+                self.config.lease_ttl_seconds,
+            )
+            await self._apply_code_candidates(None, repair_id)
         elif decision == "rollback":
-            await self._rollback(ctx, repair_id)
+            await self._rollback(None, repair_id)
             self.store.set_repair_status(repair_id, RepairState.ROLLED_BACK.value, finished_at=int(time.time()))
             await self._notify("warning", "修复已回滚", f"repair_id={repair_id}")
             raise RepairRejectedError()
@@ -1070,8 +1401,81 @@ class RepairService:
             )
             await self._notify("info", "修复已被拒绝", f"repair_id={repair_id}")
             raise RepairRejectedError()
+        write_evidence(
+            self.config.evidence_dir,
+            repair_id,
+            EvidenceRecord(
+                record_type="ApprovalDecision",
+                scope=f"repair:{repair_id}",
+                epistemic_status="confirmed",
+                lifecycle_status="decided",
+                run_id=self.run_id,
+                source_refs=[f"repair:{repair_id}"],
+                detail={"decision": decision, "decided_by": decided_by, "note": note},
+            ),
+        )
 
-    async def _apply_code_candidates(self, ctx: ToolContext, repair_id: str) -> None:
+    async def _pending_review_summary(self, repair_id: str) -> str:
+        """Build the review summary (commit, diff stat, files, impact) for approval."""
+        lines: list[str] = []
+        for row in self.store.list_actions(repair_id):
+            if row["tool"] != "codex_agent":
+                continue
+            repo = row["target"]
+            after = json.loads(row["after_json"]) if row["after_json"] else {}
+            branch = after.get("branch", "")
+            summary = (after.get("summary") or "").strip()
+            if branch:
+                lines.append(f"repo={repo}\nbranch={branch}")
+                try:
+                    commit = (
+                        await self.executor.run(
+                            ["git", "-C", repo, "rev-parse", "--short", branch],
+                            timeout=30,
+                        )
+                    ).strip()
+                    lines.append(f"commit={commit}")
+                except ToolError:
+                    pass
+                diff_stat = ""
+                try:
+                    diff_stat = await self.executor.run(
+                        ["git", "-C", repo, "diff", "--stat", f"main...{branch}"],
+                        timeout=30,
+                    )
+                    if diff_stat.strip():
+                        lines.append(f"diff stat:\n{diff_stat.strip()}")
+                except ToolError:
+                    pass
+                try:
+                    files = await self.executor.run(
+                        ["git", "-C", repo, "diff", "--name-only", f"main...{branch}"],
+                        timeout=30,
+                    )
+                    names = [name for name in files.splitlines() if name.strip()][:20]
+                    if names:
+                        lines.append(f"涉及文件: {', '.join(names)}")
+                except ToolError:
+                    pass
+                if branch and self._dependency_scope_detected(diff_stat, summary):
+                    packages = await self._dependency_packages(repo, branch)
+                    info = await asyncio.to_thread(fetch_security_advisories, packages)
+                    if info.status == "ok":
+                        lines.append(
+                            f"安全公告: {len(info.advisories)} 条已知公告（{info.source}）；"
+                            f"涉及包: {', '.join(packages[:6]) or '未知'}"
+                        )
+                    else:
+                        lines.append(f"安全公告: 无法获取（{info.error}）")
+            if summary:
+                lines.append(f"说明: {summary[:300]}")
+        return "\n".join(lines) or "（无候选摘要）"
+
+    async def _apply_code_candidates(
+        self,
+        ctx: ToolContext | None,
+        repair_id: str,
+    ) -> None:
         for row in self.store.list_actions(repair_id):
             if row["tool"] != "codex_agent":
                 continue
@@ -1079,14 +1483,239 @@ class RepairService:
             repo = row["target"]
             if not repo:
                 continue
-            branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
+            branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
             await self.executor.run(["git", "-C", repo, "checkout", "-q", "main"], timeout=120)
             try:
                 await self.executor.run(["git", "-C", repo, "merge", "--ff-only", branch], timeout=120)
             except ToolError:
                 await self.executor.run(["git", "-C", repo, "merge", "-q", "--no-edit", branch], timeout=120)
-            await self.executor.run(["git", "-C", repo, "push", "-q", "origin", "main"], timeout=120)
-            await self._notify("info", "代码候选已合并到 main", f"repair_id={repair_id}\nrepo={repo}")
+            pushed, detail = await push_with_ssh_fallback(
+                self.executor,
+                repo,
+                remote="origin",
+                branch="main",
+                timeout=self.config.git_push_timeout_seconds,
+                fallback_enabled=self.config.github_ssh_fallback,
+                fallback_host=self.config.github_ssh_host_port,
+            )
+            await self._notify(
+                "info",
+                "代码候选已合并到 main",
+                f"repair_id={repair_id}\nrepo={repo}\npush: {detail}",
+            )
+
+    async def resume_pending_approval(self, repair_id: str) -> None:
+        """Resume a repair that was awaiting approval when the service restarted.
+
+        Restores the in-process approval waiter so /cp approve|reject|rollback
+        keeps working across restarts (batch2 item 7).
+        """
+        row = self.store.get_repair(repair_id)
+        if row is None or row["status"] not in {
+            RepairState.NEEDS_APPROVAL.value,
+            RepairState.RECOVERING.value,
+        }:
+            return
+        try:
+            self._transition(repair_id, RepairState.RECOVERING)
+            await self.approvals.register(repair_id)
+            self._transition(repair_id, RepairState.NEEDS_APPROVAL)
+            review = await self._pending_review_summary(repair_id)
+            await self._notify(
+                "warning",
+                "待审批（重启后恢复）",
+                f"repair_id={repair_id}\n{review}\n"
+                f"请回复 /cp approve {repair_id} 或 /cp reject {repair_id}；"
+                "重启后审批仍有效。",
+            )
+            decision = await self._wait_approval(repair_id)
+            await self.approvals.remove(repair_id)
+            if decision == "approve":
+                await self._apply_approval_decision(repair_id, decision)
+                await self._finish_resumed_repair(repair_id)
+            else:
+                await self._apply_approval_decision(repair_id, decision)
+        except RepairRejectedError:
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("resume of pending approval failed: %s", repair_id)
+            self.store.set_repair_status(
+                repair_id,
+                RepairState.FAILED.value,
+                error=str(exc)[:2_000],
+                finished_at=int(time.time()),
+            )
+
+    async def _finish_resumed_repair(self, repair_id: str) -> None:
+        row = self.store.get_repair(repair_id)
+        if row is None:
+            return
+        try:
+            alert = Alert.model_validate(json.loads(row["payload_json"]))
+        except (json.JSONDecodeError, ValueError):
+            self.store.set_repair_status(
+                repair_id,
+                RepairState.CLOSED.value,
+                finished_at=int(time.time()),
+                result="approved and applied",
+            )
+            return
+        fingerprint = row["fingerprint"]
+        await self._complete_repair(repair_id, fingerprint, alert, {"code_changed": True})
+
+    async def _git_repo_roots(self) -> list[str]:
+        roots: list[str] = []
+        for root in self.config.allowed_repo_roots:
+            if not await self._path_exists(root):
+                continue
+            try:
+                await self.executor.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], timeout=30)
+            except ToolError:
+                continue
+            roots.append(root)
+        return roots
+
+    async def list_candidate_branches_for_cleanup(
+        self,
+        repos: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Dry-run enumeration of stale candidate branches (merged/rejected/expired).
+
+        Read-only; never deletes anything (batch2 item 9).
+        """
+        prefix = self.config.candidate_branch_prefix
+        retention_seconds = self.config.candidate_retention_days * 86_400
+        now = int(time.time())
+        results: list[dict[str, Any]] = []
+        for repo in repos or await self._git_repo_roots():
+            try:
+                merged_output = await self.executor.run(
+                    ["git", "-C", repo, "branch", "--merged", "main"],
+                    timeout=60,
+                )
+                refs_output = await self.executor.run(
+                    [
+                        "git",
+                        "-C",
+                        repo,
+                        "for-each-ref",
+                        "--format=%(refname:short)%09%(committerdate:unix)",
+                        f"refs/heads/{prefix}*",
+                    ],
+                    timeout=60,
+                )
+            except ToolError:
+                continue
+            merged = {line.strip().lstrip("* ").strip() for line in merged_output.splitlines() if line.strip()}
+            for line in refs_output.splitlines():
+                branch, separator, raw_ts = line.partition("\t")
+                branch = branch.strip()
+                if not branch.startswith(prefix):
+                    continue
+                reasons: list[str] = []
+                if branch in merged:
+                    reasons.append("merged")
+                repair_id = branch[len(prefix) :]
+                repair = self.store.get_repair(repair_id) if repair_id.startswith("repair-") else None
+                if repair is not None and (
+                    repair["status"] == "rolled_back" or repair["result"] == "rejected"
+                ):
+                    reasons.append("rejected")
+                try:
+                    age_seconds = now - int(raw_ts or 0)
+                except ValueError:
+                    age_seconds = 0
+                age_days = round(age_seconds / 86_400, 1)
+                if age_seconds > retention_seconds:
+                    reasons.append("expired")
+                if reasons:
+                    results.append(
+                        {
+                            "repo": repo,
+                            "branch": branch,
+                            "repair_id": repair_id,
+                            "reasons": reasons,
+                            "age_days": age_days,
+                        }
+                    )
+        return results
+
+    async def cleanup_candidate_branches(
+        self,
+        repos: list[str] | None = None,
+        *,
+        apply: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List stale candidate branches; delete only when ``apply=True`` is explicit."""
+        branches = await self.list_candidate_branches_for_cleanup(repos)
+        if not apply:
+            return branches
+        for entry in branches:
+            try:
+                await self.executor.run(
+                    ["git", "-C", entry["repo"], "branch", "-D", entry["branch"]],
+                    timeout=60,
+                )
+                entry["deleted"] = True
+            except ToolError as exc:
+                entry["deleted"] = False
+                entry["error"] = str(exc)[:500]
+        return branches
+
+    def _dependency_scope_detected(self, diff_stat: str, summary: str) -> bool:
+        material = f"{diff_stat} {summary}".lower()
+        markers = (
+            "requirements",
+            "pyproject",
+            "package.json",
+            "package-lock",
+            "pnpm-lock",
+            "uv.lock",
+            "poetry.lock",
+            "npm audit",
+            "pip",
+            "依赖",
+            "dependency",
+            "dependencies",
+        )
+        return any(marker in material for marker in markers)
+
+    async def _dependency_packages(self, repo: str, branch: str) -> list[str]:
+        """Best-effort package extraction from a candidate branch (local git only)."""
+        names: list[str] = []
+        for manifest in ("requirements.txt", "package.json", "pyproject.toml"):
+            try:
+                content = await self.executor.run(
+                    ["git", "-C", repo, "show", f"{branch}:{manifest}"],
+                    timeout=30,
+                )
+            except ToolError:
+                continue
+            if manifest == "requirements.txt":
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith(("#", "-", "[", "git+")):
+                        continue
+                    name = re.split(r"[=<>~!]", line, maxsplit=1)[0].strip()
+                    if name:
+                        names.append(name)
+            elif manifest == "package.json":
+                try:
+                    data = json.loads(content)
+                    for section in ("dependencies", "devDependencies", "peerDependencies"):
+                        names.extend(data.get(section, {}).keys())
+                except json.JSONDecodeError:
+                    continue
+            else:  # pyproject.toml
+                for line in content.splitlines():
+                    line = line.strip()
+                    if "=" in line and "[" not in line:
+                        candidate = line.split("=", 1)[0].strip()
+                        if candidate:
+                            names.append(candidate)
+        return [name for name in dict.fromkeys(names) if name][:12]
 
     async def _verify(
         self,
@@ -1361,7 +1990,7 @@ class RepairService:
             return True
         return int(time.time()) - last >= ttl
 
-    async def _rollback(self, ctx: ToolContext, repair_id: str) -> None:
+    async def _rollback(self, ctx: ToolContext | None, repair_id: str) -> None:
         try:
             payload = json.loads(self.store.get_repair(repair_id)["payload_json"])
             project = payload.get("labels", {}).get("project", "")
@@ -1372,7 +2001,7 @@ class RepairService:
             if tool == "codex_agent":
                 after = json.loads(row["after_json"]) if row["after_json"] else {}
                 repo = row["target"]
-                branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
+                branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
                 try:
                     for git_args in (
                         ["git", "-C", repo, "checkout", "-q", "main"],
@@ -1462,6 +2091,22 @@ class RepairService:
             "已沉淀候选经验",
             f"pattern={pattern}\ncandidate_id={candidate_id}\n试运行 {self.config.candidate_trial_days} 天。",
         )
+        advisory_detail: dict[str, Any] = {}
+        for row in actions:
+            if row["tool"] != "codex_agent":
+                continue
+            after = json.loads(row["after_json"]) if row["after_json"] else {}
+            branch = after.get("branch", "")
+            diff_stat = after.get("diff_stat", "")
+            summary = after.get("summary", "")
+            if branch and self._dependency_scope_detected(diff_stat, summary):
+                packages = await self._dependency_packages(row["target"], branch)
+                info = await asyncio.to_thread(fetch_security_advisories, packages)
+                advisory_detail = {
+                    "advisories": info.to_dict(),
+                    "packages": packages,
+                }
+                break
         write_evidence(
             self.config.evidence_dir,
             repair_id,
@@ -1470,8 +2115,13 @@ class RepairService:
                 scope=pattern,
                 epistemic_status="supported",
                 lifecycle_status="candidate",
+                run_id=self.run_id,
                 source_refs=[f"repair:{repair_id}"],
-                detail={"candidate_id": candidate_id, "tool_sequence": tool_sequence},
+                detail={
+                    "candidate_id": candidate_id,
+                    "tool_sequence": tool_sequence,
+                    **advisory_detail,
+                },
             ),
         )
 

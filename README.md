@@ -89,10 +89,14 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
 - 审批：代码变更后等待 `/cp approve|reject|rollback`，或直接调用
   `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
+  `control_plane_run_info`、`control_plane_health_last_ready` 与
+  `recovery_retry_failed` 指标；`/live`、`/ready` 供探针区分存活与就绪，
   已接入 Prometheus 与 Metratio Overview 看板。
 
 相关配置：`notify_cooldown_skip`、
 `notify_ignored_noise`、`test_alert_alertnames`、`test_alert_instance_prefixes`。
+批次 2 新配置（run_id/PID、`[timeouts]`、`[candidates]`、dirty 策略、审计上限、
+SSH443、副作用门禁、路径黑名单）见下文「可靠性（批次 2）」。
 
 ## 部署
 
@@ -157,3 +161,109 @@ observability、feishu-dify-gateway）执行 `docker compose restart / up -d`、
 
 控制平面默认只监听 `127.0.0.1:18083`（`control_plane.toml` 的 `[server] host`），
 Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
+
+## 可靠性（批次 2）
+
+### 稳定运行 ID 与单实例
+
+- 每次启动生成 `run_id`（时间戳+随机），写入 `run_records` 表、日志首行与
+  证据文件头（`evidence_header.run_id`）。
+- 启动写 `data/control-plane.pid`；重启前检测旧 PID 是否存活，存活则拒绝启动，
+  避免双实例（历史曾出现双 python 进程）。优雅停止时完成 SQLite 写入、取消
+  agent 任务、清理 PID 文件并记录 stopped。
+- 超时/取消统一按进程树终止：`taskkill /PID <pid> /T /F`，解决“计划任务无法
+  彻底终止 Python 子进程”；`assert_no_residual_processes` 验证无残留
+  git/python/node/ssh 子进程。
+
+### 超时分类
+
+`[timeouts]` 区分四类并分别记录（repairs.timeout_kind + 证据）：
+
+- `exec_seconds`：agent 运行超时 → 无提交记 `TIMED_OUT`，有提交照旧待审；
+- `comm_seconds`：alertmanager/feishu/git/ssh 网络超时 → retryable；
+- `verify_seconds`：验证器超时 → retryable；
+- `approval_seconds`：等待人工审批超时（>0 时生效）→ `ESCALATED`，不再自动重试。
+
+### 重启恢复
+
+- `needs_approval` 候选重启后自动恢复审批等待：启动时登记
+  `/cp approve|reject|rollback` 的等待者并重新通知，重启前已提交的候选可继续
+  审批（含证据摘要：commit hash、diff stat、涉及文件、影响说明）。
+- 失败恢复保留 `original_error` 与 `recovery_error` 双证据链，并提供
+  `recovery_retry_failed` metric 标签（恢复后再次失败）。
+- 只有确定性恢复验证成功才清零尝试次数（`resolved` 本身不足以重置）。
+
+### Git 分支安全
+
+- 恢复原分支前检查工作树；dirty 时**放弃恢复**并记录错误，绝不覆盖用户未提交
+  修改。
+- `dirty_worktree_policy`：`reject`（默认，脏工作树拒绝执行）| `isolate`
+  （在隔离 worktree 中执行，结束后强制移除，候选分支保留）。
+- 候选分支统一命名 `candidate_branch_prefix`（默认 `fix/control-plane-`）。
+
+### 候选分支清理
+
+- 只读 dry-run：`uv run python -m control_plane cleanup-candidates`（默认
+  dry-run，`--apply` 才真正删除），或
+  `POST /v1/candidates/cleanup`（`{"apply": false}` 默认；`apply: true` 显式删除）。
+- 枚举已合并 / 已拒绝（repair 为 rejected/rolled_back）/ 过期
+  （超过 `candidate_retention_days`）分支；`candidate_cleanup_policy = "auto"`
+  时启动自动清理，`manual`（默认）不自动删。
+
+### 互斥、分类与预算
+
+- 同一 fingerprint 并发修复互斥：进程内 `asyncio.Lock` + SQLite 持久化租约
+  （`leases` 表，`lease_ttl_seconds` 控制有效期），防多实例同时修同一告警。
+- 失败分类 `errors.py`：NetworkError/GitConflict → retryable；
+  ValidationError/ConfigError/脏工作树 → deterministic（不再自动重试）；
+  未知 → 沿用尝试计数。
+- 预算沿用 `budget.py`（每日限额 + 单修复上限），清理/审计不消耗预算。
+
+### 审计与脱敏
+
+- 每次命令/agent 调用写入 `command_audit`：脱敏后的参数、退出码、耗时、
+  truncated、error_class；脱敏函数过滤 token/password/secret/api_key/
+  authorization 等键值。
+- agent 输出上限 `max_agent_output_bytes`（默认 200KB），会话 JSONL 写入前先
+  脱敏再截断，截断记录 `truncated=true`。
+- 只读检查：`uv run python -m control_plane inspect-sessions` 或
+  `GET /v1/sessions/inspect` —— 只列出会话中可能含敏感值的**字段名**，不输出值。
+
+### 依赖安全公告
+
+依赖更新类候选在生成待审摘要与候选证据时调用 GitHub Security Advisories API
+（urllib，无新依赖）查询涉及包的公告；网络失败降级为“安全公告: 无法获取”并
+在证据中标注，不阻塞审批。
+
+### 健康检查
+
+- `GET /live`：进程存活即 200（仅本进程状态）。
+- `GET /ready`：SQLite 可写（刷新 `health:last_ready` 时间戳）、Prometheus
+  与 Alertmanager（按配置）可达，全部通过才 200，否则 503 degraded 并附各检查
+  明细与最近一次就绪时间戳；`/metrics` 同步暴露 `control_plane_run_info` 与
+  `control_plane_health_last_ready`。
+
+### 外部副作用门禁
+
+- `external_side_effects_require_approval = true` 时，重启外部服务
+  （restart_service/compose_up/cleanup_docker）等动作标记为
+  `needs_approval`，与代码候选一样等待人工审批。
+- 路径黑名单 `blocked_paths` 阻止 agent/工具访问凭据与用户敏感文件；候选 diff
+  触碰 `.env`/credentials/secrets/id_rsa/`.pem`/`.key`/token/password 等路径
+  一律拒绝合并。
+- `data/protection-*.json` 是 GitHub 分支保护规则快照（核查对象），不是
+  scripts 目录允许列表；scripts/ 内实际仅有安装脚本。
+
+### GitHub SSH 443 回退
+
+- `git push` 优先走 22；网络类失败自动回退 `ssh.github.com:443`
+  （`github_ssh_host_port` 可改），注入受限 `GIT_SSH_COMMAND`
+  （BatchMode + ConnectTimeout + accept-new），两次失败抛出带分类的错误。
+
+### ADR
+
+- [0002 进程树取消与 PID](/docs/decisions/0002-process-tree-kill-and-pid.md)
+- [0003 超时分类](/docs/decisions/0003-timeout-classification.md)
+- [0004 分支恢复与 dirty 策略](/docs/decisions/0004-branch-restore-and-dirty-policy.md)
+- [0005 审计与脱敏](/docs/decisions/0005-audit-and-redaction.md)
+- [0006 SSH 443 回退](/docs/decisions/0006-ssh443-fallback.md)
