@@ -25,7 +25,7 @@ from .config import ControlPlaneConfig
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
 from .gitpush import push_with_ssh_fallback
-from .metrics import MODEL_CONNECTIVITY, MODEL_DRIFT
+from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
 from .runtime import current_run_id
@@ -380,7 +380,8 @@ class RepairService:
                     blocked=self.config.blocked_paths,
                 )
             except ToolError:
-                pass
+                logger.debug("repo %s not allowed; falling back to first available root", repo)
+                CONTROLLED_IGNORES.labels(site="repo_fallback").inc()
         for root in self.config.allowed_repo_roots:
             if await self._path_exists(root):
                 return root
@@ -648,7 +649,8 @@ class RepairService:
                     if int(used_pct) > 85:
                         differences.append(f"云端磁盘使用率 {used_pct}%：{last}")
                 except ValueError:
-                    pass
+                    logger.debug("cloud disk usage line unparsable: %r", last[:200])
+                    CONTROLLED_IGNORES.labels(site="disk_usage_parse").inc()
         except ToolError as exc:
             differences.append(f"云端磁盘检查失败：{exc}")
 
@@ -1072,6 +1074,8 @@ class RepairService:
                     timeout=30,
                 )
             except ToolError:
+                logger.debug("dirty check failed for %s; treating as clean", state["repo"])
+                CONTROLLED_IGNORES.labels(site="dirty_check").inc()
                 continue
             if output.strip():
                 dirty.append(state["repo"])
@@ -1163,7 +1167,8 @@ class RepairService:
                     blocked=self.config.blocked_paths,
                 )
             except ToolError:
-                pass
+                logger.debug("repo %s not allowed; falling back to first available root", repo)
+                CONTROLLED_IGNORES.labels(site="repo_fallback").inc()
         for root in self.config.allowed_repo_roots:
             if await self._path_exists(root):
                 return root
@@ -1456,7 +1461,8 @@ class RepairService:
                     ).strip()
                     lines.append(f"commit={commit}")
                 except ToolError:
-                    pass
+                    logger.debug("review summary: rev-parse failed for %s", repo)
+                    CONTROLLED_IGNORES.labels(site="review_summary_git").inc()
                 diff_stat = ""
                 try:
                     diff_stat = await self.executor.run(
@@ -1466,7 +1472,8 @@ class RepairService:
                     if diff_stat.strip():
                         lines.append(f"diff stat:\n{diff_stat.strip()}")
                 except ToolError:
-                    pass
+                    logger.debug("review summary: diff stat failed for %s", repo)
+                    CONTROLLED_IGNORES.labels(site="review_summary_git").inc()
                 try:
                     files = await self.executor.run(
                         ["git", "-C", repo, "diff", "--name-only", f"main...{branch}"],
@@ -1476,7 +1483,8 @@ class RepairService:
                     if names:
                         lines.append(f"涉及文件: {', '.join(names)}")
                 except ToolError:
-                    pass
+                    logger.debug("review summary: diff name-only failed for %s", repo)
+                    CONTROLLED_IGNORES.labels(site="review_summary_git").inc()
                 if branch and self._dependency_scope_detected(diff_stat, summary):
                     packages = await self._dependency_packages(repo, branch)
                     info = await asyncio.to_thread(fetch_security_advisories, packages)
@@ -1593,6 +1601,8 @@ class RepairService:
             try:
                 await self.executor.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], timeout=30)
             except ToolError:
+                logger.debug("repo root %s is not a git work tree; skipping", root)
+                CONTROLLED_IGNORES.labels(site="repo_enum_git").inc()
                 continue
             roots.append(root)
         return roots
@@ -1627,6 +1637,8 @@ class RepairService:
                     timeout=60,
                 )
             except ToolError:
+                logger.debug("candidate branch enumeration failed for %s", repo)
+                CONTROLLED_IGNORES.labels(site="repo_enum_git").inc()
                 continue
             merged = {line.strip().lstrip("* ").strip() for line in merged_output.splitlines() if line.strip()}
             for line in refs_output.splitlines():
@@ -1712,6 +1724,8 @@ class RepairService:
                     timeout=30,
                 )
             except ToolError:
+                logger.debug("candidate branch cleanup failed for %s", repo)
+                CONTROLLED_IGNORES.labels(site="repo_enum_git").inc()
                 continue
             if manifest == "requirements.txt":
                 for line in content.splitlines():
@@ -1727,6 +1741,7 @@ class RepairService:
                     for section in ("dependencies", "devDependencies", "peerDependencies"):
                         names.extend(data.get(section, {}).keys())
                 except json.JSONDecodeError:
+                    logger.debug("package.json unparsable on %s:%s; skipping", repo, branch)
                     continue
             else:  # pyproject.toml
                 for line in content.splitlines():
@@ -1781,7 +1796,8 @@ class RepairService:
                         "expected": 1,
                     }
             except ToolError:
-                pass
+                logger.debug("probe construction skipped for %s", instance)
+                CONTROLLED_IGNORES.labels(site="probe_build").inc()
         elif alertname == "PrometheusScrapeFailed" and ":" in instance:
             tool_results["promql"][f"up:{instance}"] = {
                 "query": f'up{{instance="{instance}"}}',
@@ -1792,7 +1808,8 @@ class RepairService:
                 validate_url(instance, self.config.allowed_url_origins)
                 tool_results["probe_urls"].append(instance)
             except ToolError:
-                pass
+                logger.debug("probe url not allowed: %s", instance)
+                CONTROLLED_IGNORES.labels(site="probe_build").inc()
 
         project = alert.labels.get("project", "")
         resolved_project = self._resolve_project(project)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -17,6 +18,8 @@ from .audit import redact_args
 from .config import ControlPlaneConfig
 from .runtime import current_run_id, terminate_process_tree_async
 from .storage import Store
+
+logger = logging.getLogger(__name__)
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CONTAINER_STATUS_FORMAT = "{{.Names}}\t{{.Status}}"
@@ -134,9 +137,13 @@ class CommandExecutor:
                 duration_ms=int((time.monotonic() - started_at) * 1000),
             )
         except Exception:  # pragma: no cover - audit must never break the repair
-            import logging
+            logger.debug("command audit write failed")
+            try:
+                from .metrics import CONTROLLED_IGNORES
 
-            logging.getLogger(__name__).debug("command audit write failed")
+                CONTROLLED_IGNORES.labels(site="audit_write").inc()
+            except Exception:  # pragma: no cover - metrics must never break control flow
+                logger.debug("audit_write counter failed")
 
 
 def validate_identifier(value: str, label: str) -> str:
@@ -352,7 +359,13 @@ async def _cleanup_docker_tool(ctx: ToolContext, arguments: dict[str, Any]) -> T
             if entry.get("Type") == "Build Cache":
                 reclaimable_gb = float(entry.get("Reclaimable") or 0)
     except (json.JSONDecodeError, ValueError, TypeError):
-        pass
+        logger.debug("docker system df unparsable; treating as 0 reclaimable")
+        try:
+            from .metrics import CONTROLLED_IGNORES
+
+            CONTROLLED_IGNORES.labels(site="docker_df_parse").inc()
+        except Exception:  # pragma: no cover - metrics must never break control flow
+            logger.debug("docker_df_parse counter failed")
     if reclaimable_gb < ctx.config.docker_cleanup_min_reclaimable_gb:
         return ToolResult(
             output=f"Reclaimable {mode} cache is {reclaimable_gb:.2f} GB; below threshold, skipping",
