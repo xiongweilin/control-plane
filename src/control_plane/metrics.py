@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import datetime as dt
 
+from prometheus_client import Counter
 from prometheus_client.core import GaugeMetricFamily
 
+from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES
 from .storage import Store
+
+# 鉴权失败计数（低噪声安全可观测；按 reason/endpoint 打标）
+AUTH_FAILURES = Counter(
+    "control_plane_auth_failures_total",
+    "Authentication failures",
+    ["reason", "endpoint"],
+)
 
 
 class ControlPlaneCollector:
@@ -59,4 +68,17 @@ class ControlPlaneCollector:
             "control_plane_agent_calls_today",
             "Agent calls spent today",
             value=self._store.budget_calls(dt.date.today().isoformat()),
+        )
+        run_id = current_run_id()
+        run_info = GaugeMetricFamily(
+            "control_plane_run_info",
+            "Stable run identifier of the serving process",
+            labels=["run_id"],
+        )
+        run_info.add_metric([run_id or "unknown"], 1)
+        yield run_info
+        yield GaugeMetricFamily(
+            "control_plane_health_last_ready",
+            "Unix timestamp of the last successful /ready database probe",
+            value=int(self._store.get_setting("health:last_ready", "0") or 0),
         )

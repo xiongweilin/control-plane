@@ -9,7 +9,7 @@ ShortText = Annotated[str, Field(min_length=1, max_length=512)]
 
 
 class Alert(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     status: Literal["firing", "resolved"]
     labels: dict[str, str] = Field(default_factory=dict)
