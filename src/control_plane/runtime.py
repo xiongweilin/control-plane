@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 import platform
 import shutil
@@ -20,6 +21,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -145,8 +148,9 @@ def terminate_process_tree(pid: int, timeout: int = 15) -> None:
             )
             return
         except (OSError, subprocess.TimeoutExpired):
-            pass
-    with suppress(ProcessLookupError):
+            logger.debug("taskkill failed for pid %s; falling back to os.kill", pid)
+            _count_controlled_ignore("process_tree_kill")
+    with suppress(ProcessLookupError, OSError):
         os.kill(pid, 9)  # noqa: S606 - POSIX fallback; Windows path uses taskkill above
 
 
@@ -166,8 +170,9 @@ async def terminate_process_tree_async(pid: int, timeout: int = 15) -> None:
             await asyncio.wait_for(proc.wait(), timeout=timeout)
             return
         except (OSError, TimeoutError):
-            pass
-    with suppress(ProcessLookupError):
+            logger.debug("async taskkill failed for pid %s; falling back to os.kill", pid)
+            _count_controlled_ignore("process_tree_kill")
+    with suppress(ProcessLookupError, OSError):
         os.kill(pid, 9)  # noqa: S606 - POSIX fallback; Windows path uses taskkill above
 
 
@@ -204,6 +209,7 @@ def snapshot_processes() -> list[dict[str, Any]]:
                 }
             )
         except ValueError:
+            logger.debug("skipping unparsable process snapshot row: %r", line[:200])
             continue
     return rows
 
@@ -260,6 +266,16 @@ def run_info_dict(run: RunContext | None = None) -> dict[str, str]:
         "hostname": run.hostname,
         "python_version": run.python_version,
     }
+
+
+def _count_controlled_ignore(site: str) -> None:
+    """Low-noise counter for a controlled ignore (deferred import avoids a cycle)."""
+    try:
+        from .metrics import CONTROLLED_IGNORES
+
+        CONTROLLED_IGNORES.labels(site=site).inc()
+    except Exception:  # pragma: no cover - metrics must never break control flow
+        logger.debug("controlled-ignore counter failed for %s", site)
 
 
 def graceful_shutdown(pid_file: Path | None = None) -> None:

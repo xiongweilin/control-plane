@@ -29,6 +29,13 @@ MODEL_DRIFT = Gauge(
     "1 when the OpenCodex model list drifted from the recorded baseline",
 )
 
+# 受控忽略（批次5-6）：明确语义的 except...pass 按 site 计数，低噪声可观测
+CONTROLLED_IGNORES = Counter(
+    "control_plane_ignored_errors_total",
+    "Controlled exception ignores by site",
+    ["site"],
+)
+
 
 class ControlPlaneCollector:
     """Prometheus collector over the control-plane SQLite state."""
