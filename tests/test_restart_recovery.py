@@ -97,6 +97,7 @@ def _config(tmp_path) -> ControlPlaneConfig:
         state_db=tmp_path / "data" / "control-plane.db",
         pid_file=tmp_path / "data" / "control-plane.pid",
         notification_enabled=False,
+        model_preflight_enabled=False,
         allowed_auto_projects=("dify",),
         allowed_repo_roots=(str(tmp_path / "repos"),),
         project_dirs={"dify": str(tmp_path / "dify")},

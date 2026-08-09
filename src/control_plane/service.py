@@ -25,6 +25,7 @@ from .config import ControlPlaneConfig
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
 from .gitpush import push_with_ssh_fallback
+from .metrics import MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
 from .runtime import current_run_id
@@ -2171,6 +2172,120 @@ class RepairService:
 
     async def _notify(self, severity: str, title: str, text: str) -> None:
         await self.notifier.notify(severity, title, text)
+
+    async def _opencodex_models(self) -> list[str] | None:
+        """Read-only model-list probe against the configured OpenCodex proxy."""
+        from .opencodex import OpenCodexClient
+
+        client = OpenCodexClient(
+            self.config.opencodex_base_url,
+            self.config.model,
+            timeout_seconds=self.config.opencodex_timeout_seconds,
+            api_key=self.config.opencodex_api_key,
+        )
+        try:
+            return await client.list_models()
+        finally:
+            await client.close()
+
+    async def check_model_sources(self) -> dict[str, Any]:
+        """Minimal connectivity regression over the three model sources.
+
+        Sources: (1) the Codex CLI itself, (2) the OpenCodex proxy endpoint,
+        (3) the configured default model present in the proxy model list.
+        Read-only; never modifies runtime state. Results are also published to
+        the ``control_plane_model_connectivity`` gauge.
+        """
+        from .codex_runner import CodexCliUnavailableError
+
+        cli: dict[str, Any] = {"ok": False, "path": "", "version": "", "error": ""}
+        try:
+            path, version = self.agent.cli_info()
+            cli.update(ok=True, path=str(path), version=version)
+        except CodexCliUnavailableError as exc:
+            cli["error"] = str(exc)
+
+        models = await self._opencodex_models()
+        opencodex: dict[str, Any] = {
+            "ok": models is not None,
+            "model_count": len(models) if models is not None else 0,
+            "error": "" if models is not None else "proxy unreachable or error response",
+        }
+        model: dict[str, Any] = {"ok": False, "configured": self.config.model, "error": "opencodex unreachable"}
+        if models is not None:
+            model["ok"] = self.config.model in models
+            model["error"] = (
+                ""
+                if model["ok"]
+                else "configured model missing from OpenCodex model list"
+            )
+
+        MODEL_CONNECTIVITY.labels(source="cli").set(1 if cli["ok"] else 0)
+        MODEL_CONNECTIVITY.labels(source="opencodex").set(1 if opencodex["ok"] else 0)
+        MODEL_CONNECTIVITY.labels(source="model").set(1 if model["ok"] else 0)
+        return {"cli": cli, "opencodex": opencodex, "model": model}
+
+    async def check_model_drift(self) -> dict[str, Any]:
+        """Read-only drift check for the OpenCodex model directory.
+
+        Compares the live model id set against the recorded baseline; a change
+        updates the baseline and is reported (metric + notification), never
+        blocking. Only the model id set is stored — never model content.
+        """
+        models = await self._opencodex_models()
+        if models is None:
+            return {"drifted": False, "reachable": False, "detail": "proxy unreachable"}
+        current = sorted(models)
+        baseline_raw = self.store.get_setting("models:baseline", "")
+        if not baseline_raw:
+            # No prior baseline: establish one without reporting drift (nothing
+            # to compare against on the very first run).
+            self.store.set_setting("models:baseline", ",".join(current))
+            MODEL_DRIFT.set(0)
+            return {"drifted": False, "reachable": True, "detail": "baseline established"}
+        baseline = [m for m in baseline_raw.split(",") if m]
+        drifted = baseline != current
+        self.store.set_setting("models:baseline", ",".join(current))
+        MODEL_DRIFT.set(1 if drifted else 0)
+        if drifted:
+            detail = {
+                "added": sorted(set(current) - set(baseline)),
+                "removed": sorted(set(baseline) - set(current)),
+            }
+            await self._notify(
+                "warning",
+                "OpenCodex 模型清单变化",
+                f"模型目录漂移检测：新增 {len(detail['added'])} 个、移除 {len(detail['removed'])} 个。"
+                f"新增: {', '.join(detail['added'][:8]) or '无'}；"
+                f"移除: {', '.join(detail['removed'][:8]) or '无'}",
+            )
+            return {"drifted": True, "reachable": True, "detail": detail}
+        return {"drifted": False, "reachable": True, "detail": "unchanged"}
+
+    async def startup_model_preflight(self) -> dict[str, Any]:
+        """Startup preflight for the configured default model (non-blocking).
+
+        Reports connectivity/degradation via metrics and a notification so the
+        control plane still serves when the model layer is down. Called once
+        from the app lifespan when ``model_preflight_enabled`` is set.
+        """
+        sources = await self.check_model_sources()
+        problems: list[str] = []
+        if not sources["cli"]["ok"]:
+            problems.append(f"codex CLI 不可用：{sources['cli']['error']}")
+        if not sources["opencodex"]["ok"]:
+            problems.append("OpenCodex 代理不可达（连通性预检失败）")
+        elif not sources["model"]["ok"]:
+            problems.append(
+                f"默认模型 {sources['model']['configured']} 不在 OpenCodex 模型清单中"
+            )
+        if problems:
+            await self._notify(
+                "warning",
+                "模型启动预检未通过",
+                "\n".join(problems),
+            )
+        return {"ok": not problems, "sources": sources, "problems": problems}
 
     async def close(self) -> None:
         for task in list(self._tasks):
