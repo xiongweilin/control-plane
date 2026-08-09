@@ -282,6 +282,9 @@ class ControlPlaneConfig:
             alertmanager_url=str(
                 policy.get("alertmanager_url", base.alertmanager_url)
             ),
+            prometheus_url=str(
+                policy.get("prometheus_url", base.prometheus_url)
+            ),
             external_side_effects_require_approval=_env_bool(
                 "CONTROL_PLANE_SIDE_EFFECT_APPROVAL",
                 bool(
