@@ -94,10 +94,22 @@ TERMINAL_STATES = frozenset(
         RepairState.ROLLED_BACK,
         RepairState.FAILED,
         RepairState.ESCALATED,
-        RepairState.INTERRUPTED,
         RepairState.TIMED_OUT,
     }
 )
+"""Unrecoverable terminal states: no outgoing transitions are defined."""
+
+RECOVERABLE_STATES = frozenset(
+    {
+        RepairState.INTERRUPTED,
+        RepairState.RECOVERING,
+        RepairState.NEEDS_APPROVAL,
+    }
+)
+"""Quiescent-but-recoverable states: the repair is not running but may resume."""
+
+QUIESCENT_STATES = TERMINAL_STATES | RECOVERABLE_STATES
+"""All non-active states (terminal or recoverable) for liveness accounting."""
 
 
 class StateMachineError(RuntimeError):
