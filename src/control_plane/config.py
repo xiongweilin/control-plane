@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,53 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _npm_vendor_codex() -> Path | None:
+    """Locate the native ``codex.exe`` shipped inside the npm @openai/codex package.
+
+    The package layout (``node_modules/@openai/codex-win32-x64/vendor/<target>/bin``)
+    has changed between releases, so the lookup is structure-tolerant: it walks the
+    package tree for the first ``codex.exe`` instead of pinning a nested path.
+    """
+    base = Path(os.getenv("APPDATA", "")) / "npm" / "node_modules" / "@openai" / "codex"
+    if not base.is_dir():
+        return None
+    for candidate in sorted(base.rglob("codex.exe")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def resolve_codex_cli(explicit: str = "") -> Path:
+    """Resolve the Codex CLI executable with stable, explicit priority.
+
+    1. Explicit ``[agent] codex_cli`` configuration wins.
+    2. A ``codex`` executable on PATH (Scoop shim or npm global shim).
+    3. The native ``codex.exe`` shipped inside the npm @openai/codex package.
+    4. Bare ``codex`` so subprocess resolution fails with a clear message
+       surfaced by :meth:`CodexRunner.cli_info`.
+
+    The previous default pinned an npm-package-internal vendor path
+    (``.../codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe``), which
+    breaks on package upgrades and layout changes; stable shims are preferred.
+    """
+    if explicit:
+        return Path(explicit)
+    found = shutil.which("codex.exe") or shutil.which("codex")
+    if found:
+        resolved = Path(found)
+        # npm global shims are .cmd/.bat wrappers that need a shell; prefer the
+        # native exe inside the package when the shim is not directly executable.
+        if resolved.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+            native = _npm_vendor_codex()
+            if native is not None:
+                return native
+        return resolved
+    native = _npm_vendor_codex()
+    if native is not None:
+        return native
+    return Path("codex")
+
+
 @dataclass(frozen=True, slots=True)
 class ControlPlaneConfig:
     """Runtime configuration for the control plane.
@@ -34,22 +82,7 @@ class ControlPlaneConfig:
 
     opencodex_base_url: str = "http://127.0.0.1:10100/v1"
     model: str = "opencode-go/deepseek-v4-flash"
-    codex_cli: Path = (
-        Path(os.getenv("USERPROFILE", "C:\\Users\\metra"))
-        / "AppData"
-        / "Roaming"
-        / "npm"
-        / "node_modules"
-        / "@openai"
-        / "codex"
-        / "node_modules"
-        / "@openai"
-        / "codex-win32-x64"
-        / "vendor"
-        / "x86_64-pc-windows-msvc"
-        / "bin"
-        / "codex.exe"
-    )
+    codex_cli: Path = field(default_factory=lambda: resolve_codex_cli())
     codex_branch_prefix: str = "fix/control-plane-"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
     opencodex_timeout_seconds: int = 120
@@ -211,7 +244,7 @@ class ControlPlaneConfig:
             api_key=api_key,
             opencodex_base_url=str(agent.get("opencodex_base_url", base.opencodex_base_url)),
             model=str(agent.get("model", base.model)),
-            codex_cli=Path(str(agent.get("codex_cli", base.codex_cli))),
+            codex_cli=resolve_codex_cli(str(agent.get("codex_cli", ""))),
             codex_branch_prefix=str(
                 agent.get("codex_branch_prefix", base.codex_branch_prefix)
             ),

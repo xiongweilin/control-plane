@@ -77,6 +77,16 @@ class ControlPlaneCollector:
         )
         run_info.add_metric([run_id or "unknown"], 1)
         yield run_info
+        codex_version = str(self._store.get_setting("codex:cli_version", "") or "")
+        codex_path = str(self._store.get_setting("codex:cli_path", "") or "")
+        if codex_version:
+            codex_info = GaugeMetricFamily(
+                "control_plane_codex_cli_info",
+                "Resolved Codex CLI version and path",
+                labels=["version", "path"],
+            )
+            codex_info.add_metric([codex_version, codex_path], 1)
+            yield codex_info
         yield GaugeMetricFamily(
             "control_plane_health_last_ready",
             "Unix timestamp of the last successful /ready database probe",
