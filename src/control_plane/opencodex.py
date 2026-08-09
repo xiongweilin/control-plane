@@ -13,6 +13,8 @@ from .audit import redact_text
 
 logger = logging.getLogger(__name__)
 
+HTTP_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
 _INLINE_SECRET_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)"
     r"[\s:=]{1,3}([A-Za-z0-9._\-+/]{6,})"
@@ -66,7 +68,10 @@ class OpenCodexClient:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.api_key = api_key
-        self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        self._client = client or httpx.AsyncClient(
+            timeout=timeout_seconds,
+            limits=HTTP_LIMITS,
+        )
         self._owns_client = client is None
 
     async def create_response(

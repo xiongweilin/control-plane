@@ -34,7 +34,10 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
     )
 
     async def run() -> list[dict[str, object]]:
-        return await service.cleanup_candidate_branches(apply=apply)
+        try:
+            return await service.cleanup_candidate_branches(apply=apply)
+        finally:
+            await service.close()
 
     branches = asyncio.run(run())
     for entry in branches:

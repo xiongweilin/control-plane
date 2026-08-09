@@ -21,6 +21,8 @@ from .storage import Store
 
 logger = logging.getLogger(__name__)
 
+HTTP_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 CONTAINER_STATUS_FORMAT = "{{.Names}}\t{{.Status}}"
 
@@ -56,7 +58,7 @@ class ToolContext:
         self.repair_id = repair_id
         self.patch_dir = patch_dir
         self.executor = executor or CommandExecutor(config)
-        self.http = http or httpx.AsyncClient(timeout=30)
+        self.http = http or httpx.AsyncClient(timeout=30, limits=HTTP_LIMITS)
         self._owns_http = http is None
 
     async def close(self) -> None:
