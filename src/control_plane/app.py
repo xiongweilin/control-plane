@@ -34,6 +34,7 @@ from .models import (
 )
 from .notify import Notifier
 from .runtime import (
+    acquire_single_instance,
     bootstrap,
     graceful_shutdown,
     run_info_dict,
@@ -66,6 +67,11 @@ class PromoteRequest(BaseModel):
     note: str = ""
 
 
+class CleanupRequest(BaseModel):
+    repos: list[str] = []
+    apply: bool = False
+
+
 def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg = with_run_id(config or ControlPlaneConfig.load())
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -86,6 +92,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         run = bootstrap(cfg.pid_file)
+        acquired, detail = acquire_single_instance(cfg.pid_file)
+        if not acquired:
+            logger.error("refusing to start: %s", detail)
+            raise RuntimeError(detail)
         store.start_run_record(
             run.run_id,
             run.pid,
@@ -93,10 +103,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             run.python_version,
         )
         logger.info(
-            "control plane started run_id=%s pid=%s hostname=%s",
+            "control plane started run_id=%s pid=%s hostname=%s (%s)",
             run.run_id,
             run.pid,
             run.hostname,
+            detail,
         )
         expired = store.expire_candidates(int(time.time()))
         if expired:
@@ -230,10 +241,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         from fastapi.responses import Response
 
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-    class CleanupRequest(BaseModel):
-        repos: list[str] = []
-        apply: bool = False
 
     @app.post("/v1/candidates/cleanup")
     async def candidate_cleanup(
