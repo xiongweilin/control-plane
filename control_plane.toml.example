@@ -7,6 +7,14 @@ port = 18083
 [agent]
 opencodex_base_url = "http://127.0.0.1:10100/v1"
 model = "opencode-go/deepseek-v4-flash"
+# 非 loopback opencodex_base_url 时必须显式配置（也可用环境变量
+# CONTROL_PLANE_OPENCODEX_API_KEY）；loopback 默认无需鉴权。
+opencodex_api_key = ""
+# Codex CLI 可执行路径；缺省时按优先级解析：PATH 上的 codex（Scoop/npm
+# shim）> npm 包内 codex.exe > 裸 codex（启动预检拒绝）。
+# codex_cli = "C:\\Users\\metra\\scoop\\shims\\codex.exe"
+# 启动时对三模型来源（CLI / OpenCodex 代理 / 默认模型）做连通性预检
+model_preflight_enabled = true
 opencodex_timeout_seconds = 120
 max_agent_calls_per_repair = 8
 # agent 输出写入会话文件前的上限（字节），超出部分截断并记录 truncated=true

@@ -34,7 +34,13 @@ uv run python -m control_plane
 
 ## Agent 触发说明
 
-控制平面启动的是原生 `codex.exe`（npm 包内 `@openai/codex-win32-x64`）：
+控制平面启动 Codex CLI 执行完整 agent 会话。可执行文件解析优先级
+（批次 5，见 ADR-0010）：显式 `[agent] codex_cli` 配置 > PATH 上的
+`codex`（Scoop shim 或 npm 全局 shim）> npm 包内原生 `codex.exe`
+（结构容忍查找，不再硬编码 vendor 内部路径）> 裸 `codex`。启动/每次
+会话前执行 `codex --version` 预检：CLI 缺失或探测失败会以清晰错误拒绝，
+上次记录版本变化写入 `codex:cli_version` 并通过
+`control_plane_codex_cli_info` 指标暴露。
 
 ```text
 codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
@@ -90,7 +96,12 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
   `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
   `control_plane_run_info`、`control_plane_health_last_ready` 与
-  `recovery_retry_failed` 指标；`/live`、`/ready` 供探针区分存活与就绪，
+  `recovery_retry_failed` 指标；批次 5 新增
+  `control_plane_model_connectivity{source}`（codex CLI / OpenCodex 代理 /
+  默认模型三来源连通）、`control_plane_model_drift`（模型清单漂移）、
+  `control_plane_ignored_errors_total{site}`（受控忽略计数）、
+  `control_plane_repairs_recoverable{status}`（可恢复静止修复）与
+  `control_plane_codex_cli_info{version,path}`；`/live`、`/ready` 供探针区分存活与就绪，
   已接入 Prometheus 与 Metratio Overview 看板。
 
 相关配置：`notify_cooldown_skip`、
@@ -260,6 +271,80 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   （`github_ssh_host_port` 可改），注入受限 `GIT_SSH_COMMAND`
   （BatchMode + ConnectTimeout + accept-new），两次失败抛出带分类的错误。
 
+## 加固（批次 5）
+
+### Codex 可执行路径与预检
+
+- 解析优先级：`[agent] codex_cli` > PATH `codex`（Scoop/npm shim）>
+  npm 包内原生 `codex.exe`（结构容忍）> 裸 `codex`；不再硬编码 npm 包
+  vendor 内部路径（升级即失效）。
+- 每次会话前 `codex --version` 预检，缺失/失败以 `CodexCliUnavailableError`
+  清晰拒绝；版本变化记录到 `codex:cli_version` 并告警。
+
+### 状态语义（终态 vs 可恢复静止）
+
+- `TERMINAL_STATES`（不可恢复）：`closed`/`rolled_back`/`failed`/
+  `escalated`/`timed_out`，均无出边；`TIMED_OUT` 仅用于 exec 超时且
+  无候选提交（`_failure_status_for` 判定）。
+- `RECOVERABLE_STATES`（静止可恢复）：`interrupted`/`recovering`/
+  `needs_approval`。`interrupted` 不再是终态：指纹冷却去重不再把中断当
+  完成，指标 `repairs_active` 排除全部静止状态，另暴露
+  `control_plane_repairs_recoverable{status}`。
+- 超时但已产生提交的修复走 `needs_approval`（可恢复），不经 `TIMED_OUT`。
+
+### 错误正文脱敏与 Responses API 语义
+
+- OpenCodex 上游错误正文先做字段级脱敏（敏感键）与行内密钥值扫描
+  （`api_key`/`token`/`secret` 等后跟长值），绝不把 `response.text[:500]`
+  原样带入异常或日志。
+- 解析明确处理 refusal（顶层/输出项/content 片段）、`status` 非
+  `completed` 视为 `incomplete`、未知输出类型收集到
+  `unknown_output_types`；function call 参数解析失败保留
+  `arguments_parse_error` 原因，不再静默丢弃。
+
+### OpenCodex 网络边界
+
+- `opencodex_base_url` 默认 loopback（127.0.0.1）；指向非 loopback 时
+  必须显式配置 `opencodex_api_key`（环境变量
+  `CONTROL_PLANE_OPENCODEX_API_KEY` 或 `[agent] opencodex_api_key`），
+  否则启动即拒绝（ConfigurationError）。每个请求携带 `X-Request-Id`
+  便于追踪，异常消息内附 request id。
+
+### 模型来源连通性与漂移
+
+- `check_model_sources()` 对三来源做最小连通性回归：Codex CLI
+  （`--version`）、OpenCodex 代理（`GET /models`）、默认模型
+  （`config.model` 是否在清单），结果发布
+  `control_plane_model_connectivity{source}`。
+- `check_model_drift()` 只读比较模型清单与 `models:baseline` 基线，
+  漂移时更新基线并通知（`control_plane_model_drift`）。
+- 启动预检 `startup_model_preflight()`（`model_preflight_enabled` 默认
+  开）：默认模型消失/代理不可达时发警告通知，不阻断服务。
+
+### 受控忽略与资源
+
+- 所有 `except…pass` 逐处审计：真忽略的加 debug 原因；关键路径
+  （审计写失败、进程树终止回退、仓库回退/枚举、探针构造、dirty 检查、
+  磁盘用量解析、docker df 解析）按 `site` 计入
+  `control_plane_ignored_errors_total`。
+- 所有 httpx 客户端统一连接池上限（`max_connections=20`、
+  `max_keepalive_connections=10`）；service/ToolContext/OpenCodexClient
+  只在自有客户端时关闭；取消中的请求释放回连接池（有测试）。
+
+### 静态类型与覆盖率门禁
+
+- `uv run mypy src/control_plane`（pyproject `[tool.mypy]`，src 范围）
+  基线通过，纳入 CI。
+- 覆盖率基线 `scripts/coverage-baseline.txt`（75%，CI 便携套件口径）；
+  `uv run python scripts/check_coverage.py` 作为下降门禁（容差 0.5%），
+  纳入 CI。
+
+### 数据库迁移
+
+- SQLite 迁移（`_ensure_column` 等）经测试覆盖：旧 schema 升级补列、
+  重复初始化幂等、已有行保留、部分新列场景、以及“新库可被旧版代码读取
+  与写入”（降级兼容）。
+
 ### ADR
 
 - [0002 进程树取消与 PID](/docs/decisions/0002-process-tree-kill-and-pid.md)
@@ -267,3 +352,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 - [0004 分支恢复与 dirty 策略](/docs/decisions/0004-branch-restore-and-dirty-policy.md)
 - [0005 审计与脱敏](/docs/decisions/0005-audit-and-redaction.md)
 - [0006 SSH 443 回退](/docs/decisions/0006-ssh443-fallback.md)
+- [0007 最小权限运行账户](/docs/decisions/0007-least-privilege-run-account.md)
+- [0008 计划任务迁移 Windows 服务（研究）](/docs/research/0008-scheduled-task-to-windows-service.md)
+- [0009 升级与修复授权](/docs/decisions/0009-upgrade-vs-fix-authorization.md)
+- [0010 OpenCodex 网络边界与模型来源](/docs/decisions/0010-opencodex-network-boundary.md)
