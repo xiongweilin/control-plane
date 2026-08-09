@@ -21,6 +21,7 @@ def _config(tmp_path) -> ControlPlaneConfig:
         notification_enabled=False,
         prometheus_url="",
         alertmanager_url="",
+        model_preflight_enabled=False,
     )
 
 
