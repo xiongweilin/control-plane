@@ -71,6 +71,12 @@ class CodexRunner:
                 proc.communicate(prompt.encode("utf-8")),
                 timeout=self.config.per_repair_timeout_seconds,
             )
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            logger.warning("codex session cancelled for %s", repair_id)
+            raise
         except TimeoutError:
             proc.kill()
             await proc.wait()

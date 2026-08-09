@@ -29,7 +29,7 @@ uv run python -m control_plane
 
 - Codex agent 在指定项目仓库内以完整工具环境运行，受任务 prompt 硬约束、全局 AGENTS.md 与控制平面独立验证约束。
 - 自动运维（可逆）：agent 可对白名单 compose 项目执行 restart / up -d、只读诊断、清理与健康等待；控制平面事后独立核验容器状态与 git 状态。
-- 候选 + 审批：agent 对代码/配置的修改必须提交到 `fix/control-plane-<id>` 分支；控制平面读取分支差异、拒绝修改验证器/告警规则/权限/control-plane 自身，审批后合并 main 并推送。
+- 候选 + 审批：agent 对代码/配置的修改必须提交到 `fix/control-plane-<id>` 分支；控制平面读取分支差异、拒绝修改验证器/告警规则/权限/control-plane 自身，审批后合并 main 并推送。Agent 超时但已留下提交时进入 `candidate/pending-review`（repair 状态为 `needs_approval`），不记为 failed；每次 Agent 结束都在 `finally` 恢复原 Git 分支。
 - 默认禁止：文件写入（候选分支除外）、依赖变更、数据库写、云端写、凭据访问、删除数据、修改验证器/告警规则/权限。
 
 ## Agent 触发说明
@@ -59,13 +59,13 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 /task <描述> 派发任务给 Agent 执行
 ```
 
-飞书普通消息（非命令）会走 Dify Chatflow 对话；`/new` 开始新会话。
+飞书普通消息（非命令）等价于 `/task <描述>`，直接派发给控制平面的 Codex Agent；Dify Chatflow 已移除。
 `/task <描述>` 会把任务派发给控制平面的 Codex Agent（deepseek-v4-flash），
 执行过程同样推送：任务已接收 → Agent 启动 → 完成/失败。
 
 告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
 `manual`（收到告警后等你决定，`/cp run` 执行或 `/cp ignore` 忽略）或 `ignore`（直接忽略）。
-告警恢复后，该指纹的自动修复尝试计数会重置。
+Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 PromQL、HTTP 探针或容器状态完成确定性恢复验证，才会中断进行中的修复并重置该指纹的自动修复尝试计数。没有验证器或验证失败时保留尝试次数。
 
 沉淀文件位置（可直接打开）：
 
@@ -82,11 +82,10 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 
 - 开始修复：repair_id、告警描述、今日 Agent 预算剩余；已知模式会提示已支持次数。
 - Agent 启动：目标仓库 / 分支 / 模型。
-- 验证通过 → 修复完成（验证摘要 + 回滚命令）；失败则说明原因与下一步指引。
+- 验证通过 → 修复完成（验证摘要 + 回滚命令）；失败则说明原因与下一步指引。Agent 超时但已提交候选时转入待审批，不按失败丢弃。
 - 噪音分级：测试/烟雾告警（AlertmanagerE2E、smoke-* 等）只记录不触发修复；
   冷却期跳过会提示剩余时间；候选再次复现提示“已知模式第 N 次”。
-- 告警恢复：自动中断进行中修复（不再出现“告警已恢复仍报正在诊断”）；
-  已恢复告警不沉淀候选经验。
+- 告警恢复：只有确定性恢复验证通过后才中断进行中修复并重置尝试；仅收到 `resolved` 不足以证明恢复。已恢复告警不沉淀候选经验。
 - 审批：代码变更后等待 `/cp approve|reject|rollback`，或直接调用
   `POST /v1/approvals/{repair_id}/decision`（需 X-Control-Plane-Key）。
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
@@ -101,7 +100,7 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 ./scripts/install-control-plane.ps1
 ```
 
-脚本注册开机计划任务 `ControlPlane` 并添加仅限本地子网的防火墙规则（TCP 18083）。密钥通过用户环境变量 `CONTROL_PLANE_API_KEY` 提供，不进入仓库、日志或命令历史。
+脚本注册开机计划任务 `ControlPlane` 并添加仅限本地子网的防火墙规则（TCP 18083）。密钥通过用户环境变量 `CONTROL_PLANE_API_KEY` 提供，不进入仓库、日志或命令历史。Alertmanager 从只读 secret 卷读取同一共享密钥并通过 `Authorization: Bearer` 发送；告警入口不接受查询参数密钥，其他控制 API 继续使用 `X-Control-Plane-Key`。
 
 ## 候选经验生命周期
 
@@ -131,6 +130,8 @@ observability、feishu-dify-gateway）执行 `docker compose restart / up -d`、
 按告警类型自动推导证据：`ServiceDown`（实例为 URL）→ 探针 + `probe_success == 1`；
 `PrometheusScrapeFailed` → `up{instance=...} == 1`；无代码/探针证据的纯运维修复
 回退到白名单项目容器基线。无任何确定性检查时判失败（minimum_evidence）。
+
+恢复验证使用同一类确定性证据：开发环境告警要求 `dev_environment_health == 1` 且维护指标未陈旧；指标陈旧告警要求最新样本重新进入 7 小时窗口；服务不可达使用允许列表内的 HTTP 探针；抓取失败使用 `up == 1`；已知项目告警使用容器健康状态。执行 npm 审计时固定显式使用 `--registry=https://registry.npmjs.org`。
 
 ## 每日沉淀整理
 

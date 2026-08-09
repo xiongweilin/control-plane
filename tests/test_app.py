@@ -76,6 +76,46 @@ def test_ingest_and_status(tmp_path, monkeypatch) -> None:
     assert "recent_repairs" in status.json()
 
 
+def test_alertmanager_accepts_bearer_and_rejects_query_secret(tmp_path) -> None:
+    app = create_app(_config(tmp_path))
+    app.state.service.ingest = AsyncMock(  # type: ignore[attr-defined]
+        return_value=AlertResponse(
+            accepted=1,
+            deduplicated=0,
+            cooldown=0,
+            budget_limited=0,
+            paused=0,
+        )
+    )
+    client = TestClient(app)
+    payload = {
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {"alertname": "HighCPU"},
+                "annotations": {},
+                "startsAt": "2026-08-06T00:00:00Z",
+                "endsAt": None,
+                "fingerprint": "fp-bearer",
+            }
+        ],
+    }
+    accepted = client.post(
+        "/v1/alerts/alertmanager",
+        json=payload,
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["accepted"] == 1
+
+    rejected = client.post(
+        "/v1/alerts/alertmanager?api_key=secret",
+        json=payload,
+    )
+    assert rejected.status_code == 401
+
+
 def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
     app = create_app(_config(tmp_path))
     store: Store = app.state.store

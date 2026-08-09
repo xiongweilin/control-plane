@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from pydantic import BaseModel
@@ -108,12 +109,18 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     app.state.service = service
     app.state.store = store
 
+    def key_matches(candidate: str) -> bool:
+        return bool(candidate) and secrets.compare_digest(candidate, cfg.api_key)
+
     async def require_key(x_control_plane_key: str = Header(default="")) -> None:
-        if x_control_plane_key != cfg.api_key:
+        if not key_matches(x_control_plane_key):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    async def valid_key(header_key: str, query_key: str | None) -> bool:
-        return header_key == cfg.api_key or (query_key is not None and query_key == cfg.api_key)
+    async def valid_alertmanager_key(header_key: str, authorization: str) -> bool:
+        if key_matches(header_key):
+            return True
+        scheme, separator, credential = authorization.partition(" ")
+        return separator == " " and scheme.lower() == "bearer" and key_matches(credential)
 
     def error_payload(code: str, message: str) -> ErrorResponse:
         return ErrorResponse(error=ErrorDetail(code=code, message=message))
@@ -250,9 +257,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     async def ingest_alerts(
         payload: AlertmanagerPayload,
         x_control_plane_key: str = Header(default=""),
-        api_key: str | None = Query(default=None),
+        authorization: str = Header(default=""),
     ) -> AlertResponse:
-        if not await valid_key(x_control_plane_key, api_key):
+        if not await valid_alertmanager_key(x_control_plane_key, authorization):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
         return await service.ingest(payload)
 

@@ -107,10 +107,25 @@ class RepairService:
         starts_at = int(alert.starts_at.timestamp())
 
         if alert.status == "resolved":
-            self.store.mark_alert_resolved(fingerprint, int(alert.ends_at.timestamp()) if alert.ends_at else None)
-            self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
-            await self._cancel_in_progress_repairs(fingerprint)
-            await self._notify("info", f"告警已恢复：{alertname}", self._describe(alert))
+            self.store.mark_alert_resolved(
+                fingerprint,
+                int(alert.ends_at.timestamp()) if alert.ends_at else None,
+            )
+            recovered, evidence = await self._verify_alert_recovery(alert)
+            if recovered:
+                self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
+                await self._cancel_in_progress_repairs(fingerprint)
+                await self._notify(
+                    "info",
+                    f"告警恢复已验证：{alertname}",
+                    f"{self._describe(alert)}\n恢复证据：{evidence}",
+                )
+            else:
+                await self._notify(
+                    "warning",
+                    f"告警 resolved 但恢复未验证：{alertname}",
+                    f"{self._describe(alert)}\n未重置自动修复次数；{evidence}",
+                )
             return {"deduplicated": 1}
 
         known = self.store.get_alert(fingerprint)
@@ -654,6 +669,15 @@ class RepairService:
                 self._transition(repair_id, RepairState.DIAGNOSING)
                 proposal = await self._run_codex_agent(ctx, repair_id, alert)
                 if proposal.get("code_changed"):
+                    if proposal.get("timed_out"):
+                        await self._notify(
+                            "warning",
+                            "Agent 超时，候选代码待审批",
+                            f"repair_id={repair_id}\n"
+                            f"repo={proposal.get('repo')}\n"
+                            f"branch={proposal.get('branch')}\n"
+                            "候选提交已保存，工作目录已恢复；不会按 failed 丢弃。",
+                        )
                     await self._await_approval(ctx, repair_id, "apply")
                 report = await self._verify(ctx, repair_id, alert)
                 if not report.all_passed:
@@ -711,39 +735,91 @@ class RepairService:
         alert: Alert,
     ) -> dict[str, Any]:
         self._transition(repair_id, RepairState.PROPOSING)
-        repo = await self._pick_repo(alert)
+        repo_root = await self._pick_repo(alert)
         branch = f"{self.config.codex_branch_prefix}{repair_id}"
         await self._notify(
             "info",
             "Agent 启动",
-            f"repair_id={repair_id}\n目标仓库: {repo}\n分支: {branch}\n模型: {self.config.model}",
+            f"repair_id={repair_id}\n目标仓库: {repo_root}\n分支: {branch}\n模型: {self.config.model}",
         )
-        before = await self._capture_repo_state(repo)
-        prompt = self._build_agent_prompt(alert, repo, repair_id, branch)
-        result = await self.agent.run_task(
-            repair_id=repair_id,
-            repo=repo,
-            prompt=prompt,
-        )
-        self.store.increment_agent_calls(repair_id)
-        self.budget.spend()
-        if result.timed_out:
-            raise RuntimeError("Codex agent timed out")
-        changed, diff_stat = await self._code_changed(repo, branch)
-        if result.exit_code != 0 and not changed:
-            raise RuntimeError(
-                f"Codex agent failed (exit {result.exit_code}): {result.stderr_tail}"
+        workspaces = await self._capture_workspace_states(repo_root)
+        prompt = self._build_agent_prompt(alert, repo_root, repair_id, branch)
+        try:
+            result = await self.agent.run_task(
+                repair_id=repair_id,
+                repo=repo_root,
+                prompt=prompt,
             )
-        self._record_codex_action(
-            repair_id,
-            repo,
-            before,
-            branch,
-            diff_stat,
-            result.last_message,
-            changed=changed,
-        )
-        return {"code_changed": changed, "branch": branch, "summary": result.last_message}
+            self.store.increment_agent_calls(repair_id)
+            self.budget.spend()
+
+            changed_workspaces: list[tuple[dict[str, str], str]] = []
+            for before in workspaces:
+                changed, diff_stat = await self._code_changed(before["repo"], branch)
+                if changed:
+                    changed_workspaces.append((before, diff_stat))
+            if len(changed_workspaces) > 1:
+                targets = ", ".join(state["repo"] for state, _ in changed_workspaces)
+                raise RuntimeError(f"Agent changed multiple repositories: {targets}")
+
+            if changed_workspaces:
+                before, diff_stat = changed_workspaces[0]
+                actual_repo = before["repo"]
+                summary = result.last_message or (
+                    "Agent timed out after creating a committed candidate branch"
+                    if result.timed_out
+                    else "Agent created a committed candidate branch without a summary"
+                )
+                self._record_codex_action(
+                    repair_id,
+                    actual_repo,
+                    before,
+                    branch,
+                    diff_stat,
+                    summary,
+                    changed=True,
+                )
+                return {
+                    "code_changed": True,
+                    "branch": branch,
+                    "repo": actual_repo,
+                    "summary": summary,
+                    "timed_out": result.timed_out,
+                }
+
+            if result.timed_out:
+                raise RuntimeError("Codex agent timed out without a committed candidate")
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    f"Codex agent failed (exit {result.exit_code}): {result.stderr_tail}"
+                )
+            before = workspaces[0] if workspaces else {"git_head": "no-git"}
+            self._record_codex_action(
+                repair_id,
+                repo_root,
+                before,
+                branch,
+                "",
+                result.last_message,
+                changed=False,
+            )
+            return {
+                "code_changed": False,
+                "branch": branch,
+                "repo": repo_root,
+                "summary": result.last_message,
+                "timed_out": False,
+            }
+        finally:
+            restore_errors = await self._restore_workspace_states(workspaces, branch)
+            if restore_errors:
+                detail = "; ".join(restore_errors)
+                await self._notify(
+                    "critical",
+                    "Agent 工作目录恢复失败",
+                    f"repair_id={repair_id}\n{detail}",
+                )
+                raise RuntimeError(f"Failed to restore Agent workspaces: {detail}")
 
     def _build_agent_prompt(
         self,
@@ -776,6 +852,8 @@ class RepairService:
             "DROP/TRUNCATE、删除持久化数据）、docker compose down、git push --force 或删除 main/受保护分支、"
             "修改凭据/防火墙/sshd、停止或删除含持久化数据的容器（先验证备份再做）。",
             "- 诊断优先只读；无法确认的失败不要伪装成功；不制造无意义的新告警。",
+            "- 执行 npm audit 时必须显式使用 --registry=https://registry.npmjs.org，"
+            "不得用镜像站不支持 audit API 的结果判断漏洞状态。",
             "- 候选经验与 official playbook 只作为推理参考，不自动取得执行权限。",
         ]
         if playbooks:
@@ -824,10 +902,85 @@ class RepairService:
 
     async def _capture_repo_state(self, repo: str) -> dict[str, str]:
         try:
-            head = await self.executor.run(["git", "-C", repo, "rev-parse", "--short", "HEAD"])
+            inside = await self.executor.run(
+                ["git", "-C", repo, "rev-parse", "--is-inside-work-tree"]
+            )
         except ToolError:
-            head = "no-git"
-        return {"git_head": head.strip()}
+            return {"repo": repo, "is_git": "0", "git_head": "no-git", "git_ref": ""}
+        if inside.strip().lower() != "true":
+            return {"repo": repo, "is_git": "0", "git_head": "no-git", "git_ref": ""}
+        head = await self.executor.run(["git", "-C", repo, "rev-parse", "HEAD"])
+        try:
+            ref = await self.executor.run(
+                ["git", "-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"]
+            )
+        except ToolError:
+            ref = ""
+        return {
+            "repo": repo,
+            "is_git": "1",
+            "git_head": head.strip(),
+            "git_ref": ref.strip(),
+        }
+
+    async def _capture_workspace_states(self, repo_root: str) -> list[dict[str, str]]:
+        root = Path(repo_root)
+        paths = [root]
+        if not (root / ".git").exists() and root.is_dir():
+            paths.extend(
+                child
+                for child in sorted(root.iterdir(), key=lambda item: item.name.lower())
+                if child.is_dir() and (child / ".git").exists()
+            )
+        states: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for path in paths[:50]:
+            normalized = str(path.resolve())
+            if normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            state = await self._capture_repo_state(normalized)
+            if state["is_git"] == "1":
+                states.append(state)
+        return states
+
+    async def _restore_workspace_states(
+        self,
+        states: list[dict[str, str]],
+        candidate_branch: str,
+    ) -> list[str]:
+        errors: list[str] = []
+        for before in states:
+            repo = before["repo"]
+            try:
+                current = await self._capture_repo_state(repo)
+                if current["git_head"] == before["git_head"] and current["git_ref"] == before["git_ref"]:
+                    continue
+                if current["git_ref"] != candidate_branch:
+                    errors.append(
+                        f"{repo}: current ref {current['git_ref'] or current['git_head']} "
+                        "is neither the original ref nor the candidate branch"
+                    )
+                    continue
+                if before["git_ref"]:
+                    await self.executor.run(
+                        ["git", "-C", repo, "switch", "--quiet", before["git_ref"]],
+                        timeout=120,
+                    )
+                else:
+                    await self.executor.run(
+                        ["git", "-C", repo, "switch", "--quiet", "--detach", before["git_head"]],
+                        timeout=120,
+                    )
+                restored = await self._capture_repo_state(repo)
+                if (
+                    restored["git_head"] != before["git_head"]
+                    or restored["git_ref"] != before["git_ref"]
+                ):
+                    errors.append(f"{repo}: post-restore ref/head mismatch")
+            except (OSError, ToolError) as exc:
+                errors.append(f"{repo}: {exc}")
+        return errors
 
     async def _code_changed(self, repo: str, branch: str) -> tuple[bool, str]:
         try:
@@ -1072,6 +1225,54 @@ class RepairService:
                 if abs(value - expected) > 1e-9:
                     return False, f"value {value} != expected {expected} ({query})", "promql"
         return True, "query returned results", "promql"
+
+    async def _verify_alert_recovery(self, alert: Alert) -> tuple[bool, str]:
+        """Verify recovery from current deterministic evidence, not Alertmanager status alone."""
+        alertname = alert.labels.get("alertname", "")
+        instance = alert.labels.get("instance", "")
+        raw_project = alert.labels.get("project", "")
+        resolved_project = self._resolve_project(raw_project)
+        project = (
+            resolved_project
+            if resolved_project in self.config.allowed_auto_projects
+            else raw_project
+        )
+
+        if alertname == "DevEnvironmentUnhealthy":
+            ok, message, _ = await self._check_promql(
+                "dev_environment_health == 1 and on() "
+                "((time() - dev_maintenance_last_run_ts) < 25200)",
+                expected=1,
+            )
+            return ok, message
+
+        if alertname == "MaintenanceMetricsStale":
+            ok, message, _ = await self._check_promql(
+                "(time() - dev_maintenance_last_run_ts) < bool 25200",
+                expected=1,
+            )
+            return ok, message
+
+        if alertname == "ServiceDown" and instance.startswith(("http://", "https://")):
+            try:
+                validate_url(instance, self.config.allowed_url_origins)
+            except ToolError as exc:
+                return False, f"recovery probe rejected: {exc}"
+            return await _probe(self.http, instance)
+
+        if alertname == "PrometheusScrapeFailed" and instance:
+            escaped = instance.replace("\\", "\\\\").replace('"', '\\"')
+            ok, message, _ = await self._check_promql(
+                f'up{{instance="{escaped}"}}',
+                expected=1,
+            )
+            return ok, message
+
+        if project in self.config.allowed_auto_projects:
+            ok, message, _ = await self._check_containers([project])
+            return ok, message
+
+        return False, f"no deterministic recovery validator for {alertname or 'unknown'}"
 
     async def _check_logs(
         self,
