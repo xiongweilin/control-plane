@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (cached)
+        uses: astral-sh/setup-uv@v8.3.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Pytest
+        run: uv run pytest
