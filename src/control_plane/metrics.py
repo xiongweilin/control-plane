@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import datetime as dt
 
+from prometheus_client import Counter
 from prometheus_client.core import GaugeMetricFamily
 
 from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES
 from .storage import Store
+
+# 鉴权失败计数（低噪声安全可观测；按 reason/endpoint 打标）
+AUTH_FAILURES = Counter(
+    "control_plane_auth_failures_total",
+    "Authentication failures",
+    ["reason", "endpoint"],
+)
 
 
 class ControlPlaneCollector:

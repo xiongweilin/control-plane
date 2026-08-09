@@ -6,6 +6,7 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -19,7 +20,7 @@ from .audit import inspect_session_fields
 from .budget import Budget
 from .codex_runner import CodexRunner
 from .config import ControlPlaneConfig
-from .metrics import ControlPlaneCollector
+from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
     AlertmanagerPayload,
     AlertPolicyRequest,
@@ -43,6 +44,9 @@ from .runtime import (
 from .service import RepairService
 from .state_machine import RepairState
 from .storage import Store
+
+# 记录当前请求路径，供鉴权失败指标打标（中间件维护）
+_current_path: ContextVar[str] = ContextVar("cp_current_path", default="unknown")
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +170,20 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     app.state.service = service
     app.state.store = store
 
+    @app.middleware("http")
+    async def record_current_path(request: Request, call_next):
+        token = _current_path.set(request.url.path)
+        try:
+            return await call_next(request)
+        finally:
+            _current_path.reset(token)
+
     def key_matches(candidate: str) -> bool:
         return bool(candidate) and secrets.compare_digest(candidate, cfg.api_key)
 
     async def require_key(x_control_plane_key: str = Header(default="")) -> None:
         if not key_matches(x_control_plane_key):
+            AUTH_FAILURES.labels(reason="invalid_key", endpoint=_current_path.get()).inc()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     async def valid_alertmanager_key(header_key: str, authorization: str) -> bool:
@@ -380,6 +393,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         authorization: str = Header(default=""),
     ) -> AlertResponse:
         if not await valid_alertmanager_key(x_control_plane_key, authorization):
+            AUTH_FAILURES.labels(reason="invalid_key", endpoint="/v1/alerts/alertmanager").inc()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
         return await service.ingest(payload)
 
