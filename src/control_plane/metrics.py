@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 from prometheus_client.core import GaugeMetricFamily
 
 from .runtime import current_run_id
@@ -14,6 +14,19 @@ AUTH_FAILURES = Counter(
     "control_plane_auth_failures_total",
     "Authentication failures",
     ["reason", "endpoint"],
+)
+
+# 模型来源连通性（批次5-5）：1=可达，0=不可达
+MODEL_CONNECTIVITY = Gauge(
+    "control_plane_model_connectivity",
+    "Model source reachability (1=ok, 0=unreachable)",
+    ["source"],
+)
+
+# 模型目录漂移（批次5-5）：1=与基线不一致
+MODEL_DRIFT = Gauge(
+    "control_plane_model_drift",
+    "1 when the OpenCodex model list drifted from the recorded baseline",
 )
 
 

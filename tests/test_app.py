@@ -20,6 +20,7 @@ def _config(tmp_path) -> ControlPlaneConfig:
         evidence_dir=tmp_path / "data" / "evidence",
         state_db=tmp_path / "data" / "control-plane.db",
         notification_enabled=False,
+        model_preflight_enabled=False,
     )
 
 

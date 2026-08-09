@@ -134,6 +134,23 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not store.get_setting("usage_hint_sent"):
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")
+        if cfg.model_preflight_enabled:
+            try:
+                preflight = await service.startup_model_preflight()
+                if not preflight["ok"]:
+                    logger.warning(
+                        "model preflight degraded: %s",
+                        "; ".join(preflight["problems"]),
+                    )
+                else:
+                    logger.info(
+                        "model preflight ok (cli=%s, opencodex=%s, model=%s)",
+                        preflight["sources"]["cli"]["ok"],
+                        preflight["sources"]["opencodex"]["ok"],
+                        preflight["sources"]["model"]["ok"],
+                    )
+            except Exception:
+                logger.exception("model preflight failed")
         digest_task = asyncio.create_task(service.digest_loop())
         scan_task = asyncio.create_task(service.scan_loop())
         resume_tasks = [asyncio.create_task(service.resume_pending_approval(r)) for r in resumed]
