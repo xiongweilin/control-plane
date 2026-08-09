@@ -408,7 +408,12 @@ class RepairService:
                 "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
                 "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
             )
-            result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt=task_prompt)
+            result = await self.agent.run_task(
+                repair_id=task_id,
+                repo=repo,
+                prompt=task_prompt,
+                run_id=self.run_id,
+            )
             self.store.increment_agent_calls(task_id)
             self.budget.spend()
             if result.timed_out:
@@ -487,7 +492,12 @@ class RepairService:
         )
 
         task_id = f"digest-{today}"
-        result = await self.agent.run_task(repair_id=task_id, repo=repo, prompt="\n".join(lines))
+        result = await self.agent.run_task(
+            repair_id=task_id,
+            repo=repo,
+            prompt="\n".join(lines),
+            run_id=self.run_id,
+        )
         self.budget.spend()
         if result.timed_out or result.exit_code != 0:
             await self._notify(
@@ -1465,7 +1475,7 @@ class RepairService:
             repo = row["target"]
             if not repo:
                 continue
-            branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
+            branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
             await self.executor.run(["git", "-C", repo, "checkout", "-q", "main"], timeout=120)
             try:
                 await self.executor.run(["git", "-C", repo, "merge", "--ff-only", branch], timeout=120)
@@ -1983,7 +1993,7 @@ class RepairService:
             if tool == "codex_agent":
                 after = json.loads(row["after_json"]) if row["after_json"] else {}
                 repo = row["target"]
-                branch = after.get("branch", f"{self.config.codex_branch_prefix}{repair_id}")
+                branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
                 try:
                     for git_args in (
                         ["git", "-C", repo, "checkout", "-q", "main"],
