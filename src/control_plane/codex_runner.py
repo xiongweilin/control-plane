@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from .audit import redact_args, redact_text, truncate_bytes
 from .config import ControlPlaneConfig
@@ -12,6 +14,10 @@ from .runtime import current_run_id, terminate_process_tree_async
 from .storage import Store
 
 logger = logging.getLogger(__name__)
+
+
+class CodexCliUnavailableError(RuntimeError):
+    """Raised when the Codex CLI cannot be located or its version probe fails."""
 
 
 def repo_path_to_windows(path: str) -> str:
@@ -45,6 +51,58 @@ class CodexRunner:
         """Attach the persistence store for audit records (set at app startup)."""
         self.store = store
 
+    def cli_info(self) -> tuple[Path, str]:
+        """Probe the resolved CLI and return ``(path, version)``.
+
+        Raises :class:`CodexCliUnavailableError` with a clear diagnostic when the
+        CLI is missing, not executable, or the version probe fails. This is the
+        fail-fast guard for batch5 item 1 (no hardcoded npm-internal paths).
+        """
+        path = self.config.codex_cli
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed command line; path resolved by config
+                [str(path), "--version"],
+                capture_output=True,
+                timeout=15,
+                shell=False,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexCliUnavailableError(
+                f"Codex CLI not runnable at {path}: {exc}"
+            ) from exc
+        output = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0 or not output:
+            stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise CodexCliUnavailableError(
+                f"Codex CLI version probe failed (exit {proc.returncode}) at {path}: "
+                f"{stderr[:300] or 'no output'}"
+            )
+        return path, output.splitlines()[0].strip()
+
+    def check_cli(self) -> tuple[Path, str, bool]:
+        """Probe the CLI and detect version drift since the last probe.
+
+        Returns ``(path, version, changed)``. The last seen version is persisted
+        (``codex:cli_version`` / ``codex:cli_path`` settings) so version upgrades
+        are visible; a change is logged at warning level.
+        """
+        path, version = self.cli_info()
+        changed = False
+        if self.store is not None:
+            previous = self.store.get_setting("codex:cli_version", "")
+            if previous and previous != version:
+                changed = True
+                logger.warning(
+                    "codex CLI version changed from %s to %s (path %s)",
+                    previous,
+                    version,
+                    path,
+                )
+            self.store.set_setting("codex:cli_version", version)
+            self.store.set_setting("codex:cli_path", str(path))
+        return path, version, changed
+
     async def run_task(
         self,
         *,
@@ -53,6 +111,7 @@ class CodexRunner:
         prompt: str,
         run_id: str = "",
     ) -> CodexSessionResult:
+        self.cli_info()  # fail fast with a clear error instead of a raw spawn error
         session_dir = self.config.agent_session_dir
         session_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = session_dir / f"{repair_id}.jsonl"
