@@ -192,8 +192,13 @@ async def _probe(
     return True, f"HTTP {response.status_code}"
 
 
-async def _run_cmd(ctx: ToolContext, args: list[str], cwd: str | None = None) -> str:
-    return await ctx.executor.run(args, cwd=cwd)
+async def _run_cmd(
+    ctx: ToolContext,
+    args: list[str],
+    cwd: str | None = None,
+    timeout: int = 60,
+) -> str:
+    return await ctx.executor.run(args, cwd=cwd, timeout=timeout)
 
 
 async def _container_status_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -272,7 +277,8 @@ async def _restart_service_tool(ctx: ToolContext, arguments: dict[str, Any]) -> 
     project = validate_identifier(str(arguments.get("project", "")), "project")
     if project not in ctx.config.allowed_auto_projects:
         raise ToolError(f"Project not allowed for restart: {project}")
-    service = validate_identifier(str(arguments.get("service", "")), "service")
+    raw_service = str(arguments.get("service", ""))
+    service = validate_identifier(raw_service, "service") if raw_service else ""
     project_dir = ctx.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
     before = await _run_cmd(
         ctx,

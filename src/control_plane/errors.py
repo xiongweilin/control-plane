@@ -88,6 +88,9 @@ def classify_verify_error(message: str) -> ErrorClass:
     lowered = message.lower()
     if any(hint in lowered for hint in NETWORK_HINTS):
         return ErrorClass.RETRYABLE
-    if any(hint in lowered for hint in ("no result", "expected", "not up", "unhealthy", "missing", "rejected")):
+    if any(
+        hint in lowered
+        for hint in ("no result", "!= expected", "not up", "unhealthy", "missing", "rejected")
+    ):
         return ErrorClass.DETERMINISTIC
     return ErrorClass.UNKNOWN

@@ -56,8 +56,12 @@ def redact_args(args: list[str]) -> list[str]:
                 redacted.append(arg)
             continue
         if _key_is_sensitive(arg):
-            redacted.append(arg)
-            pending_sensitive = True
+            if ":" in arg:
+                # "key: value"-style argument already carries its own value
+                redacted.append(REDACTED)
+            else:
+                redacted.append(arg)
+                pending_sensitive = True
             continue
         lowered = arg.lower()
         if "authorization" in lowered and ("bearer" in lowered or ":" in arg):
