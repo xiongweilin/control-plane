@@ -10,6 +10,8 @@ class RepairState(StrEnum):
     STAGED = "staged"
     APPLYING = "applying"
     VERIFIED = "verified"
+    RECOVERING = "recovering"
+    TIMED_OUT = "timed_out"
     CLOSED = "closed"
     NEEDS_APPROVAL = "needs_approval"
     ROLLED_BACK = "rolled_back"
@@ -19,8 +21,12 @@ class RepairState(StrEnum):
 
 
 _TRANSITIONS: dict[RepairState, frozenset[RepairState]] = {
-    RepairState.QUEUED: frozenset({RepairState.DIAGNOSING, RepairState.INTERRUPTED, RepairState.FAILED}),
-    RepairState.DIAGNOSING: frozenset({RepairState.PROPOSING, RepairState.INTERRUPTED, RepairState.FAILED}),
+    RepairState.QUEUED: frozenset(
+        {RepairState.DIAGNOSING, RepairState.INTERRUPTED, RepairState.FAILED, RepairState.TIMED_OUT}
+    ),
+    RepairState.DIAGNOSING: frozenset(
+        {RepairState.PROPOSING, RepairState.INTERRUPTED, RepairState.FAILED, RepairState.TIMED_OUT}
+    ),
     RepairState.PROPOSING: frozenset(
         {
             RepairState.STAGED,
@@ -28,6 +34,7 @@ _TRANSITIONS: dict[RepairState, frozenset[RepairState]] = {
             RepairState.VERIFIED,
             RepairState.INTERRUPTED,
             RepairState.FAILED,
+            RepairState.TIMED_OUT,
         }
     ),
     RepairState.STAGED: frozenset(
@@ -36,15 +43,29 @@ _TRANSITIONS: dict[RepairState, frozenset[RepairState]] = {
             RepairState.NEEDS_APPROVAL,
             RepairState.INTERRUPTED,
             RepairState.FAILED,
+            RepairState.TIMED_OUT,
         }
     ),
     RepairState.NEEDS_APPROVAL: frozenset(
         {
+            RepairState.RECOVERING,
             RepairState.STAGED,
             RepairState.APPLYING,
             RepairState.CLOSED,
             RepairState.ROLLED_BACK,
             RepairState.INTERRUPTED,
+            RepairState.ESCALATED,
+        }
+    ),
+    RepairState.RECOVERING: frozenset(
+        {
+            RepairState.NEEDS_APPROVAL,
+            RepairState.APPLYING,
+            RepairState.CLOSED,
+            RepairState.ROLLED_BACK,
+            RepairState.ESCALATED,
+            RepairState.INTERRUPTED,
+            RepairState.FAILED,
         }
     ),
     RepairState.APPLYING: frozenset(
@@ -54,9 +75,17 @@ _TRANSITIONS: dict[RepairState, frozenset[RepairState]] = {
             RepairState.FAILED,
             RepairState.ESCALATED,
             RepairState.INTERRUPTED,
+            RepairState.TIMED_OUT,
         }
     ),
     RepairState.VERIFIED: frozenset({RepairState.CLOSED, RepairState.INTERRUPTED}),
+    RepairState.INTERRUPTED: frozenset(
+        {
+            RepairState.RECOVERING,
+            RepairState.FAILED,
+            RepairState.CLOSED,
+        }
+    ),
 }
 
 TERMINAL_STATES = frozenset(
@@ -66,6 +95,7 @@ TERMINAL_STATES = frozenset(
         RepairState.FAILED,
         RepairState.ESCALATED,
         RepairState.INTERRUPTED,
+        RepairState.TIMED_OUT,
     }
 )
 

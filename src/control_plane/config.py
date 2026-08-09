@@ -21,9 +21,16 @@ def _env_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ControlPlaneConfig:
+    """Runtime configuration for the control plane.
+
+    ``run_id`` is filled in at startup by :func:`control_plane.runtime.bootstrap`
+    and is empty for configs constructed directly (e.g. in tests).
+    """
+
     host: str = "127.0.0.1"
     port: int = 18083
     api_key: str = ""
+    run_id: str = ""
 
     opencodex_base_url: str = "http://127.0.0.1:10100/v1"
     model: str = "opencode-go/deepseek-v4-flash"
@@ -54,6 +61,46 @@ class ControlPlaneConfig:
     per_repair_timeout_seconds: int = 900
     max_concurrent: int = 2
     paused: bool = False
+
+    # ---- timeout classification (batch2 item 3) ----
+    exec_timeout_seconds: int = 900
+    comm_timeout_seconds: int = 30
+    verify_timeout_seconds: int = 60
+    approval_timeout_seconds: int = 0  # 0 = wait indefinitely for human approval
+    git_push_timeout_seconds: int = 120
+    lease_ttl_seconds: int = 1_800
+
+    # ---- candidate branches (batch2 item 9) ----
+    candidate_branch_prefix: str = "fix/control-plane-"
+    candidate_retention_days: int = 14
+    candidate_cleanup_policy: str = "manual"  # manual | auto; default keeps branches
+
+    # ---- dirty worktree policy (batch2 item 8) ----
+    dirty_worktree_policy: str = "reject"  # reject | isolate
+
+    # ---- output caps (batch2 item 11) ----
+    max_agent_output_bytes: int = 200_000
+
+    # ---- github ssh 443 fallback (batch2 item 14) ----
+    github_ssh_fallback: bool = True
+    github_ssh_host_port: str = "ssh.github.com:443"
+
+    # ---- readiness (batch2 item 6) ----
+    alertmanager_url: str = ""
+
+    # ---- side-effect gate (batch2 item 15) ----
+    external_side_effects_require_approval: bool = False
+    blocked_paths: tuple[str, ...] = (
+        ".env",
+        ".ssh",
+        "credentials",
+        "secrets",
+        "id_rsa",
+        ".pem",
+        ".key",
+        "token",
+        "password",
+    )
 
     allowed_auto_projects: tuple[str, ...] = (
         "dify",
@@ -92,6 +139,7 @@ class ControlPlaneConfig:
     patch_dir: Path = PROJECT_ROOT / "data" / "patches"
     evidence_dir: Path = PROJECT_ROOT / "data" / "evidence"
     state_db: Path = PROJECT_ROOT / "data" / "control-plane.db"
+    pid_file: Path = PROJECT_ROOT / "data" / "control-plane.pid"
 
     candidate_trial_days: int = 90
     candidate_wip_limit: int = 20
@@ -143,6 +191,8 @@ class ControlPlaneConfig:
         projects = section("projects")
         evidence = section("evidence")
         notifications = section("notifications")
+        timeouts = section("timeouts")
+        candidates = section("candidates")
 
         allowed_projects = projects.get("allowed_auto")
         project_dirs = projects.get("project_dirs")
@@ -165,6 +215,18 @@ class ControlPlaneConfig:
             codex_branch_prefix=str(
                 agent.get("codex_branch_prefix", base.codex_branch_prefix)
             ),
+            candidate_branch_prefix=str(
+                candidates.get(
+                    "branch_prefix",
+                    agent.get("codex_branch_prefix", base.candidate_branch_prefix),
+                )
+            ),
+            candidate_retention_days=int(
+                candidates.get("retention_days", base.candidate_retention_days)
+            ),
+            candidate_cleanup_policy=str(
+                candidates.get("cleanup_policy", base.candidate_cleanup_policy)
+            ),
             agent_session_dir=Path(
                 str(agent.get("agent_session_dir", base.agent_session_dir))
             ),
@@ -180,6 +242,58 @@ class ControlPlaneConfig:
             per_repair_timeout_seconds=int(
                 policy.get("per_repair_timeout_seconds", base.per_repair_timeout_seconds)
             ),
+            exec_timeout_seconds=int(
+                timeouts.get(
+                    "exec_seconds",
+                    policy.get(
+                        "per_repair_timeout_seconds",
+                        base.exec_timeout_seconds,
+                    ),
+                )
+            ),
+            comm_timeout_seconds=int(
+                timeouts.get("comm_seconds", base.comm_timeout_seconds)
+            ),
+            verify_timeout_seconds=int(
+                timeouts.get("verify_seconds", base.verify_timeout_seconds)
+            ),
+            approval_timeout_seconds=int(
+                timeouts.get("approval_seconds", base.approval_timeout_seconds)
+            ),
+            git_push_timeout_seconds=int(
+                timeouts.get("git_push_seconds", base.git_push_timeout_seconds)
+            ),
+            lease_ttl_seconds=int(
+                timeouts.get("lease_ttl_seconds", base.lease_ttl_seconds)
+            ),
+            dirty_worktree_policy=str(
+                policy.get("dirty_worktree_policy", base.dirty_worktree_policy)
+            ),
+            max_agent_output_bytes=int(
+                agent.get("max_agent_output_bytes", base.max_agent_output_bytes)
+            ),
+            github_ssh_fallback=_env_bool(
+                "CONTROL_PLANE_SSH_443_FALLBACK",
+                bool(policy.get("github_ssh_fallback", base.github_ssh_fallback)),
+            ),
+            github_ssh_host_port=str(
+                policy.get("github_ssh_host_port", base.github_ssh_host_port)
+            ),
+            alertmanager_url=str(
+                policy.get("alertmanager_url", base.alertmanager_url)
+            ),
+            external_side_effects_require_approval=_env_bool(
+                "CONTROL_PLANE_SIDE_EFFECT_APPROVAL",
+                bool(
+                    policy.get(
+                        "external_side_effects_require_approval",
+                        base.external_side_effects_require_approval,
+                    )
+                ),
+            ),
+            blocked_paths=tuple(blocked_paths_raw)
+            if isinstance(blocked_paths_raw := policy.get("blocked_paths"), list)
+            else base.blocked_paths,
             max_concurrent=int(policy.get("max_concurrent", base.max_concurrent)),
             paused=_env_bool("CONTROL_PLANE_PAUSED", bool(policy.get("paused", base.paused))),
             allowed_auto_projects=tuple(

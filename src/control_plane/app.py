@@ -3,16 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from pydantic import BaseModel
 
 from .approvals import ApprovalManager
+from .audit import inspect_session_fields
 from .budget import Budget
 from .codex_runner import CodexRunner
 from .config import ControlPlaneConfig
@@ -30,7 +33,14 @@ from .models import (
     TaskRequest,
 )
 from .notify import Notifier
+from .runtime import (
+    bootstrap,
+    graceful_shutdown,
+    run_info_dict,
+    with_run_id,
+)
 from .service import RepairService
+from .state_machine import RepairState
 from .storage import Store
 
 logger = logging.getLogger(__name__)
@@ -57,7 +67,7 @@ class PromoteRequest(BaseModel):
 
 
 def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
-    cfg = config or ControlPlaneConfig.load()
+    cfg = with_run_id(config or ControlPlaneConfig.load())
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.patch_dir.mkdir(parents=True, exist_ok=True)
     cfg.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +77,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     approvals = ApprovalManager()
     notifier = Notifier(cfg)
     agent = CodexRunner(cfg)
+    agent.attach_store(store)
     service = RepairService(cfg, store, budget, agent, approvals, notifier)
     with suppress(ValueError):
         # skip if already registered (e.g. test app created twice)
@@ -74,11 +85,29 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        expired = store.expire_candidates(int(__import__("time").time()))
+        run = bootstrap(cfg.pid_file)
+        store.start_run_record(
+            run.run_id,
+            run.pid,
+            run.hostname,
+            run.python_version,
+        )
+        logger.info(
+            "control plane started run_id=%s pid=%s hostname=%s",
+            run.run_id,
+            run.pid,
+            run.hostname,
+        )
+        expired = store.expire_candidates(int(time.time()))
         if expired:
             logger.info("expired %s candidates", expired)
-        now = int(__import__("time").time())
+        now = int(time.time())
+        keep_pending = {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
+        resumed: list[str] = []
         for row in store.list_repairs(limit=1_000):
+            if row["status"] in keep_pending:
+                resumed.append(row["id"])
+                continue
             if row["status"] not in {"closed", "failed", "interrupted", "rolled_back"}:
                 store.set_repair_status(
                     row["id"],
@@ -92,11 +121,28 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             store.set_setting("usage_hint_sent", "1")
         digest_task = asyncio.create_task(service.digest_loop())
         scan_task = asyncio.create_task(service.scan_loop())
-        yield
-        scan_task.cancel()
-        digest_task.cancel()
-        await service.close()
-        store.close()
+        resume_tasks = [asyncio.create_task(service.resume_pending_approval(r)) for r in resumed]
+        if cfg.candidate_cleanup_policy == "auto":
+            try:
+                cleaned = await service.cleanup_candidate_branches(apply=True)
+                if cleaned:
+                    logger.info(
+                        "auto candidate-branch cleanup removed %s stale branches",
+                        sum(1 for entry in cleaned if entry.get("deleted")),
+                    )
+            except Exception:
+                logger.exception("auto candidate-branch cleanup failed")
+        try:
+            yield
+        finally:
+            scan_task.cancel()
+            digest_task.cancel()
+            for task in resume_tasks:
+                task.cancel()
+            await service.close()
+            store.stop_run_record(run.run_id)
+            graceful_shutdown(run.pid_file)
+            store.close()
 
     app = FastAPI(
         title="Control Plane",
@@ -136,11 +182,78 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/live", include_in_schema=False)
+    async def live() -> dict[str, Any]:
+        """Liveness: the process itself is serving (no external dependencies)."""
+        return {"status": "ok", **run_info_dict()}
+
+    @app.get("/ready", include_in_schema=False)
+    async def ready() -> Any:
+        """Readiness: DB writable, prometheus/alertmanager reachable per config."""
+        checks: dict[str, Any] = {}
+        db_ok = store.check_writable()
+        checks["database"] = {"ok": db_ok, "detail": "writable" if db_ok else "unavailable"}
+        last_ready = store.get_setting("health:last_ready", "0")
+        timeout = max(5, cfg.comm_timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if cfg.prometheus_url:
+                try:
+                    response = await client.get(f"{cfg.prometheus_url}/-/ready")
+                    checks["prometheus"] = {
+                        "ok": response.status_code == 200,
+                        "detail": f"HTTP {response.status_code}",
+                    }
+                except httpx.HTTPError as exc:
+                    checks["prometheus"] = {"ok": False, "detail": str(exc)}
+            if cfg.alertmanager_url:
+                try:
+                    response = await client.get(f"{cfg.alertmanager_url}/-/ready")
+                    checks["alertmanager"] = {
+                        "ok": response.status_code == 200,
+                        "detail": f"HTTP {response.status_code}",
+                    }
+                except httpx.HTTPError as exc:
+                    checks["alertmanager"] = {"ok": False, "detail": str(exc)}
+        healthy = all(entry["ok"] for entry in checks.values())
+        body = {
+            "status": "ok" if healthy else "degraded",
+            "checks": checks,
+            "last_ready_at": last_ready,
+            **run_info_dict(),
+        }
+        if healthy:
+            return body
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
+
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Any:
         from fastapi.responses import Response
 
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    class CleanupRequest(BaseModel):
+        repos: list[str] = []
+        apply: bool = False
+
+    @app.post("/v1/candidates/cleanup")
+    async def candidate_cleanup(
+        body: CleanupRequest,
+        x_control_plane_key: str = Header(default=""),
+    ) -> dict[str, Any]:
+        await require_key(x_control_plane_key)
+        branches = await service.cleanup_candidate_branches(
+            body.repos or None,
+            apply=body.apply,
+        )
+        return {"branches": branches, "dry_run": not body.apply}
+
+    @app.get("/v1/sessions/inspect")
+    async def sessions_inspect(
+        x_control_plane_key: str = Header(default=""),
+    ) -> dict[str, Any]:
+        await require_key(x_control_plane_key)
+        fields = inspect_session_fields(cfg.agent_session_dir)
+        return {"sensitive_field_names": sorted(fields), "count": len(fields)}
 
     @app.post("/v1/alerts/{fingerprint}/policy")
     async def alert_policy(
