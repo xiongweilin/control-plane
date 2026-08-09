@@ -17,6 +17,7 @@ class EvidenceRecord:
     lifecycle_status: str
     created_by: str = "control-plane"
     system_boundary: str = "control-plane"
+    run_id: str = ""
     source_refs: list[str] = field(default_factory=list)
     environment_versions: dict[str, str] = field(default_factory=dict)
     verification_refs: list[str] = field(default_factory=list)
@@ -35,6 +36,10 @@ class EvidenceRecord:
         data = asdict(self)
         data["id"] = f"ev-{uuid.uuid4().hex[:12]}"
         data["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["evidence_header"] = {
+            "run_id": self.run_id or "",
+            "system": "control-plane",
+        }
         return data
 
 

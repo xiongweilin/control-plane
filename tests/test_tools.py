@@ -17,3 +17,15 @@ def test_resolve_repo_allowed_and_denied() -> None:
     assert resolve_repo("D:/download/agent/control-plane", allowed) == "D:/download/agent/control-plane"
     with pytest.raises(ToolError):
         resolve_repo("C:\\Windows\\System32", allowed)
+
+
+def test_resolve_repo_blocked_paths() -> None:
+    allowed = ("D:\\infrastructure\\compose",)
+    with pytest.raises(ToolError, match="blocked by policy"):
+        resolve_repo("D:\\infrastructure\\compose\\secrets-holder", allowed, blocked=("secrets",))
+    with pytest.raises(ToolError, match="blocked by policy"):
+        resolve_repo("D:\\infrastructure\\compose\\app\\config\\.env", allowed, blocked=(".env",))
+    assert (
+        resolve_repo("D:\\infrastructure\\compose\\app", allowed, blocked=(".env",))
+        == "D:/infrastructure/compose/app"
+    )

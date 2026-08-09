@@ -9,6 +9,8 @@ opencodex_base_url = "http://127.0.0.1:10100/v1"
 model = "opencode-go/deepseek-v4-flash"
 opencodex_timeout_seconds = 120
 max_agent_calls_per_repair = 8
+# agent 输出写入会话文件前的上限（字节），超出部分截断并记录 truncated=true
+max_agent_output_bytes = 200000
 
 [policy]
 cooldown_seconds = 600
@@ -17,6 +19,34 @@ daily_agent_budget = 20
 per_repair_timeout_seconds = 900
 max_concurrent = 2
 paused = false
+# dirty worktree 处理：reject（默认，拒绝执行）| isolate（隔离 worktree 后执行）
+dirty_worktree_policy = "reject"
+# 外部副作用（重启外部服务等）需要人工审批时设为 true（默认 false，保持自动）
+external_side_effects_require_approval = false
+# 阻止 agent/工具访问的路径片段黑名单（大小写不敏感子串匹配）
+blocked_paths = [".env", ".ssh", "credentials", "secrets", "id_rsa", ".pem", ".key", "token", "password"]
+# /ready 检查的 alertmanager 地址（可选；prometheus_url 见下）
+alertmanager_url = ""
+# GitHub SSH 443 回退
+github_ssh_fallback = true
+github_ssh_host_port = "ssh.github.com:443"
+# /ready 与验证器使用的 Prometheus 地址
+prometheus_url = "http://127.0.0.1:19090"
+
+[timeouts]
+# 超时分类：exec=agent 运行、comm=网络通信、verify=验证器、approval=等待人工审批
+exec_seconds = 900
+comm_seconds = 30
+verify_seconds = 60
+approval_seconds = 0        # 0 = 不限时等待人工审批；>0 超时后升级为 escalated
+git_push_seconds = 120
+lease_ttl_seconds = 1800    # 指纹互斥租约有效期（秒）
+
+[candidates]
+# 候选分支统一命名前缀（默认 fix/control-plane-）
+branch_prefix = "fix/control-plane-"
+retention_days = 14         # 清理判定：超过该天数的候选分支视为过期
+cleanup_policy = "manual"   # manual（默认，不自动删）| auto（启动时自动清理已合并/已拒绝/过期分支）
 
 [projects]
 allowed_auto = ["dify", "docker", "feedback-analysis-agent", "catalog-ops-automation", "observability", "feishu-dify-gateway"]
