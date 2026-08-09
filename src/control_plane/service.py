@@ -851,7 +851,7 @@ class RepairService:
             recovery_error = ""
         self.store.set_repair_status(
             repair_id,
-            RepairState.FAILED.value,
+            self._failure_status_for(error_text).value,
             error=error_text,
             error_class=error_class.value,
             timeout_kind=timeout_kind,
@@ -885,11 +885,14 @@ class RepairService:
         created_at = int(row["created_at"] or 0) if row is not None else 0
         if reset_at and created_at and reset_at <= created_at:
             recovery_retry_failed.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
+        outcome_state = self._failure_status_for(error_text)
+        outcome_title = "修复超时" if outcome_state is RepairState.TIMED_OUT else "修复失败"
         await self._notify(
             "critical",
-            "修复失败",
+            outcome_title,
             f"repair_id={repair_id}\n{exc}\n"
-            f"错误分类：{error_class.value}；超时类型：{timeout_kind or 'none'}\n\n"
+            f"状态：{outcome_state.value}；错误分类：{error_class.value}；"
+            f"超时类型：{timeout_kind or 'none'}\n\n"
             f"下一步：查看会话摘要 data/agent-sessions/{repair_id}-last.md；"
             "如需人工介入可调用 /v1/control/pause 暂停控制平面。",
         )
@@ -920,6 +923,22 @@ class RepairService:
         if "Verification timed out" in message:
             return TimeoutKind.VERIFY.value
         return ""
+
+    @staticmethod
+    def _failure_status_for(error_text: str) -> RepairState:
+        """Classify a repair-ending error into FAILED or TIMED_OUT.
+
+        An exec timeout without a committed candidate is the only path that
+        becomes TIMED_OUT (a terminal state, no recovery). A timeout that
+        produced a committed candidate never reaches this classifier: it takes
+        the NEEDS_APPROVAL path instead. Everything else stays FAILED.
+        """
+        if (
+            "without a committed candidate" in error_text
+            and RepairService._extract_timeout_kind(error_text) == TimeoutKind.EXEC.value
+        ):
+            return RepairState.TIMED_OUT
+        return RepairState.FAILED
 
     async def _run_codex_agent(
         self,

@@ -6,7 +6,7 @@ from prometheus_client import Counter
 from prometheus_client.core import GaugeMetricFamily
 
 from .runtime import current_run_id
-from .state_machine import TERMINAL_STATES
+from .state_machine import QUIESCENT_STATES, RECOVERABLE_STATES
 from .storage import Store
 
 # 鉴权失败计数（低噪声安全可观测；按 reason/endpoint 打标）
@@ -26,14 +26,17 @@ class ControlPlaneCollector:
 
     def collect(self):
         rows = self._store.list_repairs(limit=100_000)
-        terminal = {s.value for s in TERMINAL_STATES}
+        quiescent = {s.value for s in QUIESCENT_STATES}
         status_counts: dict[str, int] = {}
         active = 0
+        recoverable: dict[str, int] = {}
         for row in rows:
             status = row["status"]
             status_counts[status] = status_counts.get(status, 0) + 1
-            if status not in terminal:
+            if status not in quiescent:
                 active += 1
+            elif status in {s.value for s in RECOVERABLE_STATES}:
+                recoverable[status] = recoverable.get(status, 0) + 1
 
         repairs = GaugeMetricFamily(
             "control_plane_repairs_total",
@@ -49,6 +52,14 @@ class ControlPlaneCollector:
             "Control-plane repairs currently in progress",
             value=active,
         )
+        recoverable_gauge = GaugeMetricFamily(
+            "control_plane_repairs_recoverable",
+            "Quiescent repairs that may resume (interrupted/recovering/needs_approval)",
+            labels=["status"],
+        )
+        for status, count in sorted(recoverable.items()):
+            recoverable_gauge.add_metric([status], count)
+        yield recoverable_gauge
         yield GaugeMetricFamily(
             "control_plane_candidates",
             "Candidate playbooks",
