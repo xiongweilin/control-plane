@@ -22,6 +22,7 @@ from control_plane.tools import ToolError
 class FakeExecutor:
     def __init__(self, branch_exists: bool = False) -> None:
         self.branch_exists = branch_exists
+        self.current_branch = "main"
         self.calls: list[tuple[list[str], str | None]] = []
 
     async def run(
@@ -34,8 +35,15 @@ class FakeExecutor:
     ) -> str:
         self.calls.append((args, cwd))
         joined = " ".join(args)
-        if "rev-parse --short HEAD" in joined:
+        if "rev-parse --is-inside-work-tree" in joined:
+            return "true"
+        if "rev-parse HEAD" in joined:
             return "abc123"
+        if "symbolic-ref --quiet --short HEAD" in joined:
+            return self.current_branch
+        if " switch " in f" {joined} ":
+            self.current_branch = args[-1]
+            return ""
         if "docker ps" in joined:
             return "Up 2 minutes\nUp 5 minutes"
         if "fix/control-plane-" in joined and "diff --stat main" in joined:
@@ -148,6 +156,28 @@ class FakeCodexRunnerWithSummary(FakeCodexRunner):
             last_message=self.summary,
             timed_out=False,
             stderr_tail="",
+        )
+
+
+class FakeTimedOutCodexRunner(FakeCodexRunner):
+    def __init__(self, executor: FakeExecutor) -> None:
+        super().__init__(exit_code=124)
+        self.executor = executor
+
+    async def run_task(
+        self,
+        *,
+        repair_id: str,
+        repo: str,
+        prompt: str,
+    ) -> CodexSessionResult:
+        self.calls += 1
+        self.executor.current_branch = f"fix/control-plane-{repair_id}"
+        return CodexSessionResult(
+            exit_code=124,
+            last_message="",
+            timed_out=True,
+            stderr_tail="codex session timed out",
         )
 
 
@@ -405,6 +435,65 @@ async def test_attempt_count_resets_after_resolution(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolution_without_recovery_evidence_does_not_reset_attempts(tmp_path) -> None:
+    config = replace(_config(tmp_path), max_attempts=1, cooldown_seconds=0)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutorUnhealthy()
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    )
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+    payload = _payload()
+    fingerprint = alert_fingerprint(payload.alerts[0])
+    store.create_repair("repair-existing", fingerprint, "{}", attempt=1)
+    store.set_repair_status(
+        "repair-existing",
+        "failed",
+        finished_at=int(time.time()) - 60,
+        error="test",
+    )
+
+    resolved = AlertmanagerPayload.model_validate(
+        {
+            "status": "resolved",
+            "alerts": [
+                {
+                    "status": "resolved",
+                    "labels": {
+                        "alertname": "HighCPU",
+                        "instance": "node1",
+                        "project": "dify",
+                    },
+                    "annotations": {"summary": "cpu high"},
+                    "startsAt": "2026-08-06T00:00:00Z",
+                    "endsAt": "2026-08-07T00:00:00Z",
+                    "fingerprint": fingerprint,
+                }
+            ],
+        }
+    )
+    await service.ingest(resolved)
+
+    assert store.get_setting(f"attempt_reset:{fingerprint}") == ""
+    response = await service.ingest(payload)
+    assert response.accepted == 0
+    assert response.cooldown == 1
+    assert len(store.list_repairs()) == 1
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
@@ -494,7 +583,8 @@ async def test_env_scan_all_healthy(tmp_path) -> None:
     store.close()
 
 
-def test_alert_is_firing(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_alert_is_firing(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -517,7 +607,7 @@ def test_alert_is_firing(tmp_path) -> None:
     assert service._alert_is_firing("fp-a") is True
     assert service._alert_is_firing("fp-b") is False
     assert service._alert_is_firing("fp-none") is False
-    service.close()
+    await service.close()
     store.close()
 
 
@@ -716,6 +806,51 @@ async def test_repair_flow_with_approval(tmp_path) -> None:
     assert candidates[0]["pattern"] == "HighCPU|dify|*"
     assert store.list_actions(repair_id)[0]["tool"] == "codex_agent"
     assert any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_agent_candidate_waits_for_review_and_restores_branch(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    executor = FakeExecutor(branch_exists=True)
+    agent = FakeTimedOutCodexRunner(executor)
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    )
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        agent,
+        approvals,
+        Notifier(config),
+        executor=executor,
+        http=http,
+    )
+
+    response = await service.ingest(_payload())
+    assert response.accepted == 1
+    repair_id = store.list_repairs()[0]["id"]
+    for _ in range(100):
+        if store.get_repair(repair_id)["status"] == "needs_approval":
+            break
+        await asyncio.sleep(0.05)
+
+    assert store.get_repair(repair_id)["status"] == "needs_approval"
+    assert executor.current_branch == "main"
+    action = store.list_actions(repair_id)[0]
+    assert action["status"] == "needs_approval"
+    assert f"fix/control-plane-{repair_id}" in action["after_json"]
+
+    await approvals.decide(repair_id, "reject")
+    for _ in range(100):
+        if store.get_repair(repair_id)["status"] == "closed":
+            break
+        await asyncio.sleep(0.05)
+    assert store.get_repair(repair_id)["result"] == "rejected"
     await service.close()
     store.close()
 
