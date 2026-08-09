@@ -120,13 +120,13 @@ def test_auth_failures_counter_increments_on_bad_key(tmp_path) -> None:
     app = create_app(config)
     before = REGISTRY.get_sample_value(
         "control_plane_auth_failures_total",
-        {"reason": "invalid_key", "endpoint": "/v1/tasks"},
+        {"reason": "invalid_key", "endpoint": "/v1/sessions/inspect"},
     ) or 0.0
     with TestClient(app) as client:
-        resp = client.post("/v1/tasks", json={}, headers={"x-control-plane-key": "wrong"})
+        resp = client.get("/v1/sessions/inspect", headers={"x-control-plane-key": "wrong"})
         assert resp.status_code == 401
     after = REGISTRY.get_sample_value(
         "control_plane_auth_failures_total",
-        {"reason": "invalid_key", "endpoint": "/v1/tasks"},
+        {"reason": "invalid_key", "endpoint": "/v1/sessions/inspect"},
     ) or 0.0
     assert after == before + 1.0
