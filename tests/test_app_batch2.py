@@ -110,3 +110,23 @@ def test_pid_file_written_and_removed_on_startup_shutdown(tmp_path) -> None:
         pid = int(pid_file.read_text(encoding="ascii").strip())
         assert pid > 0
     assert not pid_file.exists()
+
+
+def test_auth_failures_counter_increments_on_bad_key(tmp_path) -> None:
+    from prometheus_client import REGISTRY
+
+
+    config = _config(tmp_path)
+    app = create_app(config)
+    before = REGISTRY.get_sample_value(
+        "control_plane_auth_failures_total",
+        {"reason": "invalid_key", "endpoint": "/v1/tasks"},
+    ) or 0.0
+    with TestClient(app) as client:
+        resp = client.post("/v1/tasks", json={}, headers={"x-control-plane-key": "wrong"})
+        assert resp.status_code == 401
+    after = REGISTRY.get_sample_value(
+        "control_plane_auth_failures_total",
+        {"reason": "invalid_key", "endpoint": "/v1/tasks"},
+    ) or 0.0
+    assert after == before + 1.0
