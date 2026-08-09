@@ -268,7 +268,11 @@ async def _promql_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResul
 
 
 async def _git_status_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-    repo = resolve_repo(str(arguments.get("repo", "")), ctx.config.allowed_repo_roots)
+    repo = resolve_repo(
+        str(arguments.get("repo", "")),
+        ctx.config.allowed_repo_roots,
+        blocked=ctx.config.blocked_paths,
+    )
     output = await _run_cmd(ctx, ["git", "-C", repo, "status", "--short", "--branch"])
     return ToolResult(output=output or "(clean)", target_kind="inspection")
 
@@ -372,7 +376,11 @@ async def _cleanup_docker_tool(ctx: ToolContext, arguments: dict[str, Any]) -> T
 
 
 async def _stage_code_candidate_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-    repo = resolve_repo(str(arguments.get("repo", "")), ctx.config.allowed_repo_roots)
+    repo = resolve_repo(
+        str(arguments.get("repo", "")),
+        ctx.config.allowed_repo_roots,
+        blocked=ctx.config.blocked_paths,
+    )
     summary = str(arguments.get("summary", ""))[:200]
     patch = str(arguments.get("patch", ""))
     if not summary:
