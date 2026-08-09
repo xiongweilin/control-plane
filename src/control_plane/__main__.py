@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from typing import Any
 
 import uvicorn
 
@@ -33,7 +34,7 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
         Notifier(config),
     )
 
-    async def run() -> list[dict[str, object]]:
+    async def run() -> list[dict[str, Any]]:
         try:
             return await service.cleanup_candidate_branches(apply=apply)
         finally:
@@ -43,7 +44,7 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
     for entry in branches:
         print(
             f"{entry['repo']}: {entry['branch']} "
-            f"age={entry['age_days']}d reasons={','.join(entry['reasons'])} "
+            f"age={entry['age_days']}d reasons={','.join(str(r) for r in entry['reasons'])} "
             f"deleted={entry.get('deleted', False)}"
         )
     print(f"total={len(branches)} apply={apply}")

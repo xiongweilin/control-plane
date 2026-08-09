@@ -1408,11 +1408,13 @@ class RepairService:
         note = str(approval_row["note"]) if approval_row else ""
         if decision == "approve":
             self._transition(repair_id, RepairState.APPLYING)
-            self.store.renew_lease(
-                self.store.get_repair(repair_id)["fingerprint"],
-                self.run_id,
-                self.config.lease_ttl_seconds,
-            )
+            repair_row = self.store.get_repair(repair_id)
+            if repair_row is not None:
+                self.store.renew_lease(
+                    str(repair_row["fingerprint"]),
+                    self.run_id,
+                    self.config.lease_ttl_seconds,
+                )
             await self._apply_code_candidates(None, repair_id)
         elif decision == "rollback":
             await self._rollback(None, repair_id)
@@ -2031,7 +2033,8 @@ class RepairService:
 
     async def _rollback(self, ctx: ToolContext | None, repair_id: str) -> None:
         try:
-            payload = json.loads(self.store.get_repair(repair_id)["payload_json"])
+            repair_row = self.store.get_repair(repair_id)
+            payload = json.loads(str(repair_row["payload_json"]) if repair_row is not None else "{}")
             project = payload.get("labels", {}).get("project", "")
         except (json.JSONDecodeError, TypeError):
             project = ""

@@ -23,11 +23,18 @@ jobs:
       - name: Ruff check
         run: uv run ruff check .
 
+      - name: Mypy (src)
+        run: uv run mypy src/control_plane
+
       - name: Pytest (portable suite)
         # test_env_scan_all_healthy and test_terminate_process_tree_kills_children
         # are Windows-only (local C:\/D:\ disk scan, WMI process snapshot); they
         # run in the windows-native job on the actual target platform.
         run: uv run pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)"
+
+      - name: Coverage gate
+        # Baseline captured from this portable suite (scripts/coverage-baseline.txt).
+        run: uv run python scripts/check_coverage.py --pytest-args "-k 'not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)'"
 
   windows-native:
     runs-on: windows-latest

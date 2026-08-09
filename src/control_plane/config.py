@@ -6,6 +6,7 @@ import tomllib
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -238,7 +239,7 @@ class ControlPlaneConfig:
             with toml_path.open("rb") as handle:
                 values = tomllib.load(handle)
 
-        def section(name: str) -> dict[str, object]:
+        def section(name: str) -> dict[str, Any]:
             raw = values.get(name)
             return dict(raw) if isinstance(raw, dict) else {}
 
