@@ -150,8 +150,15 @@ def terminate_process_tree(pid: int, timeout: int = 15) -> None:
         except (OSError, subprocess.TimeoutExpired):
             logger.debug("taskkill failed for pid %s; falling back to os.kill", pid)
             _count_controlled_ignore("process_tree_kill")
-    with suppress(ProcessLookupError, OSError):
+    try:
         os.kill(pid, 9)  # noqa: S606 - POSIX fallback; Windows path uses taskkill above
+    except ProcessLookupError:
+        # 进程已不存在：受控忽略；Windows 路径已在 taskkill 回退分支计数，避免双计数
+        if sys.platform != "win32":
+            _count_controlled_ignore("process_tree_kill")
+    except OSError:
+        if sys.platform != "win32":
+            _count_controlled_ignore("process_tree_kill")
 
 
 async def terminate_process_tree_async(pid: int, timeout: int = 15) -> None:
@@ -172,8 +179,14 @@ async def terminate_process_tree_async(pid: int, timeout: int = 15) -> None:
         except (OSError, TimeoutError):
             logger.debug("async taskkill failed for pid %s; falling back to os.kill", pid)
             _count_controlled_ignore("process_tree_kill")
-    with suppress(ProcessLookupError, OSError):
+    try:
         os.kill(pid, 9)  # noqa: S606 - POSIX fallback; Windows path uses taskkill above
+    except ProcessLookupError:
+        if sys.platform != "win32":
+            _count_controlled_ignore("process_tree_kill")
+    except OSError:
+        if sys.platform != "win32":
+            _count_controlled_ignore("process_tree_kill")
 
 
 def snapshot_processes() -> list[dict[str, Any]]:
