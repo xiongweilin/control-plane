@@ -99,8 +99,12 @@ def is_pid_alive(pid: int) -> bool:
         handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
             return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok) and exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -118,7 +122,7 @@ def acquire_single_instance(pid_file: Path) -> tuple[bool, str]:
     PID files (dead process) are replaced.
     """
     existing = read_pid_file(pid_file)
-    if existing is not None and is_pid_alive(existing):
+    if existing is not None and existing != os.getpid() and is_pid_alive(existing):
         return False, f"another instance is running (pid {existing}, {pid_file})"
     write_pid_file(pid_file, os.getpid())
     return True, f"pid file written: {pid_file} (pid {os.getpid()})"

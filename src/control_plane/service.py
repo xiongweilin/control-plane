@@ -256,7 +256,10 @@ class RepairService:
             return {"budget_limited": 1}
 
         repair_id = f"repair-{uuid.uuid4().hex[:12]}"
-        payload_json = json.dumps(alert.model_dump(mode="json"), ensure_ascii=False)
+        payload_json = json.dumps(
+            alert.model_dump(mode="json", by_alias=True),
+            ensure_ascii=False,
+        )
         lock = self._fingerprint_locks.setdefault(fingerprint, asyncio.Lock())
         async with lock:
             # In-process mutual exclusion (second alert for the same fingerprint
@@ -813,7 +816,7 @@ class RepairService:
         error_text = str(exc)[:2_000]
         error_class = classify_exec_error(error_text)
         timeout_kind = self._extract_timeout_kind(error_text)
-        if timeout_kind == TimeoutKind.VERIFY.value:
+        if timeout_kind == TimeoutKind.VERIFY.value or error_text.startswith("Verification failed"):
             error_class = classify_verify_error(error_text)
         previous_error = str(row["error"] or "") if row is not None else ""
         previous_original = str(row["original_error"] or "") if row is not None else ""
