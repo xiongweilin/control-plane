@@ -52,6 +52,12 @@ recovery_retry_failed = Counter(
     ["pattern"],
 )
 
+repairs_skipped_dirty = Counter(
+    "control_plane_repairs_skipped_dirty_total",
+    "Repairs rejected because the workspace was dirty (guard, not a recovery failure)",
+    ["pattern"],
+)
+
 
 class RepairRejectedError(RuntimeError):
     pass
@@ -888,8 +894,13 @@ class RepairService:
         except ValueError:
             reset_at = 0
         created_at = int(row["created_at"] or 0) if row is not None else 0
+        # 2026-08-10 设计修正：恢复后再次失败计数只统计真实失败（验证/确定性），
+        # 排除脏工作区守卫（repair 未运行）与 exec/comm 超时（资源/网络，非恢复回退）。
         if reset_at and created_at and reset_at <= created_at:
-            recovery_retry_failed.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
+            if "refusing to run agent" in error_text:
+                repairs_skipped_dirty.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
+            elif timeout_kind not in (TimeoutKind.EXEC.value, TimeoutKind.COMM.value):
+                recovery_retry_failed.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
         outcome_state = self._failure_status_for(error_text)
         outcome_title = "修复超时" if outcome_state is RepairState.TIMED_OUT else "修复失败"
         await self._notify(
