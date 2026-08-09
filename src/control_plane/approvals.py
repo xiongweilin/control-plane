@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
 class PendingDecision:
-    event: asyncio.Event = asyncio.Event()
+    event: asyncio.Event = field(default_factory=asyncio.Event)
     action: str | None = None
 
 
