@@ -30,7 +30,8 @@ class VerificationReport:
 
 FORBIDDEN_DIFF_PATTERNS = re.compile(
     r"(verifier\.py|alert\.rules\.yml|prometheus\.yml|alertmanager\.yml|"
-    r"permission|acl|rbac|firewall|control-plane\.toml|AGENTS\.md|control-plane/)",
+    r"permission|acl|rbac|firewall|control-plane\.toml|AGENTS\.md|control-plane/|"
+    r"\.env|credentials|secrets?|id_rsa|\.pem\b|\.key\b|token|password)",
     re.IGNORECASE,
 )
 

@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .audit import redact_args, truncate_bytes
+from .audit import redact_args, redact_text, truncate_bytes
 from .config import ControlPlaneConfig
 from .runtime import current_run_id, terminate_process_tree_async
 from .storage import Store
@@ -113,7 +113,7 @@ class CodexRunner:
             f'"repair_id": "{repair_id}", "started_at": {int(time.time())}}}\n'
         )
         stored, truncated = truncate_bytes(
-            stdout_text, max(4_096, self.config.max_agent_output_bytes)
+            redact_text(stdout_text), max(4_096, self.config.max_agent_output_bytes)
         )
         jsonl_path.write_text(header + stored, encoding="utf-8")
         last_message = ""
