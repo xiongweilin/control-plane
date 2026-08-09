@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SENSITIVE_KEY_RE = re.compile(
     r"(token|password|passwd|secret|api[_-]?key|authorization|credential|"
@@ -122,9 +125,11 @@ def inspect_session_fields(directory: Path) -> set[str]:
                     try:
                         parsed = json.loads(stripped)
                     except json.JSONDecodeError:
+                        logger.debug("unparsable JSONL line in %s; skipping", path)
                         continue
                     _collect_sensitive_keys(parsed, found)
         except OSError:
+            logger.debug("cannot read session file %s; skipping", path)
             continue
     return found
 

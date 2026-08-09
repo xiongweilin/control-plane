@@ -228,3 +228,9 @@ class CodexRunner:
             )
         except Exception:  # pragma: no cover - audit must never break the repair
             logger.debug("audit write failed for %s", repair_id)
+            try:
+                from .metrics import CONTROLLED_IGNORES
+
+                CONTROLLED_IGNORES.labels(site="audit_write").inc()
+            except Exception:  # pragma: no cover - metrics must never break control flow
+                logger.debug("audit_write counter failed")
