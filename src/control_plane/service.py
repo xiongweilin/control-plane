@@ -740,16 +740,17 @@ class RepairService:
         await asyncio.sleep((target - now).total_seconds())
 
     async def _run_repair(self, repair_id: str, fingerprint: str, alert: Alert) -> None:
-        async with self._semaphore:
-            ctx = ToolContext(
-                self.config,
-                self.store,
-                repair_id,
-                self.config.patch_dir,
-                executor=self.executor,
-                http=self.http,
-            )
-            try:
+        ctx: ToolContext | None = None
+        try:
+            async with self._semaphore:
+                ctx = ToolContext(
+                    self.config,
+                    self.store,
+                    repair_id,
+                    self.config.patch_dir,
+                    executor=self.executor,
+                    http=self.http,
+                )
                 self._transition(repair_id, RepairState.DIAGNOSING)
                 proposal = await self._run_codex_agent(ctx, repair_id, alert)
                 needs_approval = proposal.get("code_changed") or any(
@@ -759,30 +760,31 @@ class RepairService:
                 if needs_approval:
                     await self._await_approval(ctx, repair_id, "apply")
                 await self._complete_repair(repair_id, fingerprint, alert, proposal)
-            except asyncio.CancelledError:
-                cancelled_row = self.store.get_repair(repair_id)
-                cancel_kind = (
-                    TimeoutKind.APPROVAL.value
-                    if cancelled_row is not None
-                    and cancelled_row["status"]
-                    in {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
-                    else TimeoutKind.EXEC.value
-                )
-                self.store.set_repair_status(
-                    repair_id,
-                    RepairState.INTERRUPTED.value,
-                    finished_at=int(time.time()),
-                    timeout_kind=cancel_kind,
-                )
-                await self._notify("warning", "修复被中断", f"repair_id={repair_id}")
-                raise
-            except RepairRejectedError:
-                return
-            except Exception as exc:
-                await self._record_failure(repair_id, fingerprint, exc)
-            finally:
+        except asyncio.CancelledError:
+            cancelled_row = self.store.get_repair(repair_id)
+            cancel_kind = (
+                TimeoutKind.APPROVAL.value
+                if cancelled_row is not None
+                and cancelled_row["status"]
+                in {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
+                else TimeoutKind.EXEC.value
+            )
+            self.store.set_repair_status(
+                repair_id,
+                RepairState.INTERRUPTED.value,
+                finished_at=int(time.time()),
+                timeout_kind=cancel_kind,
+            )
+            await self._notify("warning", "修复被中断", f"repair_id={repair_id}")
+            raise
+        except RepairRejectedError:
+            return
+        except Exception as exc:
+            await self._record_failure(repair_id, fingerprint, exc)
+        finally:
+            if ctx is not None:
                 await ctx.close()
-                self.store.release_lease(fingerprint, self.run_id)
+            self.store.release_lease(fingerprint, self.run_id)
 
     async def _complete_repair(
         self,

@@ -544,10 +544,18 @@ class Store:
         python_version: str,
     ) -> None:
         with self._lock:
+            now = int(time.time())
+            # Single-instance startup proves any older "running" record is stale. A hard
+            # process kill cannot execute lifespan cleanup, so reconcile it here.
+            self._connection.execute(
+                "UPDATE run_records SET status='interrupted', stopped_at=? "
+                "WHERE status='running' AND run_id<>?",
+                (now, run_id),
+            )
             self._connection.execute(
                 "INSERT OR REPLACE INTO run_records(run_id, pid, hostname, python_version, "
                 "started_at, status) VALUES (?, ?, ?, ?, ?, 'running')",
-                (run_id, pid, hostname, python_version, int(time.time())),
+                (run_id, pid, hostname, python_version, now),
             )
 
     def stop_run_record(self, run_id: str) -> None:

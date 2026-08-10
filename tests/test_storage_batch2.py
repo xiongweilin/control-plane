@@ -18,6 +18,23 @@ def test_run_records_roundtrip(tmp_path) -> None:
     store.close()
 
 
+def test_start_run_record_reconciles_stale_running_instance(tmp_path) -> None:
+    store = Store(tmp_path / "cp.db")
+    store.start_run_record("run-old", 111, "host-a", "3.14")
+
+    store.start_run_record("run-new", 222, "host-a", "3.14")
+
+    old = store.get_run_record("run-old")
+    new = store.get_run_record("run-new")
+    assert old is not None
+    assert old["status"] == "interrupted"
+    assert old["stopped_at"] is not None
+    assert new is not None
+    assert new["status"] == "running"
+    assert new["stopped_at"] is None
+    store.close()
+
+
 def test_audit_entries(tmp_path) -> None:
     store = Store(tmp_path / "cp.db")
     store.add_audit_entry(
