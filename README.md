@@ -112,10 +112,13 @@ SSH443、副作用门禁、路径黑名单）见下文「可靠性（批次 2）
 ## 部署
 
 ```powershell
+# 需在管理员 PowerShell 7 中执行
 ./scripts/install-control-plane.ps1
 ```
 
-脚本注册开机计划任务 `ControlPlane` 并添加仅限本地子网的防火墙规则（TCP 18083）。密钥通过用户环境变量 `CONTROL_PLANE_API_KEY` 提供，不进入仓库、日志或命令历史。Alertmanager 从只读 secret 卷读取同一共享密钥并通过 `Authorization: Bearer` 发送；告警入口不接受查询参数密钥，其他控制 API 继续使用 `X-Control-Plane-Key`。
+脚本注册开机任务 `ControlPlane` 与每分钟探测任务 `ControlPlaneWatchdog`：主任务经 `wscript.exe //B //NoLogo` + `scripts/Run-ControlPlaneHidden.vbs` 同步隐藏包装运行 PowerShell 监督器（`Run-ControlPlane.ps1`），任务状态与监督器生命周期一致；watchdog 健康时只读 `/live` 后退出，仅在主任务未运行且存活探测失败时启动它。子进程退出或 `/live` 连续 4 次失败时由监督器终止并交给任务重启。`data/logs/control-plane.launcher.log[.1-.5]` 只记录时间、PID、退出码、HTTP 状态和异常类型；服务 stdout/stderr 分别进入同目录的轮转日志并继续使用应用层脱敏，不记录密钥。日志目录仅允许当前用户、SYSTEM 与 Administrators 访问。安装时同时启用 `Microsoft-Windows-TaskScheduler/Operational` 历史，并添加仅限本地子网的防火墙规则（TCP 18083）。密钥通过用户环境变量 `CONTROL_PLANE_API_KEY` 提供，不进入仓库、日志或命令历史。Alertmanager 从只读 secret 卷读取同一共享密钥并通过 `Authorization: Bearer` 发送；告警入口不接受查询参数密钥，其他控制 API 继续使用 `X-Control-Plane-Key`。
+
+主任务与 watchdog 的计划任务动作均使用 `wscript.exe //B //NoLogo` 隐藏包装（主任务 `scripts/Run-ControlPlaneHidden.vbs`、watchdog `scripts/Watch-ControlPlaneHidden.vbs`），避免直接 pwsh 控制台在 Windows Terminal 默认终端下创建宿主窗口；包装 VBS 以 `shell.Run(..., True)` 同步等待并以 `WScript.Quit exitCode` 透传退出码，任务状态、监督、轮转日志与退出证据与直接 pwsh 一致（见 ADR-0011 修正记录）。
 
 ## 候选经验生命周期
 
@@ -179,6 +182,8 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 
 - 每次启动生成 `run_id`（时间戳+随机），写入 `run_records` 表、日志首行与
   证据文件头（`evidence_header.run_id`）。
+- 新实例取得单实例锁后，会把此前未正常收尾的 `run_records.status=running`
+  收敛为 `interrupted` 并补记停止时间，避免硬终止留下伪运行状态。
 - 启动写 `data/control-plane.pid`；重启前检测旧 PID 是否存活，存活则拒绝启动，
   避免双实例（历史曾出现双 python 进程）。优雅停止时完成 SQLite 写入、取消
   agent 任务、清理 PID 文件并记录 stopped。
