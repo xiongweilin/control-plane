@@ -641,6 +641,41 @@ async def test_cancel_in_progress_repair(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_queued_repair_marks_interrupted_and_releases_lease(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+        http=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+    )
+    service._semaphore = asyncio.Semaphore(0)
+    payload = _payload()
+    fingerprint = alert_fingerprint(payload.alerts[0])
+
+    response = await service.ingest(payload)
+    assert response.accepted == 1
+    await asyncio.sleep(0)
+    repair = store.list_repairs()[0]
+    assert repair["status"] == "queued"
+
+    await service._cancel_in_progress_repairs(fingerprint)
+
+    repair = store.get_repair(repair["id"])
+    assert repair is not None
+    assert repair["status"] == "interrupted"
+    assert repair["timeout_kind"] == "exec"
+    assert store.get_lease_owner(fingerprint) is None
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
