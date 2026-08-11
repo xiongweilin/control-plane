@@ -144,9 +144,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     )
                 else:
                     logger.info(
-                        "model preflight ok (cli=%s, opencodex=%s, model=%s)",
+                        "model preflight ok (cli=%s, gateway=%s, model=%s)",
                         preflight["sources"]["cli"]["ok"],
-                        preflight["sources"]["opencodex"]["ok"],
+                        preflight["sources"]["gateway"]["ok"],
                         preflight["sources"]["model"]["ok"],
                     )
             except Exception:

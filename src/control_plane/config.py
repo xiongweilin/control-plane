@@ -27,19 +27,20 @@ def _is_loopback_host(host: str) -> bool:
     return lowered in {"127.0.0.1", "localhost", "::1"} or lowered.startswith("127.")
 
 
-def _validate_opencodex_network(base_url: str, api_key: str) -> None:
-    """Enforce the loopback-by-default network boundary for OpenCodex.
+def _validate_gateway_network(base_url: str) -> None:
+    """Enforce the loopback-only network boundary for the model gateway.
 
-    Loopback endpoints need no auth; any non-loopback endpoint requires an
-    explicit ``opencodex_api_key`` so credentials are never implied.
+    The gateway diagnostics only talk to the local LiteLLM gateway; a
+    non-loopback endpoint is rejected outright rather than silently carrying
+    unauthenticated model-list requests (OpenCodex 已退役，不再有远端代理形态).
     """
     parsed = urllib.parse.urlparse(base_url)
     if not parsed.hostname:
         return  # malformed URL; the client surfaces a clearer error at call time
-    if not _is_loopback_host(parsed.hostname) and not api_key:
+    if not _is_loopback_host(parsed.hostname):
         raise ConfigurationError(
-            "opencodex_base_url points outside loopback; set [agent] opencodex_api_key "
-            "to authenticate explicitly before using a non-loopback OpenCodex endpoint."
+            "gateway_base_url must point to loopback; the model gateway "
+            "diagnostics only support the local LiteLLM endpoint."
         )
 
 
@@ -103,14 +104,13 @@ class ControlPlaneConfig:
     api_key: str = ""
     run_id: str = ""
 
-    opencodex_base_url: str = "http://127.0.0.1:10100/v1"
+    gateway_base_url: str = "http://127.0.0.1:4001/v1"
     model: str = "opencode-go/deepseek-v4-flash"
-    opencodex_api_key: str = ""
     codex_cli: Path = field(default_factory=lambda: resolve_codex_cli())
     model_preflight_enabled: bool = True
     codex_branch_prefix: str = "fix/control-plane-"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
-    opencodex_timeout_seconds: int = 120
+    gateway_timeout_seconds: int = 120
     max_agent_calls_per_repair: int = 8
 
     cooldown_seconds: int = 600
@@ -262,20 +262,15 @@ class ControlPlaneConfig:
             raise ConfigurationError(
                 "CONTROL_PLANE_API_KEY is required (set it in the environment)."
             )
-        opencodex_api_key = str(
-            os.getenv("CONTROL_PLANE_OPENCODEX_API_KEY", "")
-            or agent.get("opencodex_api_key", "")
-        )
-        opencodex_base_url = str(agent.get("opencodex_base_url", base.opencodex_base_url))
-        _validate_opencodex_network(opencodex_base_url, opencodex_api_key)
+        gateway_base_url = str(agent.get("gateway_base_url", base.gateway_base_url))
+        _validate_gateway_network(gateway_base_url)
 
         return cls(
             host=str(server.get("host", base.host)),
             port=int(server.get("port", base.port)),
             api_key=api_key,
-            opencodex_base_url=opencodex_base_url,
+            gateway_base_url=gateway_base_url,
             model=str(agent.get("model", base.model)),
-            opencodex_api_key=opencodex_api_key,
             model_preflight_enabled=bool(
                 agent.get("model_preflight_enabled", base.model_preflight_enabled)
             ),
@@ -298,8 +293,8 @@ class ControlPlaneConfig:
             agent_session_dir=Path(
                 str(agent.get("agent_session_dir", base.agent_session_dir))
             ),
-            opencodex_timeout_seconds=int(
-                agent.get("opencodex_timeout_seconds", base.opencodex_timeout_seconds)
+            gateway_timeout_seconds=int(
+                agent.get("gateway_timeout_seconds", base.gateway_timeout_seconds)
             ),
             max_agent_calls_per_repair=int(
                 agent.get("max_agent_calls_per_repair", base.max_agent_calls_per_repair)

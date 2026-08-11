@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from control_plane.opencodex import (
+from control_plane.gateway import (
     AgentCallError,
-    OpenCodexClient,
+    GatewayClient,
     parse_response,
 )
 
@@ -97,7 +97,7 @@ async def test_error_body_is_redacted_before_raising() -> None:
         401,
         text='{"error": {"message": "invalid api_key supersecret123"}}',
     )
-    client = OpenCodexClient("http://127.0.0.1:1/v1", "m", client=mock_client)
+    client = GatewayClient("http://127.0.0.1:1/v1", "m", client=mock_client)
     with pytest.raises(AgentCallError) as exc_info:
         await client.create_response(instructions="i", tools=[], messages=[])
     message = str(exc_info.value)
@@ -108,21 +108,20 @@ async def test_error_body_is_redacted_before_raising() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_id_and_auth_headers_sent() -> None:
+async def test_request_id_header_sent() -> None:
     mock_client = AsyncMock()
     mock_client.post.return_value = httpx.Response(
         200,
         json={"id": "r", "status": "completed", "output": []},
     )
-    client = OpenCodexClient(
+    client = GatewayClient(
         "http://127.0.0.1:1/v1",
         "m",
         client=mock_client,
-        api_key="k-abc",
     )
     await client.create_response(instructions="i", tools=[], messages=[])
     kwargs = mock_client.post.call_args.kwargs
-    assert kwargs["headers"]["Authorization"] == "Bearer k-abc"
+    assert "Authorization" not in kwargs["headers"]
     assert kwargs["headers"]["X-Request-Id"].startswith("cp-")
     await client.close()
 
@@ -134,22 +133,21 @@ async def test_list_models_ok_and_unreachable() -> None:
         200,
         json={"object": "list", "data": [{"id": "a"}, {"id": "b"}]},
     )
-    client = OpenCodexClient("http://127.0.0.1:1/v1", "m", client=mock_client)
+    client = GatewayClient("http://127.0.0.1:1/v1", "m", client=mock_client)
     assert await client.list_models() == ["a", "b"]
     await client.close()
 
     failing = AsyncMock()
     failing.get.side_effect = httpx.ConnectError("refused")
-    client2 = OpenCodexClient("http://127.0.0.1:1/v1", "m", client=failing)
+    client2 = GatewayClient("http://127.0.0.1:1/v1", "m", client=failing)
     assert await client2.list_models() is None
     await client2.close()
 
 
 def test_loopback_network_boundary_validation() -> None:
-    from control_plane.config import ConfigurationError, _validate_opencodex_network
+    from control_plane.config import ConfigurationError, _validate_gateway_network
 
-    _validate_opencodex_network("http://127.0.0.1:10100/v1", "")
-    _validate_opencodex_network("http://localhost:10100/v1", "")
-    with pytest.raises(ConfigurationError, match="outside loopback"):
-        _validate_opencodex_network("http://10.0.0.5:10100/v1", "")
-    _validate_opencodex_network("http://10.0.0.5:10100/v1", "k-explicit")
+    _validate_gateway_network("http://127.0.0.1:4001/v1")
+    _validate_gateway_network("http://localhost:4001/v1")
+    with pytest.raises(ConfigurationError, match="loopback"):
+        _validate_gateway_network("http://10.0.0.5:4001/v1")

@@ -64,13 +64,13 @@ async def test_check_model_sources_all_ok(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path)
     monkeypatch.setattr(
         service,
-        "_opencodex_models",
+        "_gateway_models",
         AsyncMock(return_value=["opencode-go/deepseek-v4-flash", "gpt-5.6-sol"]),
     )
     result = await service.check_model_sources()
     assert result["cli"]["ok"] is True
-    assert result["opencodex"]["ok"] is True
-    assert result["opencodex"]["model_count"] == 2
+    assert result["gateway"]["ok"] is True
+    assert result["gateway"]["model_count"] == 2
     assert result["model"]["ok"] is True
     await service.close()
 
@@ -79,7 +79,7 @@ async def test_check_model_sources_cli_missing(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path, agent=FakeAgent(error="Codex CLI not runnable"))
     monkeypatch.setattr(
         service,
-        "_opencodex_models",
+        "_gateway_models",
         AsyncMock(return_value=["opencode-go/deepseek-v4-flash"]),
     )
     result = await service.check_model_sources()
@@ -93,7 +93,7 @@ async def test_check_model_sources_default_model_missing(tmp_path, monkeypatch) 
     service = _service(tmp_path)
     monkeypatch.setattr(
         service,
-        "_opencodex_models",
+        "_gateway_models",
         AsyncMock(return_value=["gpt-5.6-sol"]),
     )
     result = await service.check_model_sources()
@@ -104,9 +104,9 @@ async def test_check_model_sources_default_model_missing(tmp_path, monkeypatch) 
 
 async def test_check_model_sources_proxy_unreachable(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path)
-    monkeypatch.setattr(service, "_opencodex_models", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_gateway_models", AsyncMock(return_value=None))
     result = await service.check_model_sources()
-    assert result["opencodex"]["ok"] is False
+    assert result["gateway"]["ok"] is False
     assert result["model"]["ok"] is False
     await service.close()
 
@@ -116,7 +116,7 @@ async def test_check_model_drift_detects_change(tmp_path, monkeypatch) -> None:
     service.store.set_setting("models:baseline", "a,b")
     monkeypatch.setattr(
         service,
-        "_opencodex_models",
+        "_gateway_models",
         AsyncMock(return_value=["a", "b", "c"]),
     )
     result = await service.check_model_drift()
@@ -124,7 +124,7 @@ async def test_check_model_drift_detects_change(tmp_path, monkeypatch) -> None:
     assert result["detail"]["added"] == ["c"]
     assert result["detail"]["removed"] == []
     assert service.store.get_setting("models:baseline") == "a,b,c"
-    assert any(title == "OpenCodex 模型清单变化" for _, title, _ in service.notifier.calls)
+    assert any(title == "模型网关模型清单变化" for _, title, _ in service.notifier.calls)
     await service.close()
 
 
@@ -132,7 +132,7 @@ async def test_check_model_drift_first_run_establishes_baseline(tmp_path, monkey
     service = _service(tmp_path)
     monkeypatch.setattr(
         service,
-        "_opencodex_models",
+        "_gateway_models",
         AsyncMock(return_value=["x", "y"]),
     )
     result = await service.check_model_drift()
@@ -144,7 +144,7 @@ async def test_check_model_drift_first_run_establishes_baseline(tmp_path, monkey
 async def test_startup_preflight_reports_problems(tmp_path, monkeypatch) -> None:
     notifier = FakeNotifier()
     service = _service(tmp_path, notifier=notifier)
-    monkeypatch.setattr(service, "_opencodex_models", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_gateway_models", AsyncMock(return_value=None))
     result = await service.startup_model_preflight()
     assert result["ok"] is False
     assert any("不可达" in problem for problem in result["problems"])
@@ -152,7 +152,7 @@ async def test_startup_preflight_reports_problems(tmp_path, monkeypatch) -> None
     await service.close()
 
 
-async def test_opencodex_models_closes_client(tmp_path, monkeypatch) -> None:
+async def test_gateway_models_closes_client(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path)
     closed = []
 
@@ -164,9 +164,9 @@ async def test_opencodex_models_closes_client(tmp_path, monkeypatch) -> None:
             closed.append(True)
 
     monkeypatch.setattr(
-        "control_plane.opencodex.OpenCodexClient",
+        "control_plane.gateway.GatewayClient",
         lambda *args, **kwargs: FakeClient(),
     )
-    assert await service._opencodex_models() == ["m1"]
+    assert await service._gateway_models() == ["m1"]
     assert closed == [True]
     await service.close()
