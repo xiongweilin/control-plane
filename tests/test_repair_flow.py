@@ -702,6 +702,32 @@ async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_project_maps_legacy_docker_alias(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    approvals = ApprovalManager()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        approvals,
+        Notifier(config),
+        executor=FakeExecutor(),
+        http=http,
+    )
+    # "docker" 是 dify 的旧 Compose 项目名（-p docker 时代）；项目已改名 name: dify，
+    # 容器 label 为 com.docker.compose.project=dify，按 label 的容器检查必须用实际项目名。
+    assert service._resolve_project("docker") == "dify"
+    assert service._resolve_project("dify") == "dify"
+    assert service._resolve_project("observability") == "observability"
+    assert service._resolve_project("") == ""
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_check_promql_expected_mismatch(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)

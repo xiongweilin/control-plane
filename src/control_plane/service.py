@@ -1190,8 +1190,12 @@ class RepairService:
         return self.config.allowed_repo_roots[0]
 
     def _resolve_project(self, project: str) -> str:
-        if project == "dify":
-            return "docker"
+        # dify 的 Compose 项目曾以 `-p docker` 运行（项目名 docker，卷 docker_dify_*）；
+        # 2026-08-10 起 compose 文件声明 name: dify，运行容器 label 为
+        # com.docker.compose.project=dify。旧别名 docker 必须解析到实际项目名 dify，
+        # 否则验证器/日志按 label 过滤会匹配不到任何容器（误报 "no running containers"）。
+        if project == "docker":
+            return "dify"
         return project
 
     async def _path_exists(self, path: str) -> bool:
