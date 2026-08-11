@@ -3,6 +3,14 @@
 - 状态：已接受（2026-08-09，批次 5）
 - 关联：ADR-0003（超时分类）、ADR-0005（审计与脱敏）
 
+> **超驰（2026-08-11）**：OpenCodex 已退役，10100 不再是活动入口。本文第 2
+> 节（非 loopback 需 `opencodex_api_key`）与第 4 节（三源连通性中的
+> OpenCodex 代理源）由
+> [ADR-0012 模型网关连通性诊断](./0012-model-gateway-connectivity.md) 取代：
+> 诊断改探测本机 LiteLLM 网关（4001），`gateway_base_url`/`GatewayClient`
+> 仅支持 loopback；`opencodex_base_url`/`opencodex_api_key`/`OpenCodexClient`
+> 不再读取。本文其余部分（Codex CLI 解析、错误脱敏）继续有效。
+
 ## 背景
 
 控制平面经本机 OpenCodex 代理（OpenCode Go）路由模型。此前：

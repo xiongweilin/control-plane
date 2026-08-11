@@ -53,8 +53,8 @@ class AgentResult:
     unknown_output_types: list[str] = field(default_factory=list)
 
 
-class OpenCodexClient:
-    """Minimal Responses API client for deepseek-v4-flash through the local OpenCodex proxy (OpenCode Go upstream)."""
+class GatewayClient:
+    """Minimal Responses API client for the local model gateway (LiteLLM 4001)."""
 
     def __init__(
         self,
@@ -62,12 +62,10 @@ class OpenCodexClient:
         model: str,
         timeout_seconds: int = 120,
         client: httpx.AsyncClient | None = None,
-        api_key: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
-        self.api_key = api_key
         self._client = client or httpx.AsyncClient(
             timeout=timeout_seconds,
             limits=HTTP_LIMITS,
@@ -91,8 +89,6 @@ class OpenCodexClient:
             payload["tool_choice"] = "auto"
         request_id = f"cp-{uuid.uuid4().hex[:12]}"
         headers = {"X-Request-Id": request_id}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
         try:
             response = await self._client.post(
                 f"{self.base_url}/responses",
@@ -101,23 +97,23 @@ class OpenCodexClient:
             )
         except httpx.HTTPError as exc:
             raise AgentCallError(
-                f"OpenCodex request failed (request_id={request_id}): {exc}"
+                f"Gateway request failed (request_id={request_id}): {exc}"
             ) from exc
         if response.status_code >= 400:
             # Never let upstream response text into the exception verbatim:
             # field-level redaction first (batch5 item 3).
             redacted_body = _redact_inline_secrets(redact_text(response.text[:8_000]))
             raise AgentCallError(
-                f"OpenCodex returned HTTP {response.status_code} "
+                f"Gateway returned HTTP {response.status_code} "
                 f"(request_id={request_id}): {redacted_body[:500]}"
             )
         raw = response.json()
         return parse_response(raw)
 
     async def list_models(self) -> list[str] | None:
-        """List model ids exposed by the OpenCodex proxy.
+        """List model ids exposed by the local model gateway.
 
-        Returns ``None`` when the proxy is unreachable or returns an error, so
+        Returns ``None`` when the gateway is unreachable or returns an error, so
         callers can distinguish "proxy down" from "model missing".
         """
         try:
@@ -182,7 +178,7 @@ def parse_response(raw: dict[str, Any]) -> AgentResult:
             unknown_types.append(str(item_type))
     if unknown_types:
         logger.debug(
-            "OpenCodex response contained unknown output types: %s",
+            "Gateway response contained unknown output types: %s",
             sorted(set(unknown_types)),
         )
     return AgentResult(
