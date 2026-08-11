@@ -58,6 +58,8 @@ retention_days = 14         # 清理判定：超过该天数的候选分支视�
 cleanup_policy = "manual"   # manual（默认，不自动删）| auto（启动时自动清理已合并/已拒绝/过期分支）
 
 [projects]
+# "docker" 是 dify 的旧 Compose 项目名别名（2026-08-10 前以 -p docker 运行，卷 docker_dify_*）；
+# 代码 _resolve_project 会将其解析到实际项目名 dify（容器 label 为 com.docker.compose.project=dify）。
 allowed_auto = ["dify", "docker", "feedback-analysis-agent", "catalog-ops-automation", "observability", "feishu-dify-gateway"]
 allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\download\\agent", "D:\\download\\ratio"]
 allowed_url_origins = [
