@@ -16,17 +16,17 @@ AUTH_FAILURES = Counter(
     ["reason", "endpoint"],
 )
 
-# 模型来源连通性（批次5-5）：1=可达，0=不可达
+# 模型来源连通性（批次5-5，2026-08-11 起 source=gateway 探测本机 LiteLLM 网关）：1=可达，0=不可达
 MODEL_CONNECTIVITY = Gauge(
     "control_plane_model_connectivity",
     "Model source reachability (1=ok, 0=unreachable)",
     ["source"],
 )
 
-# 模型目录漂移（批次5-5）：1=与基线不一致
+# 模型清单漂移（批次5-5）：1=与基线不一致（基线来自本机模型网关模型清单）
 MODEL_DRIFT = Gauge(
     "control_plane_model_drift",
-    "1 when the OpenCodex model list drifted from the recorded baseline",
+    "1 when the model gateway list drifted from the recorded baseline",
 )
 
 # 受控忽略（批次5-6）：明确语义的 except...pass 按 site 计数，低噪声可观测

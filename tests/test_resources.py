@@ -9,7 +9,7 @@ import pytest
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.config import ControlPlaneConfig
-from control_plane.opencodex import OpenCodexClient
+from control_plane.gateway import GatewayClient
 from control_plane.service import RepairService
 from control_plane.storage import Store
 from control_plane.tools import ToolContext
@@ -77,7 +77,7 @@ async def test_tool_context_close_closes_owned_http_client(tmp_path) -> None:
 
 
 def test_http_clients_have_pool_limits() -> None:
-    from control_plane.opencodex import HTTP_LIMITS as OCX_LIMITS
+    from control_plane.gateway import HTTP_LIMITS as OCX_LIMITS
     from control_plane.service import HTTP_LIMITS as SVC_LIMITS
     from control_plane.tools import HTTP_LIMITS as TOOL_LIMITS
 
@@ -87,7 +87,7 @@ def test_http_clients_have_pool_limits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_codex_client_close_after_cancel() -> None:
+async def test_gateway_client_close_after_cancel() -> None:
     handler_tasks: list[asyncio.Task] = []
 
     async def handler(reader, writer):
@@ -96,7 +96,7 @@ async def test_open_codex_client_close_after_cancel() -> None:
 
     server = await asyncio.start_server(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    client = OpenCodexClient(
+    client = GatewayClient(
         f"http://127.0.0.1:{port}/v1",
         "model-x",
         timeout_seconds=60,

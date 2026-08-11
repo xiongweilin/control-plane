@@ -2,15 +2,15 @@
 
 个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 Codex agent 会话**（`codex exec` + `opencode-go/deepseek-v4-flash`）。Agent 执行入口由 Codex 当前配置决定，现经本机 Responses 网关入口 `http://127.0.0.1:4000/v1`（4000 兼容代理 → 4001 LiteLLM）路由，让模型使用 Codex 全量工具诊断与修复，而非裸 Responses API 的少量函数；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
 
-代码中的 `opencodex_base_url`、`opencodex_api_key`、`OpenCodexClient` 暂为兼容标识，服务于独立的模型来源诊断，不决定 `codex exec` 的实际路由。当前边界如下：
+代码中的 `gateway_base_url`、`GatewayClient` 服务于本机模型网关（LiteLLM 4001）的独立模型来源诊断，不决定 `codex exec` 的实际路由；旧 `opencodex_base_url`/`opencodex_api_key` 字段与 `OpenCodexClient` 已于 2026-08-11 退役（OpenCodex 退役，10100 不再是活动入口）。当前边界如下：
 
 | 路径 | 当前状态 | 事实所有者 |
 |---|---|---|
 | Agent 执行 | Codex 经 `127.0.0.1:4000/v1` 进入兼容代理，再转发至 4001 LiteLLM | Codex 当前配置与模型路由文档 |
-| 已部署的模型来源诊断 | `control_plane.toml` 仍指向已退役的 `127.0.0.1:10100/v1`，属于失效探针、待迁移 | 实际运行配置 |
-| 新配置模板的诊断目标 | `control_plane.toml.example` 已改为 `127.0.0.1:4000/v1` | 配置模板 |
+| 已部署的模型来源诊断 | `control_plane.toml` 指向本机模型网关 `127.0.0.1:4001/v1`（2026-08-11 迁移完成） | 实际运行配置 |
+| 新配置模板的诊断目标 | `control_plane.toml.example` 同样指向 `127.0.0.1:4001/v1` | 配置模板 |
 
-在实际运行配置迁移到 4000 或兼容字段完成重构之前，不得用诊断探针状态判断 Agent 执行入口。
+诊断探针仅反映模型网关连通性，不决定 Agent 执行入口（`codex exec` 经 4000/4001 路由）。
 
 ## 架构
 
@@ -317,24 +317,24 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   `unknown_output_types`；function call 参数解析失败保留
   `arguments_parse_error` 原因，不再静默丢弃。
 
-### Responses 诊断客户端网络边界（兼容字段名）
+### 模型网关诊断客户端网络边界
 
-- `opencodex_base_url` 是现有代码保留的兼容字段名；它用于独立模型来源诊断，不是 `codex exec` 的路由配置。该地址指向非 loopback 时
-  必须显式配置 `opencodex_api_key`（环境变量
-  `CONTROL_PLANE_OPENCODEX_API_KEY` 或 `[agent] opencodex_api_key`），
-  否则启动即拒绝（ConfigurationError）。每个请求携带 `X-Request-Id`
-  便于追踪，异常消息内附 request id。
+- `gateway_base_url`（默认 `http://127.0.0.1:4001/v1`）是模型来源诊断的探测
+  目标（LiteLLM `GET /v1/models`），不是 `codex exec` 的路由配置。仅支持
+  loopback；非 loopback 地址启动即拒绝（ConfigurationError）。每个请求携带
+  `X-Request-Id` 便于追踪，异常消息内附 request id。旧
+  `opencodex_base_url`/`opencodex_api_key` 字段不再读取。
 
 ### 模型来源连通性与漂移
 
 - `check_model_sources()` 对三来源做最小连通性回归：Codex CLI
-  （`--version`）、兼容诊断代理（`GET /models`）、默认模型
+  （`--version`）、本机模型网关（LiteLLM 4001，`GET /v1/models`）、默认模型
   （`config.model` 是否在清单），结果发布
-  `control_plane_model_connectivity{source}`。
+  `control_plane_model_connectivity{source}`（source=cli/gateway/model）。
 - `check_model_drift()` 只读比较模型清单与 `models:baseline` 基线，
   漂移时更新基线并通知（`control_plane_model_drift`）。
 - 启动预检 `startup_model_preflight()`（`model_preflight_enabled` 默认
-  开）：默认模型消失/代理不可达时发警告通知，不阻断服务。
+  开）：默认模型消失/网关不可达时发警告通知（LiteLLM 网关不可达），不阻断服务。
 
 ### 受控忽略与资源
 
@@ -343,7 +343,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   磁盘用量解析、docker df 解析）按 `site` 计入
   `control_plane_ignored_errors_total`。
 - 所有 httpx 客户端统一连接池上限（`max_connections=20`、
-  `max_keepalive_connections=10`）；service/ToolContext/`OpenCodexClient`（兼容类名）
+  `max_keepalive_connections=10`）；service/ToolContext/`GatewayClient`
   只在自有客户端时关闭；取消中的请求释放回连接池（有测试）。
 
 ### 静态类型与覆盖率门禁
@@ -371,3 +371,4 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 - [0008 计划任务迁移 Windows 服务（研究）](/docs/research/0008-scheduled-task-to-windows-service.md)
 - [0009 升级与修复授权](/docs/decisions/0009-upgrade-vs-fix-authorization.md)
 - [0010 OpenCodex 网络边界与模型来源](/docs/decisions/0010-opencodex-network-boundary.md)
+- [0012 模型网关连通性诊断（OpenCodex 退役后）](/docs/decisions/0012-model-gateway-connectivity.md)

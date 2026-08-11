@@ -5,18 +5,16 @@ host = "127.0.0.1"
 port = 18083
 
 [agent]
-# 兼容字段名；当前用于 LiteLLM Responses 网关的独立模型来源诊断。
-opencodex_base_url = "http://127.0.0.1:4000/v1"
+# 本机模型网关（LiteLLM 4001）的模型清单诊断端点；OpenCodex 已退役（2026-08-11），
+# 旧字段名 opencodex_base_url 不再读取，10100 不再是活动入口。
+gateway_base_url = "http://127.0.0.1:4001/v1"
 model = "opencode-go/deepseek-v4-flash"
-# 非 loopback 地址时必须显式配置（也可用环境变量
-# CONTROL_PLANE_OPENCODEX_API_KEY）；loopback 默认无需鉴权。
-opencodex_api_key = ""
 # Codex CLI 可执行路径；缺省时按优先级解析：PATH 上的 codex（Scoop/npm
 # shim）> npm 包内 codex.exe > 裸 codex（启动预检拒绝）。
 # codex_cli = "C:\\Users\\metra\\scoop\\shims\\codex.exe"
-# 启动时对三模型来源（CLI / OpenCodex 代理 / 默认模型）做连通性预检
+# 启动时对三模型来源（CLI / 本机模型网关 / 默认模型）做连通性预检
 model_preflight_enabled = true
-opencodex_timeout_seconds = 120
+gateway_timeout_seconds = 120
 max_agent_calls_per_repair = 8
 # agent 输出写入会话文件前的上限（字节），超出部分截断并记录 truncated=true
 max_agent_output_bytes = 200000

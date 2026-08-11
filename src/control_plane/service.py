@@ -2212,15 +2212,14 @@ class RepairService:
     async def _notify(self, severity: str, title: str, text: str) -> None:
         await self.notifier.notify(severity, title, text)
 
-    async def _opencodex_models(self) -> list[str] | None:
-        """Read-only model-list probe against the configured OpenCodex proxy."""
-        from .opencodex import OpenCodexClient
+    async def _gateway_models(self) -> list[str] | None:
+        """Read-only model-list probe against the local model gateway (LiteLLM)."""
+        from .gateway import GatewayClient
 
-        client = OpenCodexClient(
-            self.config.opencodex_base_url,
+        client = GatewayClient(
+            self.config.gateway_base_url,
             self.config.model,
-            timeout_seconds=self.config.opencodex_timeout_seconds,
-            api_key=self.config.opencodex_api_key,
+            timeout_seconds=self.config.gateway_timeout_seconds,
         )
         try:
             return await client.list_models()
@@ -2230,8 +2229,9 @@ class RepairService:
     async def check_model_sources(self) -> dict[str, Any]:
         """Minimal connectivity regression over the three model sources.
 
-        Sources: (1) the Codex CLI itself, (2) the OpenCodex proxy endpoint,
-        (3) the configured default model present in the proxy model list.
+        Sources: (1) the Codex CLI itself, (2) the local model gateway
+        (LiteLLM 4001), (3) the configured default model present in the
+        gateway model list.
         Read-only; never modifies runtime state. Results are also published to
         the ``control_plane_model_connectivity`` gauge.
         """
@@ -2244,36 +2244,36 @@ class RepairService:
         except CodexCliUnavailableError as exc:
             cli["error"] = str(exc)
 
-        models = await self._opencodex_models()
-        opencodex: dict[str, Any] = {
+        models = await self._gateway_models()
+        gateway: dict[str, Any] = {
             "ok": models is not None,
             "model_count": len(models) if models is not None else 0,
-            "error": "" if models is not None else "proxy unreachable or error response",
+            "error": "" if models is not None else "gateway unreachable or error response",
         }
-        model: dict[str, Any] = {"ok": False, "configured": self.config.model, "error": "opencodex unreachable"}
+        model: dict[str, Any] = {"ok": False, "configured": self.config.model, "error": "gateway unreachable"}
         if models is not None:
             model["ok"] = self.config.model in models
             model["error"] = (
                 ""
                 if model["ok"]
-                else "configured model missing from OpenCodex model list"
+                else "configured model missing from gateway model list"
             )
 
         MODEL_CONNECTIVITY.labels(source="cli").set(1 if cli["ok"] else 0)
-        MODEL_CONNECTIVITY.labels(source="opencodex").set(1 if opencodex["ok"] else 0)
+        MODEL_CONNECTIVITY.labels(source="gateway").set(1 if gateway["ok"] else 0)
         MODEL_CONNECTIVITY.labels(source="model").set(1 if model["ok"] else 0)
-        return {"cli": cli, "opencodex": opencodex, "model": model}
+        return {"cli": cli, "gateway": gateway, "model": model}
 
     async def check_model_drift(self) -> dict[str, Any]:
-        """Read-only drift check for the OpenCodex model directory.
+        """Read-only drift check for the model gateway model list.
 
         Compares the live model id set against the recorded baseline; a change
         updates the baseline and is reported (metric + notification), never
         blocking. Only the model id set is stored — never model content.
         """
-        models = await self._opencodex_models()
+        models = await self._gateway_models()
         if models is None:
-            return {"drifted": False, "reachable": False, "detail": "proxy unreachable"}
+            return {"drifted": False, "reachable": False, "detail": "gateway unreachable"}
         current = sorted(models)
         baseline_raw = self.store.get_setting("models:baseline", "")
         if not baseline_raw:
@@ -2293,8 +2293,8 @@ class RepairService:
             }
             await self._notify(
                 "warning",
-                "OpenCodex 模型清单变化",
-                f"模型目录漂移检测：新增 {len(detail['added'])} 个、移除 {len(detail['removed'])} 个。"
+                "模型网关模型清单变化",
+                f"模型网关漂移检测：新增 {len(detail['added'])} 个、移除 {len(detail['removed'])} 个。"
                 f"新增: {', '.join(detail['added'][:8]) or '无'}；"
                 f"移除: {', '.join(detail['removed'][:8]) or '无'}",
             )
@@ -2312,11 +2312,11 @@ class RepairService:
         problems: list[str] = []
         if not sources["cli"]["ok"]:
             problems.append(f"codex CLI 不可用：{sources['cli']['error']}")
-        if not sources["opencodex"]["ok"]:
-            problems.append("OpenCodex 代理不可达（连通性预检失败）")
+        if not sources["gateway"]["ok"]:
+            problems.append("LiteLLM 网关不可达（连通性预检失败）")
         elif not sources["model"]["ok"]:
             problems.append(
-                f"默认模型 {sources['model']['configured']} 不在 OpenCodex 模型清单中"
+                f"默认模型 {sources['model']['configured']} 不在网关模型清单中"
             )
         if problems:
             await self._notify(
