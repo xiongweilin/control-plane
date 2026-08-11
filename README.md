@@ -1,6 +1,16 @@
 # control-plane
 
-个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 Codex agent 会话**（`codex exec` + `deepseek/deepseek-v4-flash`，经本机 OpenCodex 路由），让模型使用 Codex 全量工具诊断与修复，而非裸 Responses API 的少量函数；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
+个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 Codex agent 会话**（`codex exec` + `opencode-go/deepseek-v4-flash`）。Agent 执行入口由 Codex 当前配置决定，现经本机 Responses 网关入口 `http://127.0.0.1:4000/v1`（4000 兼容代理 → 4001 LiteLLM）路由，让模型使用 Codex 全量工具诊断与修复，而非裸 Responses API 的少量函数；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
+
+代码中的 `opencodex_base_url`、`opencodex_api_key`、`OpenCodexClient` 暂为兼容标识，服务于独立的模型来源诊断，不决定 `codex exec` 的实际路由。当前边界如下：
+
+| 路径 | 当前状态 | 事实所有者 |
+|---|---|---|
+| Agent 执行 | Codex 经 `127.0.0.1:4000/v1` 进入兼容代理，再转发至 4001 LiteLLM | Codex 当前配置与模型路由文档 |
+| 已部署的模型来源诊断 | `control_plane.toml` 仍指向已退役的 `127.0.0.1:10100/v1`，属于失效探针、待迁移 | 实际运行配置 |
+| 新配置模板的诊断目标 | `control_plane.toml.example` 已改为 `127.0.0.1:4000/v1` | 配置模板 |
+
+在实际运行配置迁移到 4000 或兼容字段完成重构之前，不得用诊断探针状态判断 Agent 执行入口。
 
 ## 架构
 
@@ -8,7 +18,7 @@
 Prometheus → Alertmanager
               └─ webhook → control-plane :18083（Windows 常驻）
                               ├─ 指纹去重 / 冷却 / 预算
-                              ├─ Codex agent 会话（deepseek-v4-flash 完整工具环境）
+                              ├─ Codex agent 会话（opencode-go/deepseek-v4-flash 完整工具环境）
                               ├─ 独立验证器 + 自动回滚
                               ├─ SQLite + data/evidence/*.json
                               └─ 飞书通知 / 审批（feishu-dify-gateway 扩展命令）
@@ -66,7 +76,7 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 ```
 
 飞书普通消息（非命令）等价于 `/task <描述>`，直接派发给控制平面的 Codex Agent；Dify Chatflow 已移除。
-`/task <描述>` 会把任务派发给控制平面的 Codex Agent（deepseek-v4-flash），
+`/task <描述>` 会把任务派发给控制平面的 Codex Agent（`opencode-go/deepseek-v4-flash`），
 执行过程同样推送：任务已接收 → Agent 启动 → 完成/失败。
 
 告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
@@ -97,7 +107,7 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
   `control_plane_run_info`、`control_plane_health_last_ready` 与
   `recovery_retry_failed` 指标；批次 5 新增
-  `control_plane_model_connectivity{source}`（codex CLI / OpenCodex 代理 /
+  `control_plane_model_connectivity{source}`（Codex CLI / 兼容诊断代理 /
   默认模型三来源连通）、`control_plane_model_drift`（模型清单漂移）、
   `control_plane_ignored_errors_total{site}`（受控忽略计数）、
   `control_plane_repairs_recoverable{status}`（可恢复静止修复）与
@@ -215,7 +225,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   修改。
 - `dirty_worktree_policy`：`reject`（默认，脏工作树拒绝执行）| `isolate`
   （在隔离 worktree 中执行，结束后强制移除，候选分支保留）。
-- 候选分支统一命名 `candidate_branch_prefix`（默认 `fix/control-plane-`）。
+- `[candidates].branch_prefix` 统一候选分支命名（内部字段 `candidate_branch_prefix`，默认 `fix/control-plane-`）。
 
 ### 候选分支清理
 
@@ -223,7 +233,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   dry-run，`--apply` 才真正删除），或
   `POST /v1/candidates/cleanup`（`{"apply": false}` 默认；`apply: true` 显式删除）。
 - 枚举已合并 / 已拒绝（repair 为 rejected/rolled_back）/ 过期
-  （超过 `candidate_retention_days`）分支；`candidate_cleanup_policy = "auto"`
+  （超过 `[candidates].retention_days`，内部字段 `candidate_retention_days`）分支；`[candidates].cleanup_policy = "auto"`（内部字段 `candidate_cleanup_policy`）
   时启动自动清理，`manual`（默认）不自动删。
 
 ### 互斥、分类与预算
@@ -299,7 +309,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 
 ### 错误正文脱敏与 Responses API 语义
 
-- OpenCodex 上游错误正文先做字段级脱敏（敏感键）与行内密钥值扫描
+- Responses 兼容客户端的上游错误正文先做字段级脱敏（敏感键）与行内密钥值扫描
   （`api_key`/`token`/`secret` 等后跟长值），绝不把 `response.text[:500]`
   原样带入异常或日志。
 - 解析明确处理 refusal（顶层/输出项/content 片段）、`status` 非
@@ -307,9 +317,9 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   `unknown_output_types`；function call 参数解析失败保留
   `arguments_parse_error` 原因，不再静默丢弃。
 
-### OpenCodex 网络边界
+### Responses 诊断客户端网络边界（兼容字段名）
 
-- `opencodex_base_url` 默认 loopback（127.0.0.1）；指向非 loopback 时
+- `opencodex_base_url` 是现有代码保留的兼容字段名；它用于独立模型来源诊断，不是 `codex exec` 的路由配置。该地址指向非 loopback 时
   必须显式配置 `opencodex_api_key`（环境变量
   `CONTROL_PLANE_OPENCODEX_API_KEY` 或 `[agent] opencodex_api_key`），
   否则启动即拒绝（ConfigurationError）。每个请求携带 `X-Request-Id`
@@ -318,7 +328,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 ### 模型来源连通性与漂移
 
 - `check_model_sources()` 对三来源做最小连通性回归：Codex CLI
-  （`--version`）、OpenCodex 代理（`GET /models`）、默认模型
+  （`--version`）、兼容诊断代理（`GET /models`）、默认模型
   （`config.model` 是否在清单），结果发布
   `control_plane_model_connectivity{source}`。
 - `check_model_drift()` 只读比较模型清单与 `models:baseline` 基线，
@@ -333,7 +343,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
   磁盘用量解析、docker df 解析）按 `site` 计入
   `control_plane_ignored_errors_total`。
 - 所有 httpx 客户端统一连接池上限（`max_connections=20`、
-  `max_keepalive_connections=10`）；service/ToolContext/OpenCodexClient
+  `max_keepalive_connections=10`）；service/ToolContext/`OpenCodexClient`（兼容类名）
   只在自有客户端时关闭；取消中的请求释放回连接池（有测试）。
 
 ### 静态类型与覆盖率门禁
