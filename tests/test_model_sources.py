@@ -65,7 +65,7 @@ async def test_check_model_sources_all_ok(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         service,
         "_gateway_models",
-        AsyncMock(return_value=["opencode-go/deepseek-v4-flash", "gpt-5.6-sol"]),
+        AsyncMock(return_value=["opencode-go/deepseek-v4-flash", "gpt-5.6-luna"]),
     )
     result = await service.check_model_sources()
     assert result["cli"]["ok"] is True
@@ -94,7 +94,7 @@ async def test_check_model_sources_default_model_missing(tmp_path, monkeypatch) 
     monkeypatch.setattr(
         service,
         "_gateway_models",
-        AsyncMock(return_value=["gpt-5.6-sol"]),
+        AsyncMock(return_value=["gpt-5.6-luna"]),
     )
     result = await service.check_model_sources()
     assert result["model"]["ok"] is False
