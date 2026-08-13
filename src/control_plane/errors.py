@@ -23,7 +23,7 @@ class ErrorClass(StrEnum):
 class TimeoutKind(StrEnum):
     """Timeout taxonomy (batch2 item 3): where a timeout occurred."""
 
-    EXEC = "exec"  # agent run (codex session)
+    EXEC = "exec"  # agent run (dsh session)
     COMM = "comm"  # alertmanager / feishu / git / ssh network communication
     VERIFY = "verify"  # deterministic verifier
     APPROVAL = "approval"  # waiting for human decision
