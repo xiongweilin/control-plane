@@ -14,7 +14,7 @@ import pytest
 
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
-from control_plane.codex_runner import CodexSessionResult
+from control_plane.dsh_runner import DshSessionResult
 from control_plane.config import ControlPlaneConfig
 from control_plane.models import Alert
 from control_plane.notify import Notifier
@@ -156,7 +156,7 @@ async def test_dirty_worktree_policy_reject_blocks_agent(tmp_path) -> None:
         }
     )
     with pytest.raises(RuntimeError, match="refusing to run"):
-        await service._run_codex_agent(ctx, repair_id, alert)
+        await service._run_dsh_agent(ctx, repair_id, alert)
     assert service.agent.calls == 0  # type: ignore[attr-defined]
     await ctx.close()
     await service.close()

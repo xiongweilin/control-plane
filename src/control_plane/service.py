@@ -20,7 +20,7 @@ from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
-from .codex_runner import CodexRunner
+from .dsh_runner import DshRunner
 from .config import ControlPlaneConfig
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
@@ -73,7 +73,7 @@ class RepairService:
         config: ControlPlaneConfig,
         store: Store,
         budget: Budget,
-        agent: CodexRunner,
+        agent: DshRunner,
         approvals: ApprovalManager,
         notifier: Notifier,
         executor: CommandExecutor | None = None,
@@ -405,7 +405,7 @@ class RepairService:
             )
             branch = f"task/{task_id}"
             task_prompt = (
-                "你是个人平台的任务 Agent，运行在完整 Codex 工具环境中。\n"
+                "你是个人平台的任务 Agent，运行在完整 dsh 工具环境中。\n"
                 f"task_id: {task_id}\n工作目录: {repo}\n"
                 "用户任务：\n"
                 f"{prompt}\n\n"
@@ -573,18 +573,28 @@ class RepairService:
                 await self.run_digest()
             except Exception:
                 logger.exception("daily digest failed")
-            await asyncio.sleep(86_400)
 
-    async def _sleep_until_digest_time(self) -> None:
+    @staticmethod
+    def _seconds_until_digest(now: dt.datetime, digest_time: str) -> float:
+        """Seconds from ``now`` to the next digest instant.
+
+        A digest time already passed today targets tomorrow at the same clock
+        time, so the daily digest never drifts or skips a day after a long run.
+        """
         try:
-            hour, minute = (int(part) for part in self.config.digest_time.split(":", 1))
+            hour, minute = (int(part) for part in digest_time.split(":", 1))
         except (ValueError, AttributeError):
             hour, minute = 21, 30
-        now = dt.datetime.now().astimezone()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += dt.timedelta(days=1)
-        await asyncio.sleep((target - now).total_seconds())
+        return (target - now).total_seconds()
+
+    async def _sleep_until_digest_time(self) -> None:
+        now = dt.datetime.now().astimezone()
+        await asyncio.sleep(
+            self._seconds_until_digest(now, self.config.digest_time)
+        )
 
     async def run_env_scan(self) -> list[str]:
         """Daily environment scan. Returns a list of differences; empty means all healthy."""
@@ -752,7 +762,7 @@ class RepairService:
                     http=self.http,
                 )
                 self._transition(repair_id, RepairState.DIAGNOSING)
-                proposal = await self._run_codex_agent(ctx, repair_id, alert)
+                proposal = await self._run_dsh_agent(ctx, repair_id, alert)
                 needs_approval = proposal.get("code_changed") or any(
                     row["status"] == "needs_approval"
                     for row in self.store.list_actions(repair_id)
@@ -958,7 +968,7 @@ class RepairService:
             return RepairState.TIMED_OUT
         return RepairState.FAILED
 
-    async def _run_codex_agent(
+    async def _run_dsh_agent(
         self,
         ctx: ToolContext,
         repair_id: str,
@@ -967,7 +977,7 @@ class RepairService:
         self._transition(repair_id, RepairState.PROPOSING)
         repo_root = await self._pick_repo(alert)
         main_repo = repo_root
-        branch = f"{self.config.codex_branch_prefix}{repair_id}"
+        branch = f"{self.config.dsh_branch_prefix}{repair_id}"
         isolated: Path | None = None
         dirty = await self._check_dirty_workspaces(repo_root)
         if dirty:
@@ -1022,7 +1032,7 @@ class RepairService:
                     if result.timed_out
                     else "Agent created a committed candidate branch without a summary"
                 )
-                self._record_codex_action(
+                self._record_dsh_action(
                     repair_id,
                     actual_repo,
                     before,
@@ -1041,14 +1051,14 @@ class RepairService:
 
             if result.timed_out:
                 raise RuntimeError(
-                    "Codex agent timed out without a committed candidate [timeout_kind=exec]"
+                    "dsh agent timed out without a committed candidate [timeout_kind=exec]"
                 )
             if result.exit_code != 0:
                 raise RuntimeError(
-                    f"Codex agent failed (exit {result.exit_code}): {result.stderr_tail}"
+                    f"dsh agent failed (exit {result.exit_code}): {result.stderr_tail}"
                 )
             before = workspaces[0] if workspaces else {"git_head": "no-git", "repo": main_repo}
-            self._record_codex_action(
+            self._record_dsh_action(
                 repair_id,
                 main_repo,
                 before,
@@ -1127,7 +1137,7 @@ class RepairService:
             if row["pattern"] == fingerprint_pattern(alert)
         ]
         lines = [
-            "你是个人平台控制平面的修复 Agent，运行在完整 Codex 工具环境中。",
+            "你是个人平台控制平面的修复 Agent，运行在完整 dsh 工具环境中。",
             f"repair_id: {repair_id}",
             f"工作目录: {repo}",
             f"当前告警: {json.dumps(alert.model_dump(mode='json'), ensure_ascii=False)}",
@@ -1311,7 +1321,7 @@ class RepairService:
         stat_lines = [line for line in output.splitlines() if "|" in line]
         return bool(stat_lines), output.strip()
 
-    def _record_codex_action(
+    def _record_dsh_action(
         self,
         repair_id: str,
         repo: str,
@@ -1326,7 +1336,7 @@ class RepairService:
         self.store.add_action(
             action_id,
             repair_id,
-            "codex_agent",
+            "dsh_agent",
             repo,
             "needs_approval" if changed else "ok",
             before=before,
@@ -1465,7 +1475,7 @@ class RepairService:
         """Build the review summary (commit, diff stat, files, impact) for approval."""
         lines: list[str] = []
         for row in self.store.list_actions(repair_id):
-            if row["tool"] != "codex_agent":
+            if row["tool"] != "dsh_agent":
                 continue
             repo = row["target"]
             after = json.loads(row["after_json"]) if row["after_json"] else {}
@@ -1526,7 +1536,7 @@ class RepairService:
         repair_id: str,
     ) -> None:
         for row in self.store.list_actions(repair_id):
-            if row["tool"] != "codex_agent":
+            if row["tool"] != "dsh_agent":
                 continue
             after = json.loads(row["after_json"]) if row["after_json"] else {}
             repo = row["target"]
@@ -1845,7 +1855,7 @@ class RepairService:
                     actions.append({"tool": "container_status", "target": resolved})
         for row in self.store.list_actions(repair_id):
             after = json.loads(row["after_json"]) if row["after_json"] else {}
-            if row["tool"] == "codex_agent" and after.get("branch"):
+            if row["tool"] == "dsh_agent" and after.get("branch"):
                 tool_results["repos"].append((row["target"], after["branch"]))
         return await verifier.verify_repair(
             repair_id=repair_id,
@@ -2057,7 +2067,7 @@ class RepairService:
             project = ""
         for row in reversed(self.store.list_actions(repair_id)):
             tool = row["tool"]
-            if tool == "codex_agent":
+            if tool == "dsh_agent":
                 after = json.loads(row["after_json"]) if row["after_json"] else {}
                 repo = row["target"]
                 branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
@@ -2152,7 +2162,7 @@ class RepairService:
         )
         advisory_detail: dict[str, Any] = {}
         for row in actions:
-            if row["tool"] != "codex_agent":
+            if row["tool"] != "dsh_agent":
                 continue
             after = json.loads(row["after_json"]) if row["after_json"] else {}
             branch = after.get("branch", "")
@@ -2229,19 +2239,19 @@ class RepairService:
     async def check_model_sources(self) -> dict[str, Any]:
         """Minimal connectivity regression over the three model sources.
 
-        Sources: (1) the Codex CLI itself, (2) the local model gateway
+        Sources: (1) the dsh CLI itself, (2) the local model gateway
         (LiteLLM 4001), (3) the configured default model present in the
         gateway model list.
         Read-only; never modifies runtime state. Results are also published to
         the ``control_plane_model_connectivity`` gauge.
         """
-        from .codex_runner import CodexCliUnavailableError
+        from .dsh_runner import DshCliUnavailableError
 
         cli: dict[str, Any] = {"ok": False, "path": "", "version": "", "error": ""}
         try:
             path, version = self.agent.cli_info()
             cli.update(ok=True, path=str(path), version=version)
-        except CodexCliUnavailableError as exc:
+        except DshCliUnavailableError as exc:
             cli["error"] = str(exc)
 
         models = await self._gateway_models()
@@ -2311,7 +2321,7 @@ class RepairService:
         sources = await self.check_model_sources()
         problems: list[str] = []
         if not sources["cli"]["ok"]:
-            problems.append(f"codex CLI 不可用：{sources['cli']['error']}")
+            problems.append(f"dsh CLI 不可用：{sources['cli']['error']}")
         if not sources["gateway"]["ok"]:
             problems.append("LiteLLM 网关不可达（连通性预检失败）")
         elif not sources["model"]["ok"]:
