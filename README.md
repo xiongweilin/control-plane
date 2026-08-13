@@ -1,16 +1,16 @@
 # control-plane
 
-个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 Codex agent 会话**（`codex exec` + `opencode-go/deepseek-v4-flash`）。Agent 执行入口由 Codex 当前配置决定，现经本机 Responses 网关入口 `http://127.0.0.1:4000/v1`（4000 兼容代理 → 4001 LiteLLM）路由，让模型使用 Codex 全量工具诊断与修复，而非裸 Responses API 的少量函数；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
+个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 dsh agent 会话**（`dsh --profile headless` + `opencode-go/deepseek-v4-flash`）。Agent 以项目目录为工作区运行，模型由 dsh 设置决定（默认 opencode-go/deepseek-v4-flash，经本机 Responses 网关 4000 兼容代理 → 4001 LiteLLM 路由），使用 dsh 全量工具诊断与修复；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
 
-代码中的 `gateway_base_url`、`GatewayClient` 服务于本机模型网关（LiteLLM 4001）的独立模型来源诊断，不决定 `codex exec` 的实际路由；旧 `opencodex_base_url`/`opencodex_api_key` 字段与 `OpenCodexClient` 已于 2026-08-11 退役（OpenCodex 退役，10100 不再是活动入口）。当前边界如下：
+代码中的 `gateway_base_url`、`GatewayClient` 服务于本机模型网关（LiteLLM 4001）的独立模型来源诊断，不决定 dsh headless 的实际路由；旧 `opencodex_base_url`/`opencodex_api_key` 字段与 `OpenCodexClient` 已于 2026-08-11 退役（OpenCodex 退役，10100 不再是活动入口）。当前边界如下：
 
 | 路径 | 当前状态 | 事实所有者 |
 |---|---|---|
-| Agent 执行 | Codex 经 `127.0.0.1:4000/v1` 进入兼容代理，再转发至 4001 LiteLLM | Codex 当前配置与模型路由文档 |
+| Agent 执行 | dsh headless（工作区=项目目录）经 dsh 模型配置（默认 `opencode-go/deepseek-v4-flash`，经 4000/4001 路由） | dsh 设置与模型路由文档 |
 | 已部署的模型来源诊断 | `control_plane.toml` 指向本机模型网关 `127.0.0.1:4001/v1`（2026-08-11 迁移完成） | 实际运行配置 |
 | 新配置模板的诊断目标 | `control_plane.toml.example` 同样指向 `127.0.0.1:4001/v1` | 配置模板 |
 
-诊断探针仅反映模型网关连通性，不决定 Agent 执行入口（`codex exec` 经 4000/4001 路由）。
+诊断探针仅反映模型网关连通性，不决定 Agent 执行入口（dsh headless 经 4000/4001 路由）。
 
 ## 架构
 
@@ -18,7 +18,7 @@
 Prometheus → Alertmanager
               └─ webhook → control-plane :18083（Windows 常驻）
                               ├─ 指纹去重 / 冷却 / 预算
-                              ├─ Codex agent 会话（opencode-go/deepseek-v4-flash 完整工具环境）
+                              ├─ dsh agent 会话（opencode-go/deepseek-v4-flash 完整工具环境）
                               ├─ 独立验证器 + 自动回滚
                               ├─ SQLite + data/evidence/*.json
                               └─ 飞书通知 / 审批（feishu-dify-gateway 扩展命令）
@@ -37,25 +37,24 @@ uv run python -m control_plane
 
 ## 权限矩阵
 
-- Codex agent 在指定项目仓库内以完整工具环境运行，受任务 prompt 硬约束、全局 AGENTS.md 与控制平面独立验证约束。
+- dsh agent 在指定项目仓库内以完整工具环境运行，受任务 prompt 硬约束、dsh 全局 AGENTS.md（同步自 ~/.codex/AGENTS.md）与控制平面独立验证约束。
 - 自动运维（可逆）：agent 可对白名单 compose 项目执行 restart / up -d、只读诊断、清理与健康等待；控制平面事后独立核验容器状态与 git 状态。
 - 候选 + 审批：agent 对代码/配置的修改必须提交到 `fix/control-plane-<id>` 分支；控制平面读取分支差异、拒绝修改验证器/告警规则/权限/control-plane 自身，审批后合并 main 并推送。Agent 超时但已留下提交时进入 `candidate/pending-review`（repair 状态为 `needs_approval`），不记为 failed；每次 Agent 结束都在 `finally` 恢复原 Git 分支。
 - 默认禁止：文件写入（候选分支除外）、依赖变更、数据库写、云端写、凭据访问、删除数据、修改验证器/告警规则/权限。
 
 ## Agent 触发说明
 
-控制平面启动 Codex CLI 执行完整 agent 会话。可执行文件解析优先级
-（批次 5，见 ADR-0010）：显式 `[agent] codex_cli` 配置 > PATH 上的
-`codex`（Scoop shim 或 npm 全局 shim）> npm 包内原生 `codex.exe`
-（结构容忍查找，不再硬编码 vendor 内部路径）> 裸 `codex`。启动/每次
-会话前执行 `codex --version` 预检：CLI 缺失或探测失败会以清晰错误拒绝，
-上次记录版本变化写入 `codex:cli_version` 并通过
-`control_plane_codex_cli_info` 指标暴露。
+控制平面启动 dsh CLI 执行完整 headless agent 会话。可执行文件解析优先级：
+显式 `[agent] dsh_cli` 配置 > 共享安装
+`D:\download\agent\deepseek-harness\apps\cli\lib\bin.js`（经 node 执行，
+与其它 agent 项目同目录）> PATH 上的 `dsh`（npm 全局 shim）> 裸 `dsh`。
+启动/每次会话前执行 `dsh --version` 预检：CLI 缺失或探测失败会以清晰错误拒绝，
+上次记录版本变化写入 `dsh:cli_version` 并通过
+`control_plane_dsh_cli_info` 指标暴露。
 
 ```text
-codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
-  --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-  --json -o <会话摘要> -
+node D:\download\agent\deepseek-harness\apps\cli\lib\bin.js
+  --profile headless <任务 prompt>   # cwd = 项目 Windows 路径
 ```
 
 工作目录使用 Windows 原生路径（WSL 已于 2026-08-07 退役）。控制平面是权威边界：它注入硬约束、独立验证结果、把关代码合并审批并执行回滚；`--dangerously-bypass-approvals-and-sandbox` 只让会话在控制平面内部自动执行，不绕过控制平面自身的门禁。
@@ -75,8 +74,8 @@ codex exec -m opencode-go/deepseek-v4-flash -C <项目 Windows 路径>
 /task <描述> 派发任务给 Agent 执行
 ```
 
-飞书普通消息（非命令）等价于 `/task <描述>`，直接派发给控制平面的 Codex Agent；Dify Chatflow 已移除。
-`/task <描述>` 会把任务派发给控制平面的 Codex Agent（`opencode-go/deepseek-v4-flash`），
+飞书普通消息（非命令）等价于 `/task <描述>`，直接派发给控制平面的 dsh Agent；Dify Chatflow 已移除。
+`/task <描述>` 会把任务派发给控制平面的 dsh Agent（模型由 dsh 设置决定，默认 `opencode-go/deepseek-v4-flash`），
 执行过程同样推送：任务已接收 → Agent 启动 → 完成/失败。
 
 告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
@@ -85,7 +84,7 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
 
 沉淀文件位置（可直接打开）：
 
-- `D:\download\agent\control-plane\data\agent-sessions\{repair_id}.jsonl` 与 `-last.md`（Codex 会话原文与摘要）
+- `D:\download\agent\control-plane\data\agent-sessions\{repair_id}.jsonl`（dsh headless 最终答复；`-last.md` 已不再生成）
 - `D:\download\agent\control-plane\data\evidence\`（EvidenceRecord JSON）
 - `D:\download\agent\control-plane\data\patches\`（候选补丁）
 - `D:\download\agent\control-plane\data\control-plane.db`（repairs/actions/candidates/playbooks）
@@ -107,11 +106,11 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
 - 可观测：`/metrics` 暴露修复计数/状态、候选、预算与当日 Agent 调用，
   `control_plane_run_info`、`control_plane_health_last_ready` 与
   `recovery_retry_failed` 指标；批次 5 新增
-  `control_plane_model_connectivity{source}`（Codex CLI / 兼容诊断代理 /
+  `control_plane_model_connectivity{source}`（dsh CLI / 模型网关 /
   默认模型三来源连通）、`control_plane_model_drift`（模型清单漂移）、
   `control_plane_ignored_errors_total{site}`（受控忽略计数）、
   `control_plane_repairs_recoverable{status}`（可恢复静止修复）与
-  `control_plane_codex_cli_info{version,path}`；`/live`、`/ready` 供探针区分存活与就绪，
+  `control_plane_dsh_cli_info{version,path}`；`/live`、`/ready` 供探针区分存活与就绪，
   已接入 Prometheus 与 Metratio Overview 看板。
 
 相关配置：`notify_cooldown_skip`、
@@ -288,13 +287,13 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 
 ## 加固（批次 5）
 
-### Codex 可执行路径与预检
+### dsh 可执行路径与预检
 
-- 解析优先级：`[agent] codex_cli` > PATH `codex`（Scoop/npm shim）>
-  npm 包内原生 `codex.exe`（结构容忍）> 裸 `codex`；不再硬编码 npm 包
-  vendor 内部路径（升级即失效）。
-- 每次会话前 `codex --version` 预检，缺失/失败以 `CodexCliUnavailableError`
-  清晰拒绝；版本变化记录到 `codex:cli_version` 并告警。
+- 解析优先级：`[agent] dsh_cli` > 共享安装
+  `D:\download\agent\deepseek-harness\apps\cli\lib\bin.js`（经 node 执行）>
+  PATH `dsh`（npm shim）> 裸 `dsh`；不再依赖 Codex CLI。
+- 每次会话前 `dsh --version` 预检，缺失/失败以 `DshCliUnavailableError`
+  清晰拒绝；版本变化记录到 `dsh:cli_version` 并告警。
 
 ### 状态语义（终态 vs 可恢复静止）
 

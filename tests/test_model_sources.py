@@ -12,16 +12,16 @@ from control_plane.storage import Store
 
 
 class FakeAgent:
-    def __init__(self, version: str = "codex-cli 0.145.0", error: str = "") -> None:
+    def __init__(self, version: str = "dsh-cli 0.1.0-rc.5", error: str = "") -> None:
         self.version = version
         self.error = error
 
     def cli_info(self):
         if self.error:
-            from control_plane.codex_runner import CodexCliUnavailableError
+            from control_plane.dsh_runner import DshCliUnavailableError
 
-            raise CodexCliUnavailableError(self.error)
-        return Path("C:\\tools\\codex.exe"), self.version
+            raise DshCliUnavailableError(self.error)
+        return Path("C:\\tools\\dsh.cmd"), self.version
 
 
 class FakeNotifier:
@@ -76,7 +76,7 @@ async def test_check_model_sources_all_ok(tmp_path, monkeypatch) -> None:
 
 
 async def test_check_model_sources_cli_missing(tmp_path, monkeypatch) -> None:
-    service = _service(tmp_path, agent=FakeAgent(error="Codex CLI not runnable"))
+    service = _service(tmp_path, agent=FakeAgent(error="dsh CLI not runnable"))
     monkeypatch.setattr(
         service,
         "_gateway_models",

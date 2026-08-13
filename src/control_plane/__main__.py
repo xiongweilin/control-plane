@@ -19,7 +19,7 @@ from .runtime import (
 def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
     from .approvals import ApprovalManager
     from .budget import Budget
-    from .codex_runner import CodexRunner
+    from .dsh_runner import DshRunner
     from .notify import Notifier
     from .service import RepairService
     from .storage import Store
@@ -29,7 +29,7 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
         config,
         store,
         Budget(store, 0, 0),
-        CodexRunner(config),
+        DshRunner(config),
         ApprovalManager(),
         Notifier(config),
     )

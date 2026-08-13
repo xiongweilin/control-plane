@@ -10,7 +10,7 @@ import pytest
 from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
-from control_plane.codex_runner import CodexSessionResult
+from control_plane.dsh_runner import DshSessionResult
 from control_plane.config import ControlPlaneConfig
 from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
@@ -120,7 +120,7 @@ class FakeExecutorScan(FakeExecutor):
         return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
 
 
-class FakeCodexRunner:
+class FakeDshRunner:
     def __init__(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
         self.calls = 0
@@ -132,15 +132,15 @@ class FakeCodexRunner:
         repo: str,
         prompt: str,
         run_id: str = "",
-    ) -> CodexSessionResult:
+    ) -> DshSessionResult:
         self.calls += 1
-        return CodexSessionResult(
+        return DshSessionResult(
             exit_code=self.exit_code,
             last_message=f"fixed {repair_id}",
         )
 
 
-class FakeCodexRunnerWithSummary(FakeCodexRunner):
+class FakeDshRunnerWithSummary(FakeDshRunner):
     def __init__(self, summary: str = "KEEP cand-1: 有价值\nDROP cand-2: 无价值") -> None:
         super().__init__(exit_code=0)
         self.summary = summary
@@ -152,8 +152,8 @@ class FakeCodexRunnerWithSummary(FakeCodexRunner):
         repo: str,
         prompt: str,
         run_id: str = "",
-    ) -> CodexSessionResult:
-        return CodexSessionResult(
+    ) -> DshSessionResult:
+        return DshSessionResult(
             exit_code=0,
             last_message=self.summary,
             timed_out=False,
@@ -161,7 +161,7 @@ class FakeCodexRunnerWithSummary(FakeCodexRunner):
         )
 
 
-class FakeTimedOutCodexRunner(FakeCodexRunner):
+class FakeTimedOutDshRunner(FakeDshRunner):
     def __init__(self, executor: FakeExecutor) -> None:
         super().__init__(exit_code=124)
         self.executor = executor
@@ -173,14 +173,14 @@ class FakeTimedOutCodexRunner(FakeCodexRunner):
         repo: str,
         prompt: str,
         run_id: str = "",
-    ) -> CodexSessionResult:
+    ) -> DshSessionResult:
         self.calls += 1
         self.executor.current_branch = f"fix/control-plane-{repair_id}"
-        return CodexSessionResult(
+        return DshSessionResult(
             exit_code=124,
             last_message="",
             timed_out=True,
-            stderr_tail="codex session timed out",
+            stderr_tail="dsh session timed out",
         )
 
 
@@ -227,7 +227,7 @@ async def test_noise_alert_ignored(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -268,7 +268,7 @@ async def test_smoke_instance_alert_ignored(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -308,7 +308,7 @@ async def test_policy_ignore_skips_repair(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -338,7 +338,7 @@ async def test_policy_manual_pending_then_run(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -377,7 +377,7 @@ async def test_attempt_count_resets_after_resolution(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -450,7 +450,7 @@ async def test_resolution_without_recovery_evidence_does_not_reset_attempts(tmp_
         config,
         store,
         Budget(store, 100, 8),
-        FakeCodexRunner(),
+        FakeDshRunner(),
         approvals,
         Notifier(config),
         executor=executor,
@@ -502,7 +502,7 @@ async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -536,7 +536,7 @@ async def test_git_check_skips_non_git_repo(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutorNoGit()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -562,7 +562,7 @@ async def test_env_scan_all_healthy(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutorScan()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
 
     def transport(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/-/ready":
@@ -592,7 +592,7 @@ async def test_alert_is_firing(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -620,7 +620,7 @@ async def test_cancel_in_progress_repair(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -648,7 +648,7 @@ async def test_cancel_queued_repair_marks_interrupted_and_releases_lease(tmp_pat
         config,
         store,
         Budget(store, 100, 8),
-        FakeCodexRunner(),
+        FakeDshRunner(),
         ApprovalManager(),
         Notifier(config),
         executor=FakeExecutor(),
@@ -681,7 +681,7 @@ async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutorUnhealthy()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -711,7 +711,7 @@ async def test_resolve_project_maps_legacy_docker_alias(tmp_path) -> None:
         config,
         store,
         Budget(store, 100, 8),
-        FakeCodexRunner(),
+        FakeDshRunner(),
         approvals,
         Notifier(config),
         executor=FakeExecutor(),
@@ -733,7 +733,7 @@ async def test_check_promql_expected_mismatch(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -771,7 +771,7 @@ async def test_run_digest_no_records(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -796,7 +796,7 @@ async def test_run_digest_drops_candidate(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor()
-    agent = FakeCodexRunnerWithSummary("DROP cand-x: 无价值，重复且无证据\nKEEP cand-y: 有真实证据")
+    agent = FakeDshRunnerWithSummary("DROP cand-x: 无价值，重复且无证据\nKEEP cand-y: 有真实证据")
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -833,7 +833,7 @@ async def test_repair_flow_with_approval(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=True)
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "success"}))
     http = httpx.AsyncClient(transport=transport)
     service = RepairService(
@@ -868,7 +868,7 @@ async def test_repair_flow_with_approval(tmp_path) -> None:
     candidates = store.list_candidates("candidate")
     assert len(candidates) == 1
     assert candidates[0]["pattern"] == "HighCPU|dify|*"
-    assert store.list_actions(repair_id)[0]["tool"] == "codex_agent"
+    assert store.list_actions(repair_id)[0]["tool"] == "dsh_agent"
     assert any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
     await service.close()
     store.close()
@@ -880,7 +880,7 @@ async def test_timed_out_agent_candidate_waits_for_review_and_restores_branch(tm
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=True)
-    agent = FakeTimedOutCodexRunner(executor)
+    agent = FakeTimedOutDshRunner(executor)
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
     )
@@ -925,7 +925,7 @@ async def test_reject_closes_repair_without_candidate(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=True)
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
@@ -961,7 +961,7 @@ async def test_operations_only_repair_closes_without_approval(tmp_path) -> None:
     store = Store(config.state_db)
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=False)
-    agent = FakeCodexRunner()
+    agent = FakeDshRunner()
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     service = RepairService(
         config,
