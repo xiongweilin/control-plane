@@ -220,6 +220,14 @@ class Store:
                 "SELECT * FROM alerts WHERE fingerprint=?", (fingerprint,)
             ).fetchone()
 
+    def list_firing_alerts(self) -> list[str]:
+        """Fingerprints of alerts still recorded as firing (for startup reconciliation)."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT fingerprint FROM alerts WHERE status='firing'"
+            ).fetchall()
+        return [row[0] for row in rows]
+
     # ---- repairs ----
 
     def create_repair(

@@ -151,6 +151,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     )
             except Exception:
                 logger.exception("model preflight failed")
+        try:
+            await service.reconcile_alerts()
+            logger.info("alert reconciliation done")
+        except Exception:
+            logger.exception("alert reconciliation failed")
         digest_task = asyncio.create_task(service.digest_loop())
         scan_task = asyncio.create_task(service.scan_loop())
         resume_tasks = [asyncio.create_task(service.resume_pending_approval(r)) for r in resumed]
