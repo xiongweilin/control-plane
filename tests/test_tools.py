@@ -12,9 +12,9 @@ def test_validate_url_origin() -> None:
 
 
 def test_resolve_repo_allowed_and_denied() -> None:
-    allowed = ("D:\\infrastructure\\compose", "D:\\download\\agent")
+    allowed = ("D:\\infrastructure\\compose", "D:\\agent")
     assert resolve_repo("D:\\infrastructure\\compose\\dify", allowed) == "D:/infrastructure/compose/dify"
-    assert resolve_repo("D:/download/agent/control-plane", allowed) == "D:/download/agent/control-plane"
+    assert resolve_repo("D:/agent/control-plane", allowed) == "D:/agent/control-plane"
     with pytest.raises(ToolError):
         resolve_repo("C:\\Windows\\System32", allowed)
 

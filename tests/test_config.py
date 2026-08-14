@@ -44,5 +44,5 @@ def test_resolve_all_missing_returns_bare_dsh(monkeypatch, tmp_path) -> None:
 
 def test_default_points_to_shared_checkout() -> None:
     assert Path(
-        r"D:\download\agent\dsh-varin\apps\cli\lib\bin.js"
+        r"D:\agent\dsh-varin\apps\cli\lib\bin.js"
     ) == DSH_CLI_DEFAULT
