@@ -17,7 +17,7 @@ import httpx
 from prometheus_client import Counter
 
 from .advisories import fetch_security_advisories
-from .alerts import alert_fingerprint, fingerprint_pattern
+from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
 from .dsh_runner import DshRunner
@@ -138,25 +138,10 @@ class RepairService:
         starts_at = int(alert.starts_at.timestamp())
 
         if alert.status == "resolved":
-            self.store.mark_alert_resolved(
-                fingerprint,
+            await self._handle_resolved(
+                alert,
                 int(alert.ends_at.timestamp()) if alert.ends_at else None,
             )
-            recovered, evidence = await self._verify_alert_recovery(alert)
-            if recovered:
-                self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
-                await self._cancel_in_progress_repairs(fingerprint)
-                await self._notify(
-                    "info",
-                    f"告警恢复已验证：{alertname}",
-                    f"{self._describe(alert)}\n恢复证据：{evidence}",
-                )
-            else:
-                await self._notify(
-                    "warning",
-                    f"告警 resolved 但恢复未验证：{alertname}",
-                    f"{self._describe(alert)}\n未重置自动修复次数；{evidence}",
-                )
             return {"deduplicated": 1}
 
         known = self.store.get_alert(fingerprint)
@@ -256,6 +241,69 @@ class RepairService:
                 return {"cooldown": 1}
 
         return await self._start_repair(alert, attempt)
+
+    async def _handle_resolved(self, alert: Alert, ends_at: int | None) -> None:
+        """Resolve one alert with recovery verification (webhook and reconcile share this)."""
+        fingerprint = alert_fingerprint(alert)
+        alertname = alert.labels.get("alertname", "unknown")
+        self.store.mark_alert_resolved(fingerprint, ends_at)
+        recovered, evidence = await self._verify_alert_recovery(alert)
+        if recovered:
+            self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
+            await self._cancel_in_progress_repairs(fingerprint)
+            await self._notify(
+                "info",
+                f"告警恢复已验证：{alertname}",
+                f"{self._describe(alert)}\n恢复证据：{evidence}",
+            )
+        else:
+            await self._notify(
+                "warning",
+                f"告警 resolved 但恢复未验证：{alertname}",
+                f"{self._describe(alert)}\n未重置自动修复次数；{evidence}",
+            )
+
+    async def reconcile_alerts(self) -> None:
+        """Startup reconciliation of persisted alert state with the live alert source.
+
+        Alert resolution reaches the control plane by webhook; a restart inside
+        the delivery window can lose the notification and leave stale ``firing``
+        rows behind. Rows whose fingerprint is no longer firing are resolved
+        through the same verified path as the webhook.
+        """
+        try:
+            response = await self.http.get(
+                f"{self.config.prometheus_url}/api/v1/alerts", timeout=15
+            )
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("alert reconciliation: alert query failed: %s", exc)
+            return
+        active: set[str] = set()
+        for alert in body.get("data", {}).get("alerts", []):
+            if alert.get("state") == "firing":
+                labels = alert.get("labels") or {}
+                active.add(fingerprint_from_labels(labels))
+        for fingerprint in self.store.list_firing_alerts():
+            if fingerprint in active:
+                continue
+            raw = self.store.get_setting(f"alert_payload:{fingerprint}", "")
+            try:
+                alert = Alert.model_validate(json.loads(raw))
+            except (ValueError, TypeError):
+                logger.warning(
+                    "alert reconciliation: no valid payload for %s; marking resolved",
+                    fingerprint,
+                )
+                self.store.mark_alert_resolved(fingerprint, None)
+                continue
+            logger.info("alert reconciliation: resolving stale alert %s", fingerprint)
+            try:
+                await self._handle_resolved(alert, None)
+            except Exception:
+                logger.exception(
+                    "alert reconciliation: resolve failed for %s", fingerprint
+                )
 
     async def _start_repair(self, alert: Alert, attempt: int) -> dict[str, int]:
         fingerprint = alert_fingerprint(alert)
