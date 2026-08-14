@@ -47,7 +47,7 @@ def test_cli_info_returns_path_and_version(monkeypatch) -> None:
 
 
 def test_cli_info_js_entry_runs_through_node(monkeypatch) -> None:
-    runner = _runner(Path("D:\\tools\\deepseek-harness\\apps\\cli\\lib\\bin.js"))
+    runner = _runner(Path("D:\\tools\\dsh-varin\\apps\\cli\\lib\\bin.js"))
     monkeypatch.setattr(
         "control_plane.dsh_runner.shutil.which", lambda name: "node"
     )
@@ -55,7 +55,7 @@ def test_cli_info_js_entry_runs_through_node(monkeypatch) -> None:
     def fake_run(args, **kwargs):
         assert args == [
             "node",
-            "D:\\tools\\deepseek-harness\\apps\\cli\\lib\\bin.js",
+            "D:\\tools\\dsh-varin\\apps\\cli\\lib\\bin.js",
             "--version",
         ]
         return _FakeProc(0, b"0.1.0-rc.5\n")

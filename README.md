@@ -46,14 +46,14 @@ uv run python -m control_plane
 
 控制平面启动 dsh CLI 执行完整 headless agent 会话。可执行文件解析优先级：
 显式 `[agent] dsh_cli` 配置 > 共享安装
-`D:\download\agent\deepseek-harness\apps\cli\lib\bin.js`（经 node 执行，
+`D:\download\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行，
 与其它 agent 项目同目录）> PATH 上的 `dsh`（npm 全局 shim）> 裸 `dsh`。
 启动/每次会话前执行 `dsh --version` 预检：CLI 缺失或探测失败会以清晰错误拒绝，
 上次记录版本变化写入 `dsh:cli_version` 并通过
 `control_plane_dsh_cli_info` 指标暴露。
 
 ```text
-node D:\download\agent\deepseek-harness\apps\cli\lib\bin.js
+node D:\download\agent\dsh-varin\apps\cli\lib\bin.js
   --profile headless <任务 prompt>   # cwd = 项目 Windows 路径
 ```
 
@@ -293,7 +293,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 ### dsh 可执行路径与预检
 
 - 解析优先级：`[agent] dsh_cli` > 共享安装
-  `D:\download\agent\deepseek-harness\apps\cli\lib\bin.js`（经 node 执行）>
+  `D:\download\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行）>
   PATH `dsh`（npm shim）> 裸 `dsh`；不再依赖 Codex CLI。
 - 每次会话前 `dsh --version` 预检，缺失/失败以 `DshCliUnavailableError`
   清晰拒绝；版本变化记录到 `dsh:cli_version` 并告警。
