@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from control_plane.config import ControlPlaneConfig
 from control_plane.dsh_runner import (
     DshCliUnavailableError,
     DshRunner,
     repo_path_to_windows,
 )
-from control_plane.config import ControlPlaneConfig
 
 
 def test_repo_path_to_windows_passthrough() -> None:
