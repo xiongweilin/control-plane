@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -22,7 +23,13 @@ class DshCliUnavailableError(RuntimeError):
 
 
 def repo_path_to_windows(path: str) -> str:
-    """Normalize a repo path for native Windows executables (WSL retired 2026-08-07)."""
+    """Normalize a repo path for native Windows executables (WSL retired 2026-08-07).
+
+    On non-Windows hosts (e.g. Linux CI running the portable suite) the path is
+    returned unchanged so it stays usable as a subprocess cwd.
+    """
+    if os.name != "nt":
+        return path
     return path.replace("/", "\\")
 
 

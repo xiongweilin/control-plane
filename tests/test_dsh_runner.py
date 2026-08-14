@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,8 @@ def test_repo_path_to_windows_passthrough() -> None:
 
 
 def test_repo_path_to_windows_forward_slashes() -> None:
-    assert repo_path_to_windows("D:/download/agent/control-plane") == "D:\\download\\agent\\control-plane"
+    expected = "D:\\download\\agent\\control-plane" if os.name == "nt" else "D:/download/agent/control-plane"
+    assert repo_path_to_windows("D:/download/agent/control-plane") == expected
 
 
 class _FakeProc:
