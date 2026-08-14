@@ -1,16 +1,16 @@
 # control-plane
 
-个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 dsh agent 会话**（`dsh --profile headless` + `opencode-go/deepseek-v4-flash`）。Agent 以项目目录为工作区运行，模型由 dsh 设置决定（默认 opencode-go/deepseek-v4-flash，经本机 Responses 网关 4000 兼容代理 → 4001 LiteLLM 路由），使用 dsh 全量工具诊断与修复；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
+个人平台控制平面：接收本地 Alertmanager 告警，触发**完整 dsh agent 会话**（`dsh --profile headless` + dsh 默认模型）。Agent 以项目目录为工作区运行，模型由 dsh 设置决定（`~/.dsh/settings.yaml` 的 `agent-default-model`，当前 `litellm/deepseek-v4-flash`，经本机 LiteLLM 网关 4001 的 `config.agent.yaml` 模型路由；4000 zstd 兼容代理仅服务 Codex，不参与 dsh 路由），使用 dsh 全量工具诊断与修复；代码/配置修改必须提交到 `fix/control-plane-<id>` 候选分支，经飞书审批后才合并。所有事件按《控制平面》（由《证据与演化语义》晋升合并）记录到 SQLite 与 JSON 证据文件；成功修复自动沉淀候选经验，经验晋升 official playbook 需飞书审批。
 
 代码中的 `gateway_base_url`、`GatewayClient` 服务于本机模型网关（LiteLLM 4001）的独立模型来源诊断，不决定 dsh headless 的实际路由；旧 `opencodex_base_url`/`opencodex_api_key` 字段与 `OpenCodexClient` 已于 2026-08-11 退役（OpenCodex 退役，10100 不再是活动入口）。当前边界如下：
 
 | 路径 | 当前状态 | 事实所有者 |
 |---|---|---|
-| Agent 执行 | dsh headless（工作区=项目目录）经 dsh 模型配置（默认 `opencode-go/deepseek-v4-flash`，经 4000/4001 路由） | dsh 设置与模型路由文档 |
+| Agent 执行 | dsh headless（工作区=项目目录）经 dsh 模型配置（`~/.dsh/settings.yaml` 默认 `litellm/deepseek-v4-flash`，经 4001 LiteLLM 网关） | dsh 设置与模型路由文档 |
 | 已部署的模型来源诊断 | `control_plane.toml` 指向本机模型网关 `127.0.0.1:4001/v1`（2026-08-11 迁移完成） | 实际运行配置 |
 | 新配置模板的诊断目标 | `control_plane.toml.example` 同样指向 `127.0.0.1:4001/v1` | 配置模板 |
 
-诊断探针仅反映模型网关连通性，不决定 Agent 执行入口（dsh headless 经 4000/4001 路由）。
+诊断探针仅反映模型网关连通性，不决定 Agent 执行入口（dsh headless 经 4001 LiteLLM 网关）。
 
 ## 架构
 
@@ -18,7 +18,7 @@
 Prometheus → Alertmanager
               └─ webhook → control-plane :18083（Windows 常驻）
                               ├─ 指纹去重 / 冷却 / 预算
-                              ├─ dsh agent 会话（opencode-go/deepseek-v4-flash 完整工具环境）
+                              ├─ dsh agent 会话（litellm/deepseek-v4-flash 完整工具环境）
                               ├─ 独立验证器 + 自动回滚
                               ├─ SQLite + data/evidence/*.json
                               └─ 飞书通知 / 审批（feishu-dify-gateway 扩展命令）
@@ -75,7 +75,7 @@ node D:\download\agent\deepseek-harness\apps\cli\lib\bin.js
 ```
 
 飞书普通消息（非命令）等价于 `/task <描述>`，直接派发给控制平面的 dsh Agent；Dify Chatflow 已移除。
-`/task <描述>` 会把任务派发给控制平面的 dsh Agent（模型由 dsh 设置决定，默认 `opencode-go/deepseek-v4-flash`），
+`/task <描述>` 会把任务派发给控制平面的 dsh Agent（模型由 dsh 设置决定，默认 `litellm/deepseek-v4-flash`），
 执行过程同样推送：任务已接收 → Agent 启动 → 完成/失败。
 
 告警级策略：每个告警指纹（fingerprint）可以单独设置 `auto`（自动修复，默认）、
@@ -217,6 +217,9 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 - 失败恢复保留 `original_error` 与 `recovery_error` 双证据链，并提供
   `recovery_retry_failed` metric 标签（恢复后再次失败）。
 - 只有确定性恢复验证成功才清零尝试次数（`resolved` 本身不足以重置）。
+- 启动告警对账：启动时 `reconcile_alerts()` 用实时告警源解析重启窗口内可能
+  丢失的 webhook `resolved`，与 webhook 路径共享 `_handle_resolved`，避免
+  陈旧 firing 行残留（2026-08-14）。
 
 ### Git 分支安全
 
