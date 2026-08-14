@@ -722,7 +722,7 @@ class RepairService:
 
         try:
             cert = await cloud(
-                ["openssl", "x509", "-enddate", "-noout", "-in", "/srv/stack/nginx/ssl/fullchain.pem"]
+                ["openssl", "x509", "-enddate", "-noout", "-in", "/srv/nginx/ssl/fullchain.pem"]
             )
             match = re.search(r"notAfter=([A-Za-z]{3} [0-9]{1,2} [0-9:]{8} [0-9]{4})", cert)
             if match:
