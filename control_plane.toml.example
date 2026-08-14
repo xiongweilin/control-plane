@@ -10,9 +10,9 @@ port = 18083
 gateway_base_url = "http://127.0.0.1:4001/v1"
 model = "opencode-go/deepseek-v4-flash"
 # dsh CLI 入口（apps/cli/lib/bin.js，经 node 执行）；缺省时按优先级解析：
-# 共享安装 D:\download\agent\deepseek-harness\apps\cli\lib\bin.js > PATH 上的
+# 共享安装 D:\download\agent\dsh-varin\apps\cli\lib\bin.js > PATH 上的
 # dsh（npm shim）> 裸 dsh（启动预检拒绝）。
-# dsh_cli = "D:\\download\\agent\\deepseek-harness\\apps\\cli\\lib\\bin.js"
+# dsh_cli = "D:\\download\\agent\\dsh-varin\\apps\\cli\\lib\\bin.js"
 # 启动时对三模型来源（CLI / 本机模型网关 / 默认模型）做连通性预检
 model_preflight_enabled = true
 gateway_timeout_seconds = 120
