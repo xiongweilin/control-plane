@@ -14,8 +14,8 @@ from control_plane.advisories import AdvisoryInfo
 from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
-from control_plane.dsh_runner import DshRunner
 from control_plane.config import ControlPlaneConfig
+from control_plane.dsh_runner import DshRunner
 from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairRejectedError, RepairService

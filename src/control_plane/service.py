@@ -20,8 +20,8 @@ from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
-from .dsh_runner import DshRunner
 from .config import ControlPlaneConfig
+from .dsh_runner import DshRunner
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
 from .gitpush import push_with_ssh_fallback
