@@ -46,14 +46,14 @@ uv run python -m control_plane
 
 控制平面启动 dsh CLI 执行完整 headless agent 会话。可执行文件解析优先级：
 显式 `[agent] dsh_cli` 配置 > 共享安装
-`D:\download\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行，
+`D:\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行，
 与其它 agent 项目同目录）> PATH 上的 `dsh`（npm 全局 shim）> 裸 `dsh`。
 启动/每次会话前执行 `dsh --version` 预检：CLI 缺失或探测失败会以清晰错误拒绝，
 上次记录版本变化写入 `dsh:cli_version` 并通过
 `control_plane_dsh_cli_info` 指标暴露。
 
 ```text
-node D:\download\agent\dsh-varin\apps\cli\lib\bin.js
+node D:\agent\dsh-varin\apps\cli\lib\bin.js
   --profile headless <任务 prompt>   # cwd = 项目 Windows 路径
 ```
 
@@ -84,10 +84,10 @@ Alertmanager 的 `resolved` 只是一项观察：控制平面必须通过当前 
 
 沉淀文件位置（可直接打开）：
 
-- `D:\download\agent\control-plane\data\agent-sessions\{repair_id}.jsonl`（dsh headless 最终答复；`-last.md` 已不再生成）
-- `D:\download\agent\control-plane\data\evidence\`（EvidenceRecord JSON）
-- `D:\download\agent\control-plane\data\patches\`（候选补丁）
-- `D:\download\agent\control-plane\data\control-plane.db`（repairs/actions/candidates/playbooks）
+- `D:\agent\control-plane\data\agent-sessions\{repair_id}.jsonl`（dsh headless 最终答复；`-last.md` 已不再生成）
+- `D:\agent\control-plane\data\evidence\`（EvidenceRecord JSON）
+- `D:\agent\control-plane\data\patches\`（候选补丁）
+- `D:\agent\control-plane\data\control-plane.db`（repairs/actions/candidates/playbooks）
 
 也可用 `/cp evidence` 或 `GET /v1/evidence`（需 X-Control-Plane-Key）查看最近证据。
 
@@ -293,7 +293,7 @@ Docker 容器经 `host.docker.internal` 访问，不暴露到局域网。
 ### dsh 可执行路径与预检
 
 - 解析优先级：`[agent] dsh_cli` > 共享安装
-  `D:\download\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行）>
+  `D:\agent\dsh-varin\apps\cli\lib\bin.js`（经 node 执行）>
   PATH `dsh`（npm shim）> 裸 `dsh`；不再依赖 Codex CLI。
 - 每次会话前 `dsh --version` 预检，缺失/失败以 `DshCliUnavailableError`
   清晰拒绝；版本变化记录到 `dsh:cli_version` 并告警。

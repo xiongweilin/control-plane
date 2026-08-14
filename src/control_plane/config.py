@@ -45,7 +45,7 @@ def _validate_gateway_network(base_url: str) -> None:
 
 
 DSH_CLI_DEFAULT = Path(
-    r"D:\download\agent\dsh-varin\apps\cli\lib\bin.js"
+    r"D:\agent\dsh-varin\apps\cli\lib\bin.js"
 )
 
 
@@ -54,7 +54,7 @@ def resolve_dsh_cli(explicit: str = "") -> Path:
 
     1. Explicit ``[agent] dsh_cli`` configuration wins.
     2. The built CLI in the shared harness checkout
-       (``D:\\download\\agent\\dsh-varin\\apps\\cli\\lib\\bin.js``); the
+       (``D:\\agent\\dsh-varin\\apps\\cli\\lib\\bin.js``); the
        harness is installed in the same directory as the other agent projects.
     3. A ``dsh`` executable on PATH (npm global shim).
     4. Bare ``dsh`` so subprocess resolution fails with a clear message
@@ -159,8 +159,8 @@ class ControlPlaneConfig:
     )
     allowed_repo_roots: tuple[str, ...] = (
         "D:\\infrastructure\\compose",
-        "D:\\download\\agent",
-        "D:\\download\\ratio",
+        "D:\\agent",
+        "D:\\agent\\ratio",
     )
     allowed_url_origins: tuple[str, ...] = (
         "http://127.0.0.1",

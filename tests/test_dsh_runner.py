@@ -14,12 +14,12 @@ from control_plane.dsh_runner import (
 
 
 def test_repo_path_to_windows_passthrough() -> None:
-    assert repo_path_to_windows("D:\\download\\agent\\control-plane") == "D:\\download\\agent\\control-plane"
+    assert repo_path_to_windows("D:\\agent\\control-plane") == "D:\\agent\\control-plane"
 
 
 def test_repo_path_to_windows_forward_slashes() -> None:
-    expected = "D:\\download\\agent\\control-plane" if os.name == "nt" else "D:/download/agent/control-plane"
-    assert repo_path_to_windows("D:/download/agent/control-plane") == expected
+    expected = "D:\\agent\\control-plane" if os.name == "nt" else "D:/agent/control-plane"
+    assert repo_path_to_windows("D:/agent/control-plane") == expected
 
 
 class _FakeProc:
