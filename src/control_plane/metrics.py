@@ -16,6 +16,13 @@ AUTH_FAILURES = Counter(
     ["reason", "endpoint"],
 )
 
+# 出站飞书通知失败计数（低噪声可观测；按 reason 打标：script_missing / spawn_or_timeout）
+NOTIFY_FAILURES = Counter(
+    "control_plane_notify_failures_total",
+    "Outbound Feishu notification failures (script missing / spawn / timeout)",
+    ["reason"],
+)
+
 # 模型来源连通性（批次5-5，2026-08-11 起 source=gateway 探测本机 LiteLLM 网关）：1=可达，0=不可达
 MODEL_CONNECTIVITY = Gauge(
     "control_plane_model_connectivity",
@@ -122,4 +129,14 @@ class ControlPlaneCollector:
             "control_plane_health_last_ready",
             "Unix timestamp of the last successful /ready database probe",
             value=int(self._store.get_setting("health:last_ready", "0") or 0),
+        )
+        yield GaugeMetricFamily(
+            "control_plane_last_scan_ts",
+            "Unix timestamp of the last successful daily environment scan",
+            value=int(self._store.get_setting("scan:last_ts", "0") or 0),
+        )
+        yield GaugeMetricFamily(
+            "control_plane_last_digest_ts",
+            "Unix timestamp of the last successful daily digest",
+            value=int(self._store.get_setting("digest:last_ts", "0") or 0),
         )

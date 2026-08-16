@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from .config import ControlPlaneConfig
+from .metrics import NOTIFY_FAILURES
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class Notifier:
         script = self.config.feishu_notify_script
         if not script.is_file():
             logger.warning("feishu-notify.ps1 not found at %s", script)
+            NOTIFY_FAILURES.labels(reason="script_missing").inc()
             return
         args = [
             "-NoProfile",
@@ -52,3 +54,4 @@ class Notifier:
             await asyncio.wait_for(proc.wait(), timeout=30)
         except (OSError, TimeoutError) as exc:
             logger.warning("feishu notification failed: %s", exc)
+            NOTIFY_FAILURES.labels(reason="spawn_or_timeout").inc()
