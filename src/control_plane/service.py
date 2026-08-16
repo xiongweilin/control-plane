@@ -515,6 +515,7 @@ class RepairService:
     async def run_digest(self) -> str:
         today = dt.date.today().isoformat()
         if self.store.get_setting("digest:last_date") == today:
+            self.store.set_setting("digest:last_ts", str(int(time.time())))
             return "今日已整理过"
         candidates = self.store.list_candidates("candidate")[: self.config.digest_max_candidates]
         evidence_files = self._recent_files(self.config.evidence_dir, "*.json", 10)
@@ -522,6 +523,7 @@ class RepairService:
         if not candidates and not evidence_files and not sessions:
             await self._notify("info", "每日沉淀整理", "今日无沉淀记录，定时整理任务已执行。")
             self.store.set_setting("digest:last_date", today)
+            self.store.set_setting("digest:last_ts", str(int(time.time())))
             return "无沉淀记录"
         if not self.budget.can_spend():
             await self._notify("warning", "沉淀整理已跳过", "Agent 调用预算已耗尽。")
@@ -597,6 +599,7 @@ class RepairService:
             text = f"今日沉淀整理：共 {len(candidates)} 条候选，归档 {len(dropped)} 条，无保留项。"
         await self._notify("info", "每日沉淀整理结果", text)
         self.store.set_setting("digest:last_date", today)
+        self.store.set_setting("digest:last_ts", str(int(time.time())))
         return text
 
     @staticmethod
@@ -772,6 +775,8 @@ class RepairService:
                 "每日环境自检发现差异",
                 "；\n".join(differences),
             )
+        # 心跳：任何正常完成（无论有无差异）都刷新扫描时间戳，供告警规则判断自检停摆
+        self.store.set_setting("scan:last_ts", str(int(time.time())))
         return differences
 
     async def scan_loop(self) -> None:

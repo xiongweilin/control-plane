@@ -17,10 +17,16 @@ def test_collector_emits_metrics(tmp_path) -> None:
     assert "control_plane_agent_calls_today" in families
     assert "control_plane_run_info" in families
     assert "control_plane_health_last_ready" in families
+    assert "control_plane_last_scan_ts" in families
+    assert "control_plane_last_digest_ts" in families
     store.set_setting("health:last_ready", "1700000000")
+    store.set_setting("scan:last_ts", "1700000001")
+    store.set_setting("digest:last_ts", "1700000002")
     families = {f.name: f for f in collector.collect()}
     samples = list(families["control_plane_health_last_ready"].samples)
     assert samples[0].value == 1700000000
+    assert list(families["control_plane_last_scan_ts"].samples)[0].value == 1700000001
+    assert list(families["control_plane_last_digest_ts"].samples)[0].value == 1700000002
     store.close()
 
 
