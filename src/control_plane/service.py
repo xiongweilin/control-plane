@@ -518,8 +518,12 @@ class RepairService:
             self.store.set_setting("digest:last_ts", str(int(time.time())))
             return "今日已整理过"
         candidates = self.store.list_candidates("candidate")[: self.config.digest_max_candidates]
-        evidence_files = self._recent_files(self.config.evidence_dir, "*.json", 10)
-        sessions = self._recent_files(self.config.data_dir / "agent-sessions", "*-last.md", 5)
+        evidence_files = self._recent_files(self.config.evidence_dir, "*.json", 10, recursive=True)
+        sessions = self._recent_files(
+            self.config.data_dir / "agent-sessions", "*-last.md", 5, recursive=True
+        ) or self._recent_files(
+            self.config.data_dir / "agent-sessions", "*.jsonl", 5, recursive=True
+        )
         if not candidates and not evidence_files and not sessions:
             await self._notify("info", "每日沉淀整理", "今日无沉淀记录，定时整理任务已执行。")
             self.store.set_setting("digest:last_date", today)
@@ -529,11 +533,16 @@ class RepairService:
             await self._notify("warning", "沉淀整理已跳过", "Agent 调用预算已耗尽。")
             return "预算不足，跳过整理"
 
-        repo = await self._pick_task_repo("", "")
+        # Digest runs in the control plane's own repository, not in a picked
+        # project root: the evidence files, agent sessions and the SQLite
+        # database it must review live under data/ here, and a project
+        # workspace (e.g. D:\infrastructure\compose) hides them.
+        repo = str(self.config.data_dir.parent)
         lines = [
             "你是控制平面的沉淀整理 Agent。审阅以下候选经验、证据文件与会话摘要，输出整理建议。",
             f"今日日期：{today}",
             "硬约束：只输出 KEEP/DROP 行，id 必须来自下面的候选列表；不要发明 id；不要修改任何文件。",
+            "下面的证据文件与会话摘要是绝对路径，直接读取即可，不要重新搜索文件系统。",
             "",
             "现有候选：",
         ]
@@ -589,6 +598,13 @@ class RepairService:
                 dropped.append(candidate_id)
 
         kept_rows = [row for row in candidates if row["id"] in kept]
+        if candidates and not kept and not dropped:
+            await self._notify(
+                "warning",
+                "沉淀整理未产出判定",
+                f"候选 {len(candidates)} 条均未得到有效 KEEP/DROP 输出；"
+                f"请人工处理：/cp status 查看，/cp promote|dismiss <id> 决定。",
+            )
         if kept_rows:
             text = (
                 f"今日沉淀整理：共 {len(candidates)} 条候选，归档 {len(dropped)} 条，保留 {len(kept)} 条。\n"
@@ -603,13 +619,16 @@ class RepairService:
         return text
 
     @staticmethod
-    def _recent_files(directory: Path, pattern: str, limit: int) -> list[str]:
+    def _recent_files(
+        directory: Path, pattern: str, limit: int, recursive: bool = False
+    ) -> list[str]:
         if not directory.is_dir():
             return []
+        matches = directory.rglob(pattern) if recursive else directory.glob(pattern)
         return [
             str(path)
             for path in sorted(
-                directory.glob(pattern),
+                matches,
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )[:limit]
