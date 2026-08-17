@@ -12,7 +12,7 @@ from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.config import ControlPlaneConfig
-from control_plane.dsh_runner import DshSessionResult
+from control_plane.codex_runner import CodexSessionResult
 from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairService
@@ -81,8 +81,8 @@ class FakeCodexRunner:
         repo: str,
         prompt: str,
         run_id: str = "",
-    ) -> DshSessionResult:
-        return DshSessionResult(exit_code=0, last_message=f"fixed {repair_id}")
+    ) -> CodexSessionResult:
+        return CodexSessionResult(exit_code=0, last_message=f"fixed {repair_id}")
 
 
 def _config(tmp_path) -> ControlPlaneConfig:
@@ -143,7 +143,7 @@ def _seed_pending_repair(store: Store, repair_id: str, branch_exists: bool = Tru
     store.add_action(
         f"act-{repair_id}",
         repair_id,
-        "dsh_agent",
+        "codex_agent",
         "C:\\tmp\\repos",
         "needs_approval",
         before={"repo": "C:\\tmp\\repos", "git_head": "abc", "git_ref": "main"},

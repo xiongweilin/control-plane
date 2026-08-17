@@ -18,7 +18,7 @@ def _counter_value(site: str) -> float:
 
 
 def test_audit_write_failure_counts_controlled_ignore(tmp_path) -> None:
-    from control_plane.dsh_runner import DshRunner
+    from control_plane.codex_runner import CodexRunner
     from control_plane.storage import Store
 
     store = Store(tmp_path / "cp.db")
@@ -27,13 +27,13 @@ def test_audit_write_failure_counts_controlled_ignore(tmp_path) -> None:
         raise RuntimeError("database locked")
 
     store.add_audit_entry = failing_add_audit_entry  # type: ignore[method-assign]
-    runner = DshRunner(ControlPlaneConfig(dsh_cli=Path("dsh.cmd")))
+    runner = CodexRunner(ControlPlaneConfig(codex_cli=Path("codex.cmd")))
     runner.attach_store(store)
     before = _counter_value("audit_write")
     runner._audit(
         "run-1",
         "repair-1",
-        ["node", "dsh", "--profile", "headless"],
+        ["codex.cmd", "exec", "--sandbox", "danger-full-access"],
         0,
         0.0,
         truncated=False,

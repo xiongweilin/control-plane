@@ -8,7 +8,7 @@ import httpx
 from control_plane.alerts import fingerprint_pattern
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
-from control_plane.dsh_runner import DshRunner
+from control_plane.codex_runner import CodexRunner
 from control_plane.models import Alert
 from control_plane.notify import Notifier
 from control_plane.service import RepairService, recovery_retry_failed, repairs_skipped_dirty
@@ -51,7 +51,7 @@ def test_recovery_retry_failed_only_counts_real_failures(tmp_path) -> None:
         config,
         store,
         Budget(store, 100, 8),
-        DshRunner(config),
+        CodexRunner(config),
         ApprovalManager(),
         Notifier(config),
         executor=store,  # type: ignore[arg-type] - unused in _record_failure
@@ -83,7 +83,7 @@ def test_recovery_retry_failed_only_counts_real_failures(tmp_path) -> None:
             store,
             "r1",
             fingerprint,
-            "dsh agent timed out without a committed candidate [timeout_kind=exec]",
+            "codex agent timed out without a committed candidate [timeout_kind=exec]",
         )
     )
     assert _counter(recovery_retry_failed, label) == before_retry

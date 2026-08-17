@@ -15,7 +15,7 @@ from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.config import ControlPlaneConfig
-from control_plane.dsh_runner import DshRunner
+from control_plane.codex_runner import CodexRunner
 from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairRejectedError, RepairService
@@ -66,7 +66,7 @@ class FakeExecutor:
         return ""
 
 
-class FakeDshRunner:
+class FakeCodexRunner:
     async def run_task(
         self,
         *,
@@ -75,9 +75,9 @@ class FakeDshRunner:
         prompt: str,
         run_id: str = "",
     ):
-        from control_plane.dsh_runner import DshSessionResult
+        from control_plane.codex_runner import CodexSessionResult
 
-        return DshSessionResult(exit_code=0, last_message=f"fixed {repair_id}")
+        return CodexSessionResult(exit_code=0, last_message=f"fixed {repair_id}")
 
 
 def _config(tmp_path) -> ControlPlaneConfig:
@@ -126,7 +126,7 @@ def _make_service(
         config,
         store,
         Budget(store, 100, 8),
-        FakeDshRunner(),
+        FakeCodexRunner(),
         ApprovalManager(),
         Notifier(config),
         executor=executor,
@@ -224,7 +224,7 @@ async def test_pending_review_summary_includes_commit_and_files(tmp_path) -> Non
     store.add_action(
         "act-s",
         "repair-s",
-        "dsh_agent",
+        "codex_agent",
         str(tmp_path / "repos"),
         "needs_approval",
         before={"repo": str(tmp_path / "repos"), "git_ref": "main"},
@@ -260,10 +260,10 @@ async def test_command_executor_audits_redacted_args(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dsh_runner_audits_and_writes_run_header(tmp_path) -> None:
-    config = replace(_config(tmp_path), dsh_cli=Path(sys.executable))
+async def test_codex_runner_audits_and_writes_run_header(tmp_path) -> None:
+    config = replace(_config(tmp_path), codex_cli=Path(sys.executable))
     store = Store(config.state_db)
-    runner = DshRunner(config)
+    runner = CodexRunner(config)
     runner.attach_store(store)
     result = await runner.run_task(
         repair_id="repair-runner",
@@ -271,7 +271,7 @@ async def test_dsh_runner_audits_and_writes_run_header(tmp_path) -> None:
         prompt="hello",
         run_id="run-audit-1",
     )
-    assert result.exit_code != 0  # python.exe is not dsh; exit non-zero is fine
+    assert result.exit_code != 0  # python.exe is not codex; exit non-zero is fine
     rows = store.list_audit("repair-runner")
     assert len(rows) == 1
     assert rows[0]["kind"] == "agent"
@@ -284,10 +284,10 @@ async def test_dsh_runner_audits_and_writes_run_header(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dsh_runner_redacts_session_before_write(tmp_path, monkeypatch) -> None:
-    config = replace(_config(tmp_path), dsh_cli=Path(sys.executable))
+async def test_codex_runner_redacts_session_before_write(tmp_path, monkeypatch) -> None:
+    config = replace(_config(tmp_path), codex_cli=Path(sys.executable))
     store = Store(config.state_db)
-    runner = DshRunner(config)
+    runner = CodexRunner(config)
     runner.attach_store(store)
 
     class FakeProc:
@@ -300,7 +300,7 @@ async def test_dsh_runner_redacts_session_before_write(tmp_path, monkeypatch) ->
     async def fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN002, ANN003
         return FakeProc()
 
-    monkeypatch.setattr("control_plane.dsh_runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("control_plane.codex_runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
     result = await runner.run_task(
         repair_id="repair-redact",
         repo=str(tmp_path),
@@ -323,7 +323,7 @@ async def test_pending_summary_includes_dependency_advisories(tmp_path, monkeypa
     store.add_action(
         "act-ad",
         "repair-ad",
-        "dsh_agent",
+        "codex_agent",
         str(tmp_path / "repos"),
         "needs_approval",
         before={"repo": str(tmp_path / "repos"), "git_ref": "main"},
@@ -365,7 +365,7 @@ async def test_pending_summary_advisory_unavailable_degradation(tmp_path, monkey
     store.add_action(
         "act-ad2",
         "repair-ad2",
-        "dsh_agent",
+        "codex_agent",
         str(tmp_path / "repos"),
         "needs_approval",
         before={"repo": str(tmp_path / "repos"), "git_ref": "main"},

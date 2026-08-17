@@ -44,30 +44,20 @@ def _validate_gateway_network(base_url: str) -> None:
         )
 
 
-DSH_CLI_DEFAULT = Path(
-    r"D:\agent\dsh-varin\apps\cli\lib\bin.js"
-)
+def resolve_codex_cli(explicit: str = "") -> Path:
+    """Resolve the Codex CLI entry with stable, explicit priority.
 
-
-def resolve_dsh_cli(explicit: str = "") -> Path:
-    """Resolve the dsh CLI entry with stable, explicit priority.
-
-    1. Explicit ``[agent] dsh_cli`` configuration wins.
-    2. The built CLI in the shared harness checkout
-       (``D:\\agent\\dsh-varin\\apps\\cli\\lib\\bin.js``); the
-       harness is installed in the same directory as the other agent projects.
-    3. A ``dsh`` executable on PATH (npm global shim).
-    4. Bare ``dsh`` so subprocess resolution fails with a clear message
-       surfaced by :meth:`DshRunner.cli_info`.
+    1. Explicit ``[agent] codex_cli`` configuration wins.
+    2. A ``codex`` executable on PATH (scoop shim).
+    3. Bare ``codex`` so subprocess resolution fails with a clear message
+       surfaced by :meth:`CodexRunner.cli_info`.
     """
     if explicit:
         return Path(explicit)
-    if DSH_CLI_DEFAULT.is_file():
-        return DSH_CLI_DEFAULT
-    found = shutil.which("dsh.cmd") or shutil.which("dsh")
+    found = shutil.which("codex.cmd") or shutil.which("codex")
     if found:
         return Path(found)
-    return Path("dsh")
+    return Path("codex")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +75,9 @@ class ControlPlaneConfig:
 
     gateway_base_url: str = "http://127.0.0.1:4001/v1"
     model: str = "opencode-go/deepseek-v4-flash"
-    dsh_cli: Path = field(default_factory=lambda: resolve_dsh_cli())
+    codex_cli: Path = field(default_factory=lambda: resolve_codex_cli())
     model_preflight_enabled: bool = True
-    dsh_branch_prefix: str = "fix/control-plane-"
+    codex_branch_prefix: str = "fix/control-plane-"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
     gateway_timeout_seconds: int = 120
     max_agent_calls_per_repair: int = 8
@@ -253,14 +243,14 @@ class ControlPlaneConfig:
             model_preflight_enabled=bool(
                 agent.get("model_preflight_enabled", base.model_preflight_enabled)
             ),
-            dsh_cli=resolve_dsh_cli(str(agent.get("dsh_cli", ""))),
-            dsh_branch_prefix=str(
-                agent.get("dsh_branch_prefix", base.dsh_branch_prefix)
+            codex_cli=resolve_codex_cli(str(agent.get("codex_cli", ""))),
+            codex_branch_prefix=str(
+                agent.get("codex_branch_prefix", base.codex_branch_prefix)
             ),
             candidate_branch_prefix=str(
                 candidates.get(
                     "branch_prefix",
-                    agent.get("dsh_branch_prefix", base.candidate_branch_prefix),
+                    agent.get("codex_branch_prefix", base.candidate_branch_prefix),
                 )
             ),
             candidate_retention_days=int(
