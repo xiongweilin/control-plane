@@ -25,6 +25,27 @@ def test_resolve_repo_blocked_paths() -> None:
         resolve_repo("D:\\infrastructure\\compose\\secrets-holder", allowed, blocked=("secrets",))
     with pytest.raises(ToolError, match="blocked by policy"):
         resolve_repo("D:\\infrastructure\\compose\\app\\config\\.env", allowed, blocked=(".env",))
+    with pytest.raises(ToolError, match="blocked by policy"):
+        resolve_repo(
+            "D:\\infrastructure\\compose\\app\\key.pem",
+            allowed,
+            blocked=(".env", ".pem", ".key"),
+        )
+    with pytest.raises(ToolError, match="blocked by policy"):
+        resolve_repo(
+            "D:\\infrastructure\\compose\\app\\token.txt",
+            allowed,
+            blocked=("token",),
+        )
+    # .env.example 只含占位符，不应被 .env 子串误伤（2026-08-17 边界匹配修正）。
+    assert (
+        resolve_repo(
+            "D:\\infrastructure\\compose\\app\\config\\.env.example",
+            allowed,
+            blocked=(".env",),
+        )
+        == "D:/infrastructure/compose/app/config/.env.example"
+    )
     assert (
         resolve_repo("D:\\infrastructure\\compose\\app", allowed, blocked=(".env",))
         == "D:/infrastructure/compose/app"

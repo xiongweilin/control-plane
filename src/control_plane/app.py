@@ -18,8 +18,8 @@ from pydantic import BaseModel
 from .approvals import ApprovalManager
 from .audit import inspect_session_fields
 from .budget import Budget
-from .config import ControlPlaneConfig
 from .codex_runner import CodexRunner
+from .config import ControlPlaneConfig
 from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
     AlertmanagerPayload,
