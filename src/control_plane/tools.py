@@ -173,9 +173,18 @@ def resolve_repo(
     allowed = tuple(root.replace("\\", "/").rstrip("/") for root in allowed_roots)
     if not any(normalized == root or normalized.startswith(root + "/") for root in allowed):
         raise ToolError(f"Repository path not allowed: {value}")
-    lowered = normalized.lower()
+    segments = [s.lower() for s in normalized.split("/") if s]
     for pattern in blocked:
-        if pattern and pattern.lower() in lowered:
+        p = pattern.lower()
+        if not p:
+            continue
+        if p.startswith("."):
+            # 点文件名/扩展名按整段或扩展名匹配：`.env` 只拦 `…/.env`，
+            # 不拦 `.env.example`（仅含占位符的模板）；`.pem`/`.key` 按扩展名拦截。
+            if any(seg == p or seg.endswith(p) for seg in segments):
+                raise ToolError(f"Repository path blocked by policy (contains {pattern!r}): {value}")
+        elif any(p in seg for seg in segments):
+            # 普通敏感名（credentials/secrets/token/password/id_rsa）按路径段包含匹配。
             raise ToolError(f"Repository path blocked by policy (contains {pattern!r}): {value}")
     return normalized
 

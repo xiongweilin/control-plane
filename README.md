@@ -114,7 +114,7 @@ Both the main task and the watchdog use the `wscript.exe //B //NoLogo` hidden wr
 
 ## Agent operation boundary
 
-The agent may run `docker compose restart / up -d`, `docker restart`, and read-only diagnostics on running Compose projects (dify, feedback-analysis-agent, catalog-ops-automation, observability, feishu-dify-gateway), plus URL probes and PromQL queries. Irreversible operations are forbidden: deleting/emptying data volumes or databases (`docker compose down -v`, `docker volume rm`, DROP/TRUNCATE, deleting persisted data), `docker compose down`, `git push --force` or deleting main/protected branches, modifying credentials/firewall/sshd, and stopping or deleting containers holding persisted data.
+The agent may run `docker compose restart / up -d`, `docker restart`, and read-only diagnostics on running Compose projects (dify, docker, commerce-orchestrator, observability, feishu-dify-gateway; feedback/catalog merged into commerce-orchestrator since 2026-08-14), plus URL probes and PromQL queries. Irreversible operations are forbidden: deleting/emptying data volumes or databases (`docker compose down -v`, `docker volume rm`, DROP/TRUNCATE, deleting persisted data), `docker compose down`, `git push --force` or deleting main/protected branches, modifying credentials/firewall/sshd, and stopping or deleting containers holding persisted data.
 
 ## Verifier (deterministic checks)
 
