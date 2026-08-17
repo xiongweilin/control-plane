@@ -18,8 +18,8 @@ from .storage import Store
 logger = logging.getLogger(__name__)
 
 
-class DshCliUnavailableError(RuntimeError):
-    """Raised when the dsh CLI cannot be located or its version probe fails."""
+class CodexCliUnavailableError(RuntimeError):
+    """Raised when the Codex CLI cannot be located or its version probe fails."""
 
 
 def repo_path_to_windows(path: str) -> str:
@@ -34,7 +34,7 @@ def repo_path_to_windows(path: str) -> str:
 
 
 @dataclass(slots=True)
-class DshSessionResult:
+class CodexSessionResult:
     exit_code: int
     last_message: str
     timed_out: bool = False
@@ -42,13 +42,13 @@ class DshSessionResult:
     truncated: bool = False
 
 
-class DshRunner:
-    """Runs a full dsh headless agent session with the configured model.
+class CodexRunner:
+    """Runs a full Codex headless agent session with the configured model.
 
     The control plane is the authoritative boundary: it injects hard constraints,
     verifies outcomes independently, gates code merges behind approval, and rolls
-    back on failure. The dsh headless profile therefore runs non-interactively
-    inside that boundary (permission preset danger-full-access from settings).
+    back on failure. The Codex CLI therefore runs non-interactively inside that
+    boundary (``codex exec`` with the danger-full-access sandbox).
     """
 
     def __init__(self, config: ControlPlaneConfig) -> None:
@@ -61,25 +61,16 @@ class DshRunner:
 
     @staticmethod
     def _argv_for(cli: Path, args: list[str]) -> list[str]:
-        """Build the subprocess argv for the resolved CLI entry.
-
-        The default entry is the built JavaScript bin (``lib/bin.js``), which
-        must be executed through ``node``; a native executable or shim runs
-        directly.
-        """
-        if cli.suffix.lower() == ".js":
-            node = shutil.which("node") or "node"
-            return [node, str(cli), *args]
+        """Build the subprocess argv for the resolved CLI entry."""
         return [str(cli), *args]
 
     def cli_info(self) -> tuple[Path, str]:
         """Probe the resolved CLI and return ``(path, version)``.
 
-        Raises :class:`DshCliUnavailableError` with a clear diagnostic when the
-        CLI is missing, not executable, or the version probe fails. This is the
-        fail-fast guard for batch5 item 1 (no hardcoded npm-internal paths).
+        Raises :class:`CodexCliUnavailableError` with a clear diagnostic when the
+        CLI is missing, not executable, or the version probe fails.
         """
-        path = self.config.dsh_cli
+        path = self.config.codex_cli
         try:
             proc = subprocess.run(  # noqa: S603 - fixed command line; path resolved by config
                 self._argv_for(path, ["--version"]),
@@ -89,14 +80,14 @@ class DshRunner:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DshCliUnavailableError(
-                f"dsh CLI not runnable at {path}: {exc}"
+            raise CodexCliUnavailableError(
+                f"codex CLI not runnable at {path}: {exc}"
             ) from exc
         output = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
         if proc.returncode != 0 or not output:
             stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-            raise DshCliUnavailableError(
-                f"dsh CLI version probe failed (exit {proc.returncode}) at {path}: "
+            raise CodexCliUnavailableError(
+                f"codex CLI version probe failed (exit {proc.returncode}) at {path}: "
                 f"{stderr[:300] or 'no output'}"
             )
         return path, output.splitlines()[0].strip()
@@ -105,23 +96,23 @@ class DshRunner:
         """Probe the CLI and detect version drift since the last probe.
 
         Returns ``(path, version, changed)``. The last seen version is persisted
-        (``dsh:cli_version`` / ``dsh:cli_path`` settings) so version upgrades
+        (``codex:cli_version`` / ``codex:cli_path`` settings) so version upgrades
         are visible; a change is logged at warning level.
         """
         path, version = self.cli_info()
         changed = False
         if self.store is not None:
-            previous = self.store.get_setting("dsh:cli_version", "")
+            previous = self.store.get_setting("codex:cli_version", "")
             if previous and previous != version:
                 changed = True
                 logger.warning(
-                    "dsh CLI version changed from %s to %s (path %s)",
+                    "codex CLI version changed from %s to %s (path %s)",
                     previous,
                     version,
                     path,
                 )
-            self.store.set_setting("dsh:cli_version", version)
-            self.store.set_setting("dsh:cli_path", str(path))
+            self.store.set_setting("codex:cli_version", version)
+            self.store.set_setting("codex:cli_path", str(path))
         return path, version, changed
 
     async def run_task(
@@ -131,7 +122,7 @@ class DshRunner:
         repo: str,
         prompt: str,
         run_id: str = "",
-    ) -> DshSessionResult:
+    ) -> CodexSessionResult:
         self.cli_info()  # fail fast with a clear error instead of a raw spawn error
         session_dir = self.config.agent_session_dir
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -139,8 +130,15 @@ class DshRunner:
         windows_repo = repo_path_to_windows(repo)
         started_at = time.monotonic()
         args = self._argv_for(
-            self.config.dsh_cli,
-            ["--profile", "headless", prompt],
+            self.config.codex_cli,
+            [
+                "exec",
+                "--sandbox",
+                "danger-full-access",
+                "--skip-git-repo-check",
+                "--json",
+                prompt,
+            ],
         )
         run_id = run_id or current_run_id()
         proc = await asyncio.create_subprocess_exec(
@@ -163,18 +161,18 @@ class DshRunner:
         except asyncio.CancelledError:
             if proc.returncode is None:
                 await terminate_process_tree_async(proc.pid)
-            logger.warning("dsh session cancelled for %s", repair_id)
+            logger.warning("codex session cancelled for %s", repair_id)
             self._audit(run_id, repair_id, args, None, started_at, truncated=False)
             raise
         except TimeoutError:
             await terminate_process_tree_async(proc.pid)
-            logger.warning("dsh session timed out for %s", repair_id)
+            logger.warning("codex session timed out for %s", repair_id)
             self._audit(run_id, repair_id, args, 124, started_at, truncated=False)
-            return DshSessionResult(
+            return CodexSessionResult(
                 exit_code=124,
                 last_message="",
                 timed_out=True,
-                stderr_tail="dsh session timed out",
+                stderr_tail="codex session timed out",
             )
         stdout_text = stdout.decode("utf-8", errors="replace")
         stderr_text = stderr.decode("utf-8", errors="replace")
@@ -189,7 +187,7 @@ class DshRunner:
         last_message = stdout_text[:20_000]
         if proc.returncode != 0:
             logger.warning(
-                "dsh session failed for %s: exit %s",
+                "codex session failed for %s: exit %s",
                 repair_id,
                 proc.returncode,
             )
@@ -201,7 +199,7 @@ class DshRunner:
             started_at,
             truncated=truncated,
         )
-        return DshSessionResult(
+        return CodexSessionResult(
             exit_code=proc.returncode or 0,
             last_message=last_message,
             stderr_tail=stderr_text[-2_000:],
