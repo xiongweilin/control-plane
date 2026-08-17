@@ -19,7 +19,7 @@ from .approvals import ApprovalManager
 from .audit import inspect_session_fields
 from .budget import Budget
 from .config import ControlPlaneConfig
-from .dsh_runner import DshRunner
+from .codex_runner import CodexRunner
 from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
     AlertmanagerPayload,
@@ -86,7 +86,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     budget = Budget(store, cfg.daily_agent_budget, cfg.max_agent_calls_per_repair)
     approvals = ApprovalManager()
     notifier = Notifier(cfg)
-    agent = DshRunner(cfg)
+    agent = CodexRunner(cfg)
     agent.attach_store(store)
     service = RepairService(cfg, store, budget, agent, approvals, notifier)
     with suppress(ValueError):

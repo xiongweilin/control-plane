@@ -1,16 +1,16 @@
 # control-plane
 
-The personal-platform control plane: it receives local Alertmanager alerts and triggers **full dsh agent sessions** (`dsh --profile headless` with the dsh default model). The agent runs with the project directory as its workspace; the model is decided by the dsh settings (`agent-default-model` in `~/.dsh/settings.yaml`, currently `litellm/deepseek-v4-flash`, routed through the local LiteLLM gateway 4001's `config.agent.yaml` model routing; the 4000 zstd-compatible proxy only serves Codex and does not participate in dsh routing), using the full dsh toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
+The personal-platform control plane: it receives local Alertmanager alerts and triggers **full Codex agent sessions** (`codex exec` with the Codex CLI default model). The agent runs with the project directory as its workspace; the model is decided by the Codex CLI config (`~/.codex/config.toml`, routed through the local model gateway 4000/4001), using the full Codex toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
 
-The `gateway_base_url` / `GatewayClient` in code serve the independent model-source diagnosis of the local model gateway (LiteLLM 4001) and do not decide the actual routing of dsh headless; the old `opencodex_base_url` / `opencodex_api_key` fields and `OpenCodexClient` were retired on 2026-08-11 (OpenCodex retired; 10100 is no longer an active entry). The current boundaries are:
+The `gateway_base_url` / `GatewayClient` in code serve the independent model-source diagnosis of the local model gateway (LiteLLM 4001) and do not decide the actual routing of `codex exec`; the old `opencodex_base_url` / `opencodex_api_key` fields and `OpenCodexClient` were retired on 2026-08-11 (OpenCodex retired; 10100 is no longer an active entry). The current boundaries are:
 
 | Path | Current state | Fact owner |
 |---|---|---|
-| Agent execution | dsh headless (workspace = project directory) via dsh model config (`~/.dsh/settings.yaml`, default `litellm/deepseek-v4-flash`, through the 4001 LiteLLM gateway) | dsh settings and model-routing docs |
+| Agent execution | Codex exec (workspace = project directory) via Codex CLI model config (`~/.codex/config.toml`, through the local model gateway 4000/4001) | Codex config and model-routing docs |
 | Deployed model-source diagnosis | `control_plane.toml` points to the local model gateway `127.0.0.1:4001/v1` (migration completed 2026-08-11) | Actual runtime config |
 | New config template diagnosis target | `control_plane.toml.example` likewise points to `127.0.0.1:4001/v1` | Config template |
 
-Diagnostic probes only reflect model-gateway connectivity; they do not decide the agent execution entry (dsh headless goes through the 4001 LiteLLM gateway).
+Diagnostic probes only reflect model-gateway connectivity; they do not decide the agent execution entry (codex exec goes through the local model gateway).
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Diagnostic probes only reflect model-gateway connectivity; they do not decide th
 Prometheus → Alertmanager
               └─ webhook → control-plane :18083 (Windows resident)
                               ├─ fingerprint dedup / cooldown / budget
-                              ├─ dsh agent session (litellm/deepseek-v4-flash full tool environment)
+                              ├─ codex agent session (full tool environment)
                               ├─ independent verifier + auto rollback
                               ├─ SQLite + data/evidence/*.json
                               └─ Feishu notification / approval (feishu-dify-gateway extended commands)
@@ -37,21 +37,21 @@ uv run python -m control_plane
 
 ## Permission matrix
 
-- The dsh agent runs with the full tool environment inside the designated project repository, constrained by the task-prompt hard constraints, the dsh global AGENTS.md (synced from `~/.codex/AGENTS.md`), and the control plane's independent verification.
+- The Codex agent runs with the full tool environment inside the designated project repository, constrained by the task-prompt hard constraints, the Codex global AGENTS.md (`~/.codex/AGENTS.md`), and the control plane's independent verification.
 - Automatic operations (reversible): the agent may run `restart` / `up -d` on allowlisted compose projects, read-only diagnostics, cleanup, and health waits; the control plane independently verifies container state and git state afterward.
 - Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval merges to main and pushes. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
 - Denied by default: file writes (except candidate branches), dependency changes, database writes, cloud writes, credential access, data deletion, and modifying verifiers/alert rules/permissions.
 
 ## Agent trigger notes
 
-The control plane starts the dsh CLI to run a full headless agent session. Executable resolution priority: explicit `[agent] dsh_cli` config > shared install `D:\agent\dsh-varin\apps\cli\lib\bin.js` (run via node, in the same directory as the other agent projects) > `dsh` on PATH (npm global shim) > bare `dsh`. Before startup / each session it runs `dsh --version` preflight: a missing CLI or failed probe is rejected with a clear error, and the last recorded version change is written to `dsh:cli_version` and exposed through the `control_plane_dsh_cli_info` metric.
+The control plane starts the Codex CLI to run a full agent session. Executable resolution priority: explicit `[agent] codex_cli` config > `codex` on PATH (scoop shim) > bare `codex`. Before startup / each session it runs `codex --version` preflight: a missing CLI or failed probe is rejected with a clear error, and the last recorded version change is written to `codex:cli_version` and exposed through the `control_plane_codex_cli_info` metric.
 
 ```text
-node D:\agent\dsh-varin\apps\cli\lib\bin.js
-  --profile headless <task prompt>   # cwd = project Windows path
+codex exec --sandbox danger-full-access --skip-git-repo-check --json <task prompt>
+  # cwd = project Windows path; transcript on stdout, exit code from codex
 ```
 
-The working directory uses native Windows paths (WSL was retired on 2026-08-07). The control plane is the authority boundary: it injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback; `--dangerously-bypass-approvals-and-sandbox` only lets the session execute automatically inside the control plane, not bypass the control plane's own gates.
+The working directory uses native Windows paths (WSL was retired on 2026-08-07). The control plane is the authority boundary: it injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback; the `danger-full-access` sandbox only lets the session execute automatically inside the control plane, not bypass the control plane's own gates.
 
 ## Feishu commands
 
@@ -68,13 +68,13 @@ The working directory uses native Windows paths (WSL was retired on 2026-08-07).
 /task <description> dispatch a task to the Agent for execution
 ```
 
-An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's dsh Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's dsh Agent (the model is decided by the dsh settings, default `litellm/deepseek-v4-flash`), and the execution process is pushed too: task received → Agent started → completed/failed.
+An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's Codex Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's Codex Agent (the model is decided by the Codex CLI config), and the execution process is pushed too: task received → Agent started → completed/failed.
 
 Alert-level policy: each alert fingerprint can be set individually to `auto` (auto-fix, default), `manual` (wait for your decision after the alert; `/cp run` executes or `/cp ignore` ignores), or `ignore` (ignore directly). Alertmanager's `resolved` is only an observation: the control plane must complete deterministic recovery verification through the current PromQL, HTTP probe, or container state before it interrupts an in-progress repair and resets that fingerprint's auto-fix attempt count. Without a verifier, or when verification fails, the attempt count is kept.
 
 Precipitated files (openable directly):
 
-- `D:\agent\control-plane\data\agent-sessions\{repair_id}.jsonl` (dsh headless final reply; `-last.md` is no longer generated)
+- `D:\agent\control-plane\data\agent-sessions\{repair_id}.jsonl` (codex exec transcript; `-last.md` is no longer generated)
 - `D:\agent\control-plane\data\evidence\` (EvidenceRecord JSON)
 - `D:\agent\control-plane\data\patches\` (candidate patches)
 - `D:\agent\control-plane\data\control-plane.db` (repairs/actions/candidates/playbooks)
@@ -91,7 +91,7 @@ The repair lifecycle is notified in stages through Feishu, reducing "silent wait
 - Noise tiers: test/smoke alerts (AlertmanagerE2E, smoke-* etc.) are only recorded and do not trigger repairs; cooldown-skip shows the remaining time; a recurring candidate shows "known pattern, occurrence N".
 - Alert recovery: only after deterministic recovery verification passes does it interrupt an in-progress repair and reset attempts; receiving `resolved` alone is not enough to prove recovery. Recovered alerts do not precipitate candidate experience.
 - Approval: after a code change, wait for `/cp approve|reject|rollback`, or call `POST /v1/approvals/{repair_id}/decision` directly (requires X-Control-Plane-Key).
-- Observability: `/metrics` exposes repair counts/status, candidates, budget, and today's agent calls; `control_plane_run_info`, `control_plane_health_last_ready`, and `recovery_retry_failed` metrics; batch 5 added `control_plane_model_connectivity{source}` (three-source connectivity: dsh CLI / model gateway / default model), `control_plane_model_drift` (model-list drift), `control_plane_ignored_errors_total{site}` (controlled-ignore counts), `control_plane_repairs_recoverable{status}` (recoverable quiescent repairs), and `control_plane_dsh_cli_info{version,path}`; batch 6 (2026-08-16) added `control_plane_last_scan_ts` / `control_plane_last_digest_ts` (success heartbeats of the daily scan/digest loops, consumed by `ControlPlaneDailyScanStale` / `ControlPlaneDailyDigestStale`) and `control_plane_notify_failures_total{reason}` (outbound Feishu notification failures, consumed by `ControlPlaneNotifyFailed`); `/live` and `/ready` let probes distinguish liveness from readiness, and are wired into Prometheus and the Metratio Overview dashboard.
+- Observability: `/metrics` exposes repair counts/status, candidates, budget, and today's agent calls; `control_plane_run_info`, `control_plane_health_last_ready`, and `recovery_retry_failed` metrics; batch 5 added `control_plane_model_connectivity{source}` (three-source connectivity: Codex CLI / model gateway / default model), `control_plane_model_drift` (model-list drift), `control_plane_ignored_errors_total{site}` (controlled-ignore counts), `control_plane_repairs_recoverable{status}` (recoverable quiescent repairs), and `control_plane_codex_cli_info{version,path}`; batch 6 (2026-08-16) added `control_plane_last_scan_ts` / `control_plane_last_digest_ts` (success heartbeats of the daily scan/digest loops, consumed by `ControlPlaneDailyScanStale` / `ControlPlaneDailyDigestStale`) and `control_plane_notify_failures_total{reason}` (outbound Feishu notification failures, consumed by `ControlPlaneNotifyFailed`); `/live` and `/ready` let probes distinguish liveness from readiness, and are wired into Prometheus and the Metratio Overview dashboard.
 
 Related config: `notify_cooldown_skip`, `notify_ignored_noise`, `test_alert_alertnames`, `test_alert_instance_prefixes`. Batch 2 new config (run_id/PID, `[timeouts]`, `[candidates]`, dirty policy, audit cap, SSH443, side-effect gate, path blacklist) is described below in "Reliability (batch 2)".
 
@@ -221,10 +221,10 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 
 ## Hardening (batch 5)
 
-### dsh executable path and preflight
+### Codex executable path and preflight
 
-- Resolution priority: `[agent] dsh_cli` > shared install `D:\agent\dsh-varin\apps\cli\lib\bin.js` (run via node) > PATH `dsh` (npm shim) > bare `dsh`; no longer depends on the Codex CLI.
-- Before every session, `dsh --version` preflight; missing/failed is rejected clearly with `DshCliUnavailableError`; version changes are recorded to `dsh:cli_version` and alerted.
+- Resolution priority: `[agent] codex_cli` > PATH `codex` (scoop shim) > bare `codex`.
+- Before every session, `codex --version` preflight; missing/failed is rejected clearly with `CodexCliUnavailableError`; version changes are recorded to `codex:cli_version` and alerted.
 
 ### State semantics (terminal vs recoverable quiescent)
 
