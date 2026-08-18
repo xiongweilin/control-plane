@@ -132,6 +132,8 @@ class CodexRunner:
             self.config.codex_cli,
             [
                 "exec",
+                "--model",
+                self.config.model,
                 "--sandbox",
                 "danger-full-access",
                 "--skip-git-repo-check",

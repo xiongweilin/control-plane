@@ -1,12 +1,12 @@
 # control-plane
 
-The personal-platform control plane: it receives local Alertmanager alerts and triggers **full Codex agent sessions** (`codex exec` with the Codex CLI default model). The agent runs with the project directory as its workspace; the model is decided by the Codex CLI config (`~/.codex/config.toml`, routed through the local model gateway 4000/4001), using the full Codex toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
+The personal-platform control plane: it receives local Alertmanager alerts and triggers **full Codex agent sessions** (`codex exec` with `--model` from `control_plane.toml [agent] model`, default `gpt-5.6-luna`). The agent runs with the project directory as its workspace; the model is fixed by `control_plane.toml`, routed through the local model gateway 4000/4001, using the full Codex toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
 
 The `gateway_base_url` / `GatewayClient` in code serve the independent model-source diagnosis of the local model gateway (LiteLLM 4001) and do not decide the actual routing of `codex exec`; the old `opencodex_base_url` / `opencodex_api_key` fields and `OpenCodexClient` were retired on 2026-08-11 (OpenCodex retired; 10100 is no longer an active entry). The current boundaries are:
 
 | Path | Current state | Fact owner |
 |---|---|---|
-| Agent execution | Codex exec (workspace = project directory) via Codex CLI model config (`~/.codex/config.toml`, through the local model gateway 4000/4001) | Codex config and model-routing docs |
+| Agent execution | Codex exec (workspace = project directory) with `--model` from `control_plane.toml [agent] model` (`gpt-5.6-luna`), through the local model gateway 4000/4001 | `control_plane.toml` and model-routing docs |
 | Deployed model-source diagnosis | `control_plane.toml` points to the local model gateway `127.0.0.1:4001/v1` (migration completed 2026-08-11) | Actual runtime config |
 | New config template diagnosis target | `control_plane.toml.example` likewise points to `127.0.0.1:4001/v1` | Config template |
 
@@ -47,7 +47,7 @@ uv run python -m control_plane
 The control plane starts the Codex CLI to run a full agent session. Executable resolution priority: explicit `[agent] codex_cli` config > `codex` on PATH (scoop shim) > bare `codex`. Before startup / each session it runs `codex --version` preflight: a missing CLI or failed probe is rejected with a clear error, and the last recorded version change is written to `codex:cli_version` and exposed through the `control_plane_codex_cli_info` metric.
 
 ```text
-codex exec --sandbox danger-full-access --skip-git-repo-check --json <task prompt>
+codex exec --model <model> --sandbox danger-full-access --skip-git-repo-check --json <task prompt>
   # cwd = project Windows path; transcript on stdout, exit code from codex
 ```
 
@@ -68,7 +68,7 @@ The working directory uses native Windows paths (WSL was retired on 2026-08-07).
 /task <description> dispatch a task to the Agent for execution
 ```
 
-An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's Codex Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's Codex Agent (the model is decided by the Codex CLI config), and the execution process is pushed too: task received → Agent started → completed/failed.
+An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's Codex Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's Codex Agent (the model is fixed by `control_plane.toml [agent] model`), and the execution process is pushed too: task received → Agent started → completed/failed.
 
 Alert-level policy: each alert fingerprint can be set individually to `auto` (auto-fix, default), `manual` (wait for your decision after the alert; `/cp run` executes or `/cp ignore` ignores), or `ignore` (ignore directly). Alertmanager's `resolved` is only an observation: the control plane must complete deterministic recovery verification through the current PromQL, HTTP probe, or container state before it interrupts an in-progress repair and resets that fingerprint's auto-fix attempt count. Without a verifier, or when verification fails, the attempt count is kept.
 
