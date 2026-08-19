@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.config import ControlPlaneConfig
+from control_plane.metrics import MODEL_CONNECTIVITY
 from control_plane.service import RepairService
 from control_plane.storage import Store
 
@@ -86,6 +88,36 @@ async def test_check_model_sources_cli_missing(tmp_path, monkeypatch) -> None:
     assert result["cli"]["ok"] is False
     assert "not runnable" in result["cli"]["error"]
     assert result["model"]["ok"] is True
+    await service.close()
+
+
+async def test_model_recovery_loop_retries_until_all_sources_ok(tmp_path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    service.config = replace(service.config, model_recovery_retry_seconds=1)
+    calls = {"n": 0}
+
+    async def flaky() -> dict:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return {
+                "cli": {"ok": True},
+                "gateway": {"ok": False, "model_count": 0, "error": "down"},
+                "model": {"ok": False, "configured": service.config.model, "error": "down"},
+            }
+        return {
+            "cli": {"ok": True},
+            "gateway": {"ok": True, "model_count": 1, "error": ""},
+            "model": {"ok": True, "configured": service.config.model, "error": ""},
+        }
+
+    monkeypatch.setattr(service, "check_model_sources", flaky)
+    await asyncio.wait_for(service.model_recovery_loop(), timeout=10)
+
+    # two failed attempts then a successful one terminates the loop
+    assert calls["n"] == 3
+    # every attempt refreshes the gauges; the last one leaves gateway=1
+    assert MODEL_CONNECTIVITY.labels(source="gateway")._value.get() == 1.0
+    assert MODEL_CONNECTIVITY.labels(source="model")._value.get() == 1.0
     await service.close()
 
 
