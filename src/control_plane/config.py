@@ -80,6 +80,9 @@ class ControlPlaneConfig:
     codex_branch_prefix: str = "fix/control-plane-"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
     gateway_timeout_seconds: int = 120
+    # 启动预检失败后，每隔该秒数重试一次模型来源探测，直至全部恢复（失败驱动，非周期探测）。
+    # 默认 600s 与 ControlPlaneModelConnectivityDown 的 for: 10m 对齐：恢复后下一次重试即刷新指标。
+    model_recovery_retry_seconds: int = 600
     max_agent_calls_per_repair: int = 8
 
     cooldown_seconds: int = 600

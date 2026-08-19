@@ -134,6 +134,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not store.get_setting("usage_hint_sent"):
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")
+        model_task: asyncio.Task[Any] | None = None
         if cfg.model_preflight_enabled:
             try:
                 preflight = await service.startup_model_preflight()
@@ -142,6 +143,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         "model preflight degraded: %s",
                         "; ".join(preflight["problems"]),
                     )
+                    model_task = asyncio.create_task(service.model_recovery_loop())
                 else:
                     logger.info(
                         "model preflight ok (cli=%s, gateway=%s, model=%s)",
@@ -151,6 +153,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     )
             except Exception:
                 logger.exception("model preflight failed")
+                model_task = asyncio.create_task(service.model_recovery_loop())
         try:
             await service.reconcile_alerts()
             logger.info("alert reconciliation done")
@@ -174,6 +177,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         finally:
             scan_task.cancel()
             digest_task.cancel()
+            if model_task is not None:
+                model_task.cancel()
             for task in resume_tasks:
                 task.cancel()
             await service.close()

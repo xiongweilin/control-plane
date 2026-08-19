@@ -2408,6 +2408,36 @@ class RepairService:
             )
         return {"ok": not problems, "sources": sources, "problems": problems}
 
+    async def model_recovery_loop(self) -> None:
+        """Retry the model-source probe after a failed startup preflight.
+
+        Runs only when the startup preflight failed: every
+        ``model_recovery_retry_seconds`` (default 10 minutes) it re-probes the
+        three model sources until all recover. Each attempt refreshes the
+        connectivity gauges, so a recovered gateway is reflected in metrics
+        and the ``ControlPlaneModelConnectivityDown`` alert clears without a
+        restart. No notifications are sent (the startup preflight owns the
+        one-shot notification); retries are deliberately failure-driven, not
+        a fixed-interval probe, so a healthy model layer is never polled.
+        """
+        interval = max(1, self.config.model_recovery_retry_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                sources = await self.check_model_sources()
+            except Exception:
+                logger.exception("model recovery probe failed")
+                continue
+            if all(sources[key]["ok"] for key in ("cli", "gateway", "model")):
+                logger.info("model sources recovered after retry (%ss interval)", interval)
+                return
+            logger.info(
+                "model sources still degraded: cli=%s gateway=%s model=%s",
+                sources["cli"]["ok"],
+                sources["gateway"]["ok"],
+                sources["model"]["ok"],
+            )
+
     async def close(self) -> None:
         for task in list(self._tasks):
             task.cancel()
