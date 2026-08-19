@@ -12,6 +12,8 @@ The `gateway_base_url` / `GatewayClient` in code serve the independent model-sou
 
 Diagnostic probes only reflect model-gateway connectivity; they do not decide the agent execution entry (codex exec goes through the local model gateway).
 
+Since 2026-08-19 the connectivity gauges are refreshed by a failure-driven recovery loop: when the startup preflight fails, the probe retries every `model_recovery_retry_seconds` (default 600s) until all three sources (Codex CLI / gateway / default model) recover, so `ControlPlaneModelConnectivityDown` clears without a restart. A healthy model layer is never polled — the loop only exists after a failed preflight and exits as soon as everything is back.
+
 ## Architecture
 
 ```text
