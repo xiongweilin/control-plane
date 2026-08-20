@@ -196,14 +196,65 @@ def run_cli(args: list[str]) -> int:
                 items = [item.model_dump(mode="json") for item in runtime.store.list_knowledge()]
                 print(json.dumps(items, ensure_ascii=False))
         elif parsed.command == "state":
+            suffixes = "".join(parsed.path.suffixes).lower()
+            is_bundle_path = any(suffixes.endswith(sfx) for sfx in (".tar.zst", ".tar.gz", ".tgz", ".tar"))
             if parsed.state_command == "export":
-                parsed.path.write_text(
-                    json.dumps(runtime.export_state(), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                if is_bundle_path or "zst" in suffixes:
+                    try:
+                        bundle_path = runtime.export_bundle(parsed.path)
+                        print(f"bundle exported to {bundle_path}")
+                    except Exception as exc:  # noqa: S112
+                        parsed.path.write_text(
+                            json.dumps(runtime.export_state(), ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        print(f"bundle export failed, fell back to JSON: {exc}")
+                else:
+                    if parsed.path.suffix == ".json":
+                        parsed.path.write_text(
+                            json.dumps(runtime.export_state(), ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                    else:
+                        try:
+                            bundle_path = runtime.export_bundle(parsed.path)
+                            print(f"bundle exported to {bundle_path}")
+                        except Exception:  # noqa: S112
+                            parsed.path.write_text(
+                                json.dumps(runtime.export_state(), ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                print("ok")
             else:
-                runtime.import_state(json.loads(parsed.path.read_text(encoding="utf-8")))
-            print("ok")
+                did_import = False
+                if parsed.path.is_file():
+                    try:
+                        raw_head = parsed.path.read_bytes()[:4]
+                        is_gz = raw_head[:2] == b"\x1f\x8b"
+                        is_zst = raw_head[:4] == b"\x28\xb5\x2f\xfd"
+                    except Exception:  # noqa: S112
+                        is_gz = is_zst = False
+                    if is_gz or is_zst or is_bundle_path or "zst" in suffixes:
+                        try:
+                            runtime.import_bundle(parsed.path)
+                            did_import = True
+                        except Exception as exc:  # noqa: S112
+                            try:
+                                text = parsed.path.read_text(encoding="utf-8")
+                                if text.strip().startswith("{"):
+                                    runtime.import_state(json.loads(text))
+                                    did_import = True
+                                else:
+                                    print(f"bundle import failed: {exc}")
+                                    return 1
+                            except Exception:  # noqa: S112
+                                print(f"bundle import failed: {exc}")
+                                return 1
+                if not did_import:
+                    runtime.import_state(json.loads(parsed.path.read_text(encoding="utf-8")))
+                    print("ok")
+                elif did_import:
+                    print("ok")
     finally:
         runtime.store.close() if isinstance(runtime.store, SQLiteStateStore) else None
     return 0
