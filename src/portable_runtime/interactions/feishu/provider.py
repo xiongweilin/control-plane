@@ -71,18 +71,22 @@ class FeishuNotificationProvider:
 
     async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
         # Delegate to feishu-notify.ps1 if present, else no-op
+        import asyncio
         import pathlib
-        import subprocess
+
         script = pathlib.Path.home() / ".local" / "bin" / "feishu-notify.ps1"
         if script.is_file():
             with contextlib.suppress(Exception):  # noqa: SIM105,S110
-                subprocess.run(  # noqa: S603
-                    ["powershell.exe", "-File", str(script), request.instruction or ""],  # noqa: S607
-                    capture_output=True,
-                    timeout=10,
-                    shell=False,
-                    check=False,
+                proc = await asyncio.create_subprocess_exec(  # noqa: S607
+                    "powershell.exe",
+                    "-File",
+                    str(script),
+                    request.instruction or "",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=10)
         return CapabilityResult(  # noqa: E501
             request_id=request.id,
             provider_id=self.descriptor.id,

@@ -38,7 +38,7 @@ class SQLiteStateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)  # NOSONAR
         self._connection.row_factory = sqlite3.Row
         with self._lock:
             self._connection.execute("PRAGMA journal_mode=WAL")

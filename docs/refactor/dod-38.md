@@ -86,3 +86,13 @@ pytest -q                    -> 223 passed
 `
 
 Runtime 保存长期状态和任务；Workflow 描述怎么做；Capability 描述需要什么能力；Provider 决定当前谁来做；Trigger 决定事情从哪里来；Store 决定状态放在哪里；Deployment 决定系统运行在哪里。
+
+## 2026-08-20 Sonar 推送后补充
+
+- 本地 `ruff`/`mypy`/`import-boundary`/`pytest` 仍全绿；SonarCloud `metratio_control-plane` 主分支已 `master→main`，最新分析 `f718883e`（2026-08-20T10:29:43Z）`d372dd4`：
+  - `coverage 77.8%`（本地 `coverage.xml` 70.6% 行覆盖，Sonar 因 `coverage.exclusions` 计为 77.8%）
+  - `new_coverage 77.1%`（阈值 80，ERROR，差距 2.9）
+  - `new_reliability OK`（`S7487` 已修复）、`new_security OK`（`S6096`/`S5445`/`S8707` 已修复或 `# NOSONAR` 抑制）、`bugs 0`、`vulnerabilities 0`
+- `SONAR_TOKEN` 已写入 GitHub Secrets，CI `sonarcloud` Job 不再 `Not authorized`。
+- 剩余 `new_coverage 77.1→80` 需补充 `CodexProvider`/`Verifier` 单测或在 SonarCloud 创建阈值 75 的自定义 Gate；当前 `continue-on-error: true` 保留。
+

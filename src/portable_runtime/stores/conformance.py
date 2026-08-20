@@ -1,4 +1,4 @@
-"Store conformance tests - ensures any StateStore can pass core tests."
+"""Store conformance tests - ensures any StateStore can pass core tests."""
 
 import tempfile
 from pathlib import Path
@@ -16,7 +16,11 @@ def _run_crud(store) -> None:  # noqa: S101
     assert store.get_work("work_test").title == "t2"  # noqa: S101
     state = store.export_state()
     if isinstance(store, SQLiteStateStore):
-        tmp = Path(tempfile.mktemp(suffix=".db"))  # noqa: S306
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")  # noqa: S306,S5445
+        import os as _os
+
+        _os.close(fd)
+        tmp = Path(tmp_path)
         fresh: SQLiteStateStore = SQLiteStateStore(tmp)
         try:
             fresh.import_state(state)
