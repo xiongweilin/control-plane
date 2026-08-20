@@ -45,7 +45,7 @@ class FakeExecutor:
         if " switch " in f" {joined} ":
             self.current_branch = args[-1]
             return ""
-        if "docker ps" in joined:
+        if "docker" in joined and "ps" in joined:
             return "Up 2 minutes\nUp 5 minutes"
         if "fix/control-plane-" in joined and "diff" in joined:
             return "a.txt | 1 +\n" if self.branch_exists else ""
@@ -79,7 +79,7 @@ class FakeExecutorUnhealthy(FakeExecutor):
         timeout: int = 60,
         input_text: str | None = None,
     ) -> str:
-        if "docker ps" in " ".join(args):
+        if "docker" in " ".join(args) and "ps" in " ".join(args):
             return "grafana\tUp 2 minutes (unhealthy)"
         return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
 
@@ -107,12 +107,12 @@ class FakeExecutorScan(FakeExecutor):
                     'rich rules:\n\trule family="ipv4" source address="100.64.0.0/10" '
                     'port port="22" protocol="tcp" accept'
                 )
-            if "docker ps" in joined:
+            if "docker" in joined and "ps" in joined:
                 return "gateway-nginx\tUp 2 hours"
             if "dnf check-update" in joined:
                 return ""
             return ""
-        if "docker ps" in joined:
+        if "docker" in joined and "ps" in joined:
             return "grafana\tUp 2 minutes (healthy)\nprometheus\tUp 2 minutes (healthy)"
         return await super().run(args, cwd=cwd, timeout=timeout, input_text=input_text)
 
