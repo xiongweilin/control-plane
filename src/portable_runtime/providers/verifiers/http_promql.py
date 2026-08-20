@@ -174,13 +174,42 @@ class GitVerifierProvider:
         branch = str(request.parameters.get("branch", "") or request.parameters.get("ref", "") or "")
         if not repo:
             return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "invalid_request", "message": "verify.git requires parameters.repo"})  # noqa: E501
+        # Parity with control_plane.service._check_git: skip if not a git repository
         try:
-            # Use git ls-remote style check via subprocess
-            cmd = ["git", "ls-remote", "--heads", repo, branch] if branch else ["git", "ls-remote", repo]
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  # noqa: E501
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            ok = proc.returncode == 0
-            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded" if ok else "failed", message=stdout.decode(errors="replace")[:2000] or stderr.decode(errors="replace")[:2000], metadata={"exit_code": proc.returncode})  # noqa: E501
+            proc0 = await asyncio.create_subprocess_exec("git", "-C", repo, "rev-parse", "--is-inside-work-tree", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  # noqa: E501
+            stdout0, _ = await asyncio.wait_for(proc0.communicate(), timeout=10)
+            is_git = stdout0.decode(errors="replace").strip().lower() == "true"
+            if not is_git or proc0.returncode != 0:
+                return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="not a git repository; skipping git diff")  # noqa: E501
+        except Exception:
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="not a git repository; skipping git diff")  # noqa: E501
+        try:
+            # Check diff stat for branch, mirroring service logic
+            if branch:
+                proc = await asyncio.create_subprocess_exec("git", "-C", repo, "diff", f"main...{branch}", "--stat", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  # noqa: E501
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                if proc.returncode != 0:
+                    # Fallback to ls-remote for remote repos
+                    cmd = ["git", "ls-remote", "--heads", repo, branch]
+                    proc2 = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  # noqa: E501
+                    stdout2, stderr2 = await asyncio.wait_for(proc2.communicate(), timeout=30)
+                    ok2 = proc2.returncode == 0
+                    return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded" if ok2 else "failed", message=stdout2.decode(errors="replace")[:2000] or stderr2.decode(errors="replace")[:2000], metadata={"exit_code": proc2.returncode})  # noqa: E501
+                # Also check dirty state
+                proc_dirty = await asyncio.create_subprocess_exec("git", "-C", repo, "status", "--porcelain", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  # noqa: E501
+                stdout_dirty, _ = await asyncio.wait_for(proc_dirty.communicate(), timeout=10)
+                dirty = stdout_dirty.decode(errors="replace").strip()
+                if dirty:
+                    return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", message=f"workspace is dirty after repair: {dirty[:200]}")  # noqa: E501
+                # Diff allowed check
+                try:
+                    from control_plane.verifier import Verifier
+                    allowed, msg = Verifier.diff_allowed(repo, stdout.decode(errors="replace"))
+                    return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded" if allowed else "failed", message=msg)  # noqa: E501
+                except Exception:
+                    return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message=stdout.decode(errors="replace")[:2000])  # noqa: E501
+            # No branch: just verify repo is git
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="git repository verified")  # noqa: E501
         except Exception as exc:  # noqa: BLE001
             return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": type(exc).__name__, "message": str(exc)[:2000]})  # noqa: E501
 

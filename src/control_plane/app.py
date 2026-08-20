@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -42,6 +42,18 @@ from .runtime import (
     with_run_id,
 )
 from .service import RepairService
+
+# Portable runtime bridge (additive, section 14/31)
+try:
+    from portable_runtime.deployment.local import create_personal_platform_runtime
+    from portable_runtime.stores.migration import dual_write_repair
+    from portable_runtime.triggers.alertmanager.trigger import AlertmanagerTrigger
+    _PORTABLE_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _PORTABLE_AVAILABLE = False
+    create_personal_platform_runtime = None  # type: ignore[assignment]
+    dual_write_repair = None  # type: ignore[assignment]
+    AlertmanagerTrigger = None  # type: ignore
 from .state_machine import RepairState
 from .storage import Store
 
@@ -83,6 +95,13 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg.evidence_dir.mkdir(parents=True, exist_ok=True)
 
     store = Store(cfg.state_db)
+    # Portable runtime (additive, separate DB, never blocks legacy)
+    portable_runtime = None
+    if _PORTABLE_AVAILABLE:
+        try:
+            portable_runtime = create_personal_platform_runtime(cfg.data_dir / "portable-runtime.db")
+        except Exception:
+            portable_runtime = None
     budget = Budget(store, cfg.daily_agent_budget, cfg.max_agent_calls_per_repair)
     approvals = ApprovalManager()
     notifier = Notifier(cfg)
@@ -196,6 +215,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     )
     app.state.service = service
     app.state.store = store
+    app.state.portable_runtime = portable_runtime
 
     @app.middleware("http")
     async def record_current_path(request: Request, call_next):
@@ -422,7 +442,33 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not await valid_alertmanager_key(x_control_plane_key, authorization):
             AUTH_FAILURES.labels(reason="invalid_key", endpoint="/v1/alerts/alertmanager").inc()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        return await service.ingest(payload)
+        result = await service.ingest(payload)
+        # Dual-write to portable Runtime (additive, best-effort, section 31)
+        if _PORTABLE_AVAILABLE and portable_runtime is not None:
+            try:
+                trigger = AlertmanagerTrigger()
+                for alert in payload.alerts:
+                    raw = alert.model_dump(mode="json", by_alias=True) if hasattr(alert, "model_dump") else {}
+                    try:
+                        import datetime
+                        import uuid
+
+                        from portable_runtime.triggers.base import TriggerEvent
+                        evt = TriggerEvent(
+                            id=f"evt_{uuid.uuid4().hex[:8]}",
+                            source="alertmanager",
+                            kind=str(getattr(alert, "labels", {}).get("alertname", "alert") if hasattr(alert, "labels") else "alert"),  # noqa: E501
+                            payload=raw,
+                            occurred_at=datetime.datetime.now(datetime.UTC),
+                        )
+                        fields = trigger.to_work_fields(evt)
+                        portable_runtime.create_work(**fields)
+                    except Exception:  # noqa: S112
+                        continue
+            except Exception:
+                import logging
+                logging.getLogger(__name__).debug("portable dual_write failed", exc_info=True)
+        return result
 
     @app.post("/v1/approvals/{ref_id}/decision")
     async def approval_decision(
