@@ -1,36 +1,47 @@
 # control-plane
 
-## Portable Runtime quick start
-
-The repository now includes an additive provider-neutral runtime. It can store
-Work/Run history and export/import state without Codex, Feishu, Prometheus,
-Docker or a network connection:
+## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)
 
 ```powershell
-.venv\Scripts\python.exe -m portable_runtime status
-.venv\Scripts\python.exe -m portable_runtime plugin validate examples\echo-provider
-.venv\Scripts\python.exe -m portable_runtime work submit --title "Echo test" --description "hello"
+uv sync
+uv run runtime init
+uv run runtime start
+```
+
+In another terminal:
+
+```powershell
+uv run runtime provider list
+uv run runtime plugin install examples/echo-provider
+uv run runtime work submit --kind generic-task --title "Echo test" --capability text.echo --description "hello"
+uv run runtime work list
+# also via python module:
+# .venv\Scripts\python.exe -m portable_runtime --state data/portable-runtime.db status
+# .venv\Scripts\python.exe -m portable_runtime plugin validate examples/echo-provider
+# .venv\Scripts\python.exe -m portable_runtime work submit --title "Echo test" --description "hello" --kind generic-task --capability text.echo
+```
+
+The runtime stores Work/Run history and can export/import state without any model, harness, shell, browser, verifier, human channel or network connection:
+
+```powershell
+.venv\Scripts\python.exe -m portable_runtime --state data/portable-runtime.db state export runtime-state.json
+.venv\Scripts\python.exe -m portable_runtime --state data/portable-runtime.db state import runtime-state.json
 ```
 
 See [docs/architecture.md](docs/architecture.md),
-[docs/provider-api.md](docs/provider-api.md) and
-[docs/state-migration.md](docs/state-migration.md). The existing
-`control_plane` package below remains the legacy personal-platform profile while
-parity tests are added incrementally.
+[docs/provider-api.md](docs/provider-api.md),
+[docs/provider-protocol.md](docs/provider-protocol.md),
+[docs/plugin-authoring.md](docs/plugin-authoring.md),
+[docs/workflow-authoring.md](docs/workflow-authoring.md),
+[docs/store-api.md](docs/store-api.md),
+[docs/state-migration.md](docs/state-migration.md) and
+[docs/deployment-local.md](docs/deployment-local.md).
 
-The personal-platform control plane: it receives local Alertmanager alerts and triggers **full Codex agent sessions** (`codex exec` with `--model` from `control_plane.toml [agent] model`, default `gpt-5.6-luna`). The agent runs with the project directory as its workspace; the model is fixed by `control_plane.toml`, routed through the local model gateway 4000/4001, using the full Codex toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
+---
 
-The `gateway_base_url` / `GatewayClient` in code serve the independent model-source diagnosis of the local model gateway (LiteLLM 4001) and do not decide the actual routing of `codex exec`; the old `opencodex_base_url` / `opencodex_api_key` fields and `OpenCodexClient` were retired on 2026-08-11 (OpenCodex retired; 10100 is no longer an active entry). The current boundaries are:
+## Personal Platform Profile (legacy control plane with Codex/Feishu/Prometheus/Docker on Windows)
 
-| Path | Current state | Fact owner |
-|---|---|---|
-| Agent execution | Codex exec (workspace = project directory) with `--model` from `control_plane.toml [agent] model` (`gpt-5.6-luna`), through the local model gateway 4000/4001 | `control_plane.toml` and model-routing docs |
-| Deployed model-source diagnosis | `control_plane.toml` points to the local model gateway `127.0.0.1:4001/v1` (migration completed 2026-08-11) | Actual runtime config |
-| New config template diagnosis target | `control_plane.toml.example` likewise points to `127.0.0.1:4001/v1` | Config template |
-
-Diagnostic probes only reflect model-gateway connectivity; they do not decide the agent execution entry (codex exec goes through the local model gateway).
-
-Since 2026-08-19 the connectivity gauges are refreshed by a failure-driven recovery loop: when the startup preflight fails, the probe retries every `model_recovery_retry_seconds` (default 600s) until all three sources (Codex CLI / gateway / default model) recover, so `ControlPlaneModelConnectivityDown` clears without a restart. A healthy model layer is never polled — the loop only exists after a failed preflight and exits as soon as everything is back.
+The existing `control_plane` package below remains the legacy personal-platform profile while parity tests are added incrementally. Only this section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
 
 ## Architecture
 
@@ -293,3 +304,4 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 - [0009 upgrade vs fix authorization](/docs/decisions/0009-upgrade-vs-fix-authorization.md)
 - [0010 OpenCodex network boundary and model source](/docs/decisions/0010-opencodex-network-boundary.md)
 - [0012 model-gateway connectivity diagnosis (after OpenCodex retirement)](/docs/decisions/0012-model-gateway-connectivity.md)
+

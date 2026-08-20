@@ -5,7 +5,15 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from portable_runtime.core.models import Work as PortableWork
+else:
+    try:
+        from portable_runtime.core.models import Work as PortableWork  # pragma: no cover
+    except ImportError:  # pragma: no cover
+        PortableWork = Any  # type: ignore[assignment]
 
 
 class Store:
@@ -16,6 +24,9 @@ class Store:
         self._connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        # Portable read switch (S31-C, S52): optional delegated StateStore (Step C)
+        self._portable_store: Any | None = None
+        self._portable_read_enabled: bool = False
         with self._lock:
             self._connection.executescript(
                 """
@@ -713,6 +724,115 @@ class Store:
         except sqlite3.Error:
             return False
 
+
+    # ---- portable read switch (S31 Step C, S32, S52) ----
+    # Reads are delegated to the portable StateStore when attached and enabled.
+    # Legacy SQLite remains the source of truth until the switch is fully validated;
+    # old rows are never auto-deleted (S31-D).
+
+    def attach_portable_store(self, store: Any, *, enable_read: bool = True) -> None:
+        """Attach a portable StateStore for dual-read. When enable_read is True,
+        get_repair/list_repairs and candidate reads prefer portable data.
+        """
+        self._portable_store = store
+        self._portable_read_enabled = enable_read
+
+    def detach_portable_store(self) -> None:
+        self._portable_store = None
+        self._portable_read_enabled = False
+
+    def _portable_work_id(self, repair_id: str) -> str:
+        return f"work_legacy_{repair_id}"
+
+    def get_portable_work(self, repair_id: str) -> Any | None:
+        if self._portable_store is None:
+            return None
+        try:
+            return self._portable_store.get_work(self._portable_work_id(repair_id))
+        except Exception:
+            return None
+
+    def list_portable_works(self, status: str | None = None) -> list[Any]:
+        if self._portable_store is None:
+            return []
+        try:
+            return self._portable_store.list_work(status)
+        except Exception:
+            return []
+
+    def get_repair_via_portable(self, repair_id: str) -> dict[str, Any] | None:
+        """Return a legacy-shaped dict synthesized from portable Work, or None."""
+        work = self.get_portable_work(repair_id)
+        if work is None:
+            return None
+        meta = getattr(work, "metadata", {}) or {}
+        return {
+            "id": repair_id,
+            "fingerprint": str(meta.get("legacy_fingerprint", "")),
+            "payload_json": str(getattr(work, "description", "") or ""),
+            "status": str(getattr(work, "status", "open")),
+            "attempt": 1,
+            "portable_work_id": str(getattr(work, "id", "")),
+            "source": "portable",
+        }
+
+    def list_repairs_via_portable(self, limit: int = 50) -> list[dict[str, Any]]:
+        works = self.list_portable_works()
+        out: list[dict[str, Any]] = []
+        for w in works[:limit]:
+            rid = str(getattr(w, "metadata", {}).get("legacy_repair_id", "") or getattr(w, "id", ""))
+            if not rid.startswith("work_legacy_"):
+                rid = str(getattr(w, "id", ""))
+            out.append(
+                {
+                    "id": rid.replace("work_legacy_", ""),
+                    "portable_work_id": str(getattr(w, "id", "")),
+                    "status": str(getattr(w, "status", "")),
+                    "fingerprint": str(getattr(w, "metadata", {}).get("legacy_fingerprint", "")),
+                    "source": "portable",
+                }
+            )
+        return out
+
+    def list_repairs_with_fallback(self, limit: int = 50) -> list[Any]:
+        """Dual-read: prefer portable when enabled and non-empty, fallback to SQLite."""
+        if self._portable_read_enabled and self._portable_store is not None:
+            portable = self.list_repairs_via_portable(limit=limit)
+            if portable:
+                return portable
+        return self.list_repairs(limit=limit)
+
+    def get_repair_with_fallback(self, repair_id: str) -> Any | None:
+        """Dual-read for single repair: portable first, then SQLite Row."""
+        if self._portable_read_enabled and self._portable_store is not None:
+            portable = self.get_repair_via_portable(repair_id)
+            if portable is not None:
+                return portable
+        return self.get_repair(repair_id)
+
+    def list_candidates_via_portable(self, status: str | None = None) -> list[Any]:
+        if self._portable_store is None:
+            return []
+        try:
+            return self._portable_store.list_knowledge(status)
+        except Exception:
+            return []
+
+    def get_knowledge_for_candidate(self, candidate_id: str) -> Any | None:
+        if self._portable_store is None:
+            return None
+        try:
+            return self._portable_store.get_knowledge(candidate_id)
+        except Exception:
+            return None
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+
+
+
+
+
+

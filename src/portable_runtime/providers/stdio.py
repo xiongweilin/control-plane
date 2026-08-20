@@ -36,7 +36,12 @@ class StdioJsonlProvider:
         return self._descriptor
 
     async def health(self) -> ProviderHealth:
-        executable = shutil.which(self.manifest.command[0])
+        cmd = self.manifest.command
+        if not cmd:
+            return ProviderHealth(
+                provider_id=self.descriptor.id, available=False, detail="no command"
+            )
+        executable = shutil.which(cmd[0])
         return ProviderHealth(
             provider_id=self.descriptor.id,
             available=executable is not None,
@@ -44,8 +49,16 @@ class StdioJsonlProvider:
         )
 
     async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
+        cmd = self.manifest.command
+        if not cmd:
+            return CapabilityResult(
+                request_id=request.id,
+                provider_id=self.descriptor.id,
+                status="failed",
+                error={"type": "protocol", "message": "no command for stdio provider"},
+            )
         process = await asyncio.create_subprocess_exec(
-            *self.manifest.command,
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

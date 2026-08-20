@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult
@@ -91,6 +92,18 @@ class Runtime:
 
     def import_state(self, state: dict[str, list[dict[str, object]]]) -> None:
         self.store.import_state(state)
+
+    def export_bundle(self, bundle_path: Path) -> Path:
+        """Export full portable bundle (manifest.json + *.jsonl + artifacts/) as tar.zst."""
+        from portable_runtime.stores.bundle import export_bundle
+
+        return export_bundle(self.store, self.artifact_store, bundle_path, runtime_id=self.runtime_id)
+
+    def import_bundle(self, bundle_path: Path) -> dict[str, Any]:
+        """Import portable bundle (tar.zst)."""
+        from portable_runtime.stores.bundle import import_bundle
+
+        return import_bundle(self.store, self.artifact_store, bundle_path)
 
     async def health(self) -> dict[str, Any]:
         providers = []
