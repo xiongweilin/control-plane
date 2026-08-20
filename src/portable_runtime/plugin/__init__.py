@@ -1,7 +1,6 @@
-"""Small plugin authoring helpers."""
-
 from .conformance import check_provider
 from .loader import load_manifest, validate_manifest
-from .sdk import provider
+from .manager import PluginManager, PluginRecord
+from .sdk import FunctionProvider, provider
 
-__all__ = ["check_provider", "load_manifest", "provider", "validate_manifest"]
+__all__ = ["load_manifest", "validate_manifest", "PluginManager", "PluginRecord", "FunctionProvider", "provider", "check_provider"]  # noqa: E501

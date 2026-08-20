@@ -19,4 +19,3 @@ class ProviderManifest(BaseModel):
         if value != "stdio-jsonl":
             raise ValueError("only stdio-jsonl is supported in protocol v1")
         return value
-

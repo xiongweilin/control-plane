@@ -9,4 +9,3 @@ class Workflow(Protocol):
     id: str
 
     async def run(self, work: Work, run: Run) -> None: ...
-

@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
-from .base import TriggerDescriptor, TriggerEmitter, TriggerEvent
+from ..base import TriggerDescriptor, TriggerEmitter, TriggerEvent
 
 
 class ScheduleTrigger:

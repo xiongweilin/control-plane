@@ -10,23 +10,62 @@ from portable_runtime.core.capabilities import (
 
 class UppercaseProvider:
     @property
-    def descriptor(self) -> ProviderDescriptor: ...
-    async def health(self) -> ProviderHealth: ...
-    async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult: ...
-    async def cancel(self, request_id: str) -> None: ...
+    def descriptor(self) -> ProviderDescriptor:
+        return ProviderDescriptor(
+            id="uppercase",
+            name="Uppercase Provider",
+            version="1.0.0",
+            capabilities=["text.uppercase"],
+            tags={"side-effect-free"},
+        )
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(provider_id="uppercase", available=True)
+
+    async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
+        text = request.instruction or ""
+        return CapabilityResult(
+            request_id=request.id,
+            provider_id="uppercase",
+            status="succeeded",
+            message=text.upper(),
+        )
+
+    async def cancel(self, request_id: str) -> None:
+        return None
 ```
 
-For a small in-process provider, `portable_runtime.plugin.provider` can wrap a
-single async handler and keep the registry/conformance contract out of the
-provider's business code.
-
-Register it at runtime:
+Register at runtime:
 
 ```python
+from portable_runtime.core.runtime import Runtime
+from portable_runtime.providers.fake import EchoProvider
+
+runtime = Runtime()
 runtime.registry.register(UppercaseProvider())
 runtime.registry.disable("uppercase")
 runtime.registry.enable("uppercase")
+result = await runtime.run_capability(work.id, "text.uppercase", instruction="hello")
 ```
 
-Providers return structured status and references. They must not write Runtime
-state directly; the Runtime records Action/Outcome history around invocation.
+For a tiny provider, use the decorator:
+
+```python
+from portable_runtime.plugin import provider
+from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult
+
+@provider(id="echo", version="1.0.0", capabilities=["text.echo"])
+async def invoke(request: CapabilityRequest) -> CapabilityResult:
+    return CapabilityResult(
+        request_id=request.id,
+        provider_id="echo",
+        status="succeeded",
+        message=request.instruction,
+    )
+```
+
+Providers return structured `status` (`succeeded/failed/unavailable/needs-input/cancelled`) and `output_artifact_refs/evidence_refs`. They must not write Runtime state directly; Runtime records `Action/Outcome` around invocation.
+
+Capabilities are open strings, e.g. `reason.generate, code.edit, verify.http, human.approve, notify.send`. Core never hardcodes the set.
+
+See `docs/provider-protocol.md` for the language-neutral stdio JSONL transport, `docs/plugin-authoring.md` for the file layout.

@@ -23,4 +23,3 @@ def validate_manifest(path: Path) -> list[str]:
     if not manifest.capabilities:
         errors.append("at least one capability is required")
     return errors
-

@@ -1,5 +1,23 @@
-# stdio-jsonl provider template
+# Stdio provider template
 
-Read one JSON object per line from stdin and write one result object per line to
-stdout. Keep diagnostics on stderr. See `docs/provider-protocol.md` for the
-wire contract.
+Language-neutral stdio JSONL provider. See `examples/echo-provider/` for a working Python example.
+
+```
+my-provider/
+  manifest.json
+  provider.py  # reads stdin, writes stdout
+```
+
+Manifest:
+
+```json
+{
+  "id": "my-stdio",
+  "name": "My Stdio Provider",
+  "version": "1.0.0",
+  "protocol_version": "1",
+  "transport": "stdio-jsonl",
+  "command": ["python", "provider.py"],
+  "capabilities": ["text.echo"]
+}
+```
