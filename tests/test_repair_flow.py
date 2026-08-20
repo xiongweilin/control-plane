@@ -46,9 +46,7 @@ class FakeExecutor:
             return ""
         if "docker ps" in joined:
             return "Up 2 minutes\nUp 5 minutes"
-        if "fix/control-plane-" in joined and "diff --stat main" in joined:
-            return "a.txt | 1 +\n" if self.branch_exists else ""
-        if "diff main...fix/control-plane-" in joined:
+        if "fix/control-plane-" in joined and "diff" in joined:
             return "a.txt | 1 +\n" if self.branch_exists else ""
         if "status --porcelain" in joined:
             return ""
