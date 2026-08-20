@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from portable_runtime.core.capabilities import (
@@ -18,7 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class LogsVerifierProvider:
-    def __init__(self, provider_id: str = "verifier-logs") -> None:
+    def __init__(
+        self,
+        provider_id: str = "verifier-logs",
+        check_fn: Callable[..., Awaitable[tuple[bool, str, str]]] | None = None,
+    ) -> None:
+        self._check_fn = check_fn
         self._descriptor = ProviderDescriptor(id=provider_id, name="Logs Verifier", version="1.0.0", capabilities=["verify.logs"], tags={"verify"}, priority=5)  # noqa: E501
 
     @property
@@ -34,6 +40,12 @@ class LogsVerifierProvider:
         since_minutes = int(request.parameters.get("since_minutes", 30))
         if not target:
             return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "invalid_request", "message": "verify.logs requires parameters.target"})  # noqa: E501
+        if self._check_fn is not None:
+            try:
+                ok, message, ref = await self._check_fn(target, since_minutes=since_minutes, patterns=tuple(patterns) if patterns else ("Traceback", "panic:", "FATAL"))  # noqa: E501
+                return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded" if ok else "failed", message=message, metadata={"evidence_ref": ref})  # noqa: E501
+            except Exception as exc:  # noqa: BLE001
+                return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": type(exc).__name__, "message": str(exc)[:1500]})  # noqa: E501
         # Placeholder: scan local logs directory or delegate to control_plane.tools
         try:
             from control_plane.tools import check_logs  # type: ignore[attr-defined]
