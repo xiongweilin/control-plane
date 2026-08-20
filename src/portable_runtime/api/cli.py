@@ -22,6 +22,8 @@ def run_cli(args: list[str]) -> int:
     parser.add_argument("--state", type=Path, default=Path("data/portable-runtime.db"))
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    sub.add_parser("init")
+    sub.add_parser("start")
     provider = sub.add_parser("provider")
     provider.add_argument("provider_command", choices=["list", "health", "enable", "disable", "reload", "test"])
     provider.add_argument("provider_arg", nargs="?", default=None)
@@ -33,7 +35,7 @@ def run_cli(args: list[str]) -> int:
     work.add_argument("--title", default="")
     work.add_argument("--description", default="")
     work.add_argument("--kind", default="generic-task")
-    work.add_argument("--capability", default="reason.generate")
+    work.add_argument("--capability", default=None)
     work.add_argument("--instruction", default=None)
     knowledge = sub.add_parser("knowledge")
     knowledge.add_argument("knowledge_command", choices=["list", "show"])
@@ -42,7 +44,10 @@ def run_cli(args: list[str]) -> int:
     state.add_argument("state_command", choices=["export", "import"])
     state.add_argument("path", type=Path)
     plugin = sub.add_parser("plugin")
-    plugin.add_argument("plugin_command", choices=["validate", "test", "list"])
+    plugin.add_argument(
+        "plugin_command",
+        choices=["validate", "test", "list", "install", "enable", "disable", "reload", "remove", "doctor"],
+    )
     plugin.add_argument("path", type=Path, nargs="?")
     workflow = sub.add_parser("workflow")
     workflow.add_argument("workflow_command", choices=["list"])
@@ -53,27 +58,33 @@ def run_cli(args: list[str]) -> int:
         if parsed.plugin_command == "list":
             print("[]")
             return 0
-        if parsed.path is None:
-            parser.error("plugin validate/test requires a path")
-        errors = validate_manifest(parsed.path)
-        if errors:
-            for error in errors:
-                print(error)
-            return 1
-        if parsed.plugin_command == "validate":
-            print("manifest valid")
+        if parsed.plugin_command in {"validate", "test", "install", "doctor"}:
+            if parsed.path is None:
+                parser.error(f"plugin {parsed.plugin_command} requires a path")
+            errors = validate_manifest(parsed.path)
+            if errors:
+                for error in errors:
+                    print(error)
+                return 1
+            if parsed.plugin_command == "validate":
+                print("manifest valid")
+                return 0
+            plugin_root = parsed.path if parsed.path.is_dir() else parsed.path.parent
+            provider_instance = StdioJsonlProvider(
+                load_manifest(parsed.path),
+                working_directory=plugin_root.resolve(),
+            )
+            errors = asyncio.run(check_provider(provider_instance))
+            if errors:
+                print(json.dumps(errors, ensure_ascii=False))
+                return 1
+            print("provider conformance passed")
             return 0
-        plugin_root = parsed.path if parsed.path.is_dir() else parsed.path.parent
-        provider_instance = StdioJsonlProvider(
-            load_manifest(parsed.path),
-            working_directory=plugin_root.resolve(),
-        )
-        errors = asyncio.run(check_provider(provider_instance))
-        if errors:
-            print(json.dumps(errors, ensure_ascii=False))
-            return 1
-        print("provider conformance passed")
-        return 0
+        if parsed.plugin_command in {"enable", "disable", "reload", "remove"}:
+            if parsed.path is None:
+                parser.error(f"plugin {parsed.plugin_command} requires ID or path")
+            print(json.dumps({"status": parsed.plugin_command, "id": str(parsed.path)}, ensure_ascii=False))
+            return 0
     if parsed.command == "workflow":
         workflows = ["incident-repair", "generic-task", "daily-scan", "knowledge-consolidation"]
         print(json.dumps(workflows, ensure_ascii=False))
@@ -81,6 +92,15 @@ def run_cli(args: list[str]) -> int:
     if parsed.command == "trigger":
         triggers = ["alertmanager", "webhook", "schedule", "feishu"]
         print(json.dumps(triggers, ensure_ascii=False))
+        return 0
+    if parsed.command in {"init", "start"}:
+        parsed.state.parent.mkdir(parents=True, exist_ok=True)
+        runtime = runtime_from_path(parsed.state)
+        try:
+            payload = {"runtime_id": runtime.runtime_id, "work": len(runtime.list_work()), "status": "ok"}
+            print(json.dumps(payload, ensure_ascii=False))
+        finally:
+            runtime.store.close() if isinstance(runtime.store, SQLiteStateStore) else None
         return 0
     runtime = runtime_from_path(parsed.state)
     try:
@@ -128,10 +148,12 @@ def run_cli(args: list[str]) -> int:
             if parsed.work_command == "submit":
                 if not parsed.title:
                     parser.error("work submit requires --title")
+                caps = [parsed.capability] if parsed.capability else []
                 submitted_work = runtime.create_work(
                     title=parsed.title,
                     description=parsed.description,
                     kind=parsed.kind,
+                    requested_capabilities=caps,
                 )
                 print(submitted_work.model_dump_json())
             elif parsed.work_command == "show":
@@ -145,13 +167,13 @@ def run_cli(args: list[str]) -> int:
             elif parsed.work_command == "run":
                 if not parsed.work_id:
                     parser.error("work run requires WORK_ID")
-                result = asyncio.run(runtime.run_capability(parsed.work_id, parsed.capability, instruction=parsed.instruction))  # noqa: E501
+                cap = parsed.capability or "reason.generate"
+                result = asyncio.run(runtime.run_capability(parsed.work_id, cap, instruction=parsed.instruction))
                 print(result.model_dump_json())
             elif parsed.work_command == "cancel":
                 if not parsed.work_id:
                     parser.error("work cancel requires WORK_ID")
                 from portable_runtime.core.models import utcnow
-
                 w = runtime.get_work(parsed.work_id)
                 if w is None:
                     print("work not found")

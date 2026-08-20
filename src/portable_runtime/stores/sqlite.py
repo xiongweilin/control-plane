@@ -137,3 +137,16 @@ class SQLiteStateStore:
             except Exception:
                 self._connection.execute("ROLLBACK")
                 raise
+
+    # ---- bundle helpers (tar.zst with manifest + artifacts) ----
+
+    def export_bundle(self, bundle_path: Path, artifact_store: Any | None = None, runtime_id: str = "runtime") -> Path:
+        from .bundle import export_bundle as _export_bundle
+
+        return _export_bundle(self, artifact_store, bundle_path, runtime_id=runtime_id)
+
+    def import_bundle(self, bundle_path: Path, artifact_store: Any | None = None) -> dict[str, Any]:
+        from .bundle import import_bundle as _import_bundle
+
+        return _import_bundle(self, artifact_store, bundle_path)
+

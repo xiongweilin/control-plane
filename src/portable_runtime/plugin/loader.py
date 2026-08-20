@@ -22,4 +22,6 @@ def validate_manifest(path: Path) -> list[str]:
         errors.append("unsupported protocol_version")
     if not manifest.capabilities:
         errors.append("at least one capability is required")
+    if manifest.transport == "stdio-jsonl" and not manifest.command:
+        errors.append("stdio-jsonl transport requires command")
     return errors
