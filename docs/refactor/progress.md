@@ -1,4 +1,4 @@
-# Portable Runtime refactor progress
+﻿# Portable Runtime refactor progress
 
 ## Completed in this change (2026-08-20 full refactor)
 
@@ -43,6 +43,11 @@
 ## 批次设计
 
 详见 `docs/refactor/execution-batches.md`：B0→B1(3并行)→B2(3并行)→B3(3并行)→B4(2并行)→B5 串行，每批批内并行、批间串行，已全部执行。
+
+## B2 Traffic Switch (parallel sub-agent)
+
+- service_inversion sub-agent: service.py now routes via CapabilityService->CodexProvider (keeps CLI parsing/preflight/timeout/tree-kill/redaction), verifier.py split to LegacyVerifier facade calling verify.* capabilities, test_service_inversion 6 tests green.
+- app.py dual-write: POST /v1/alerts/alertmanager now dual-writes legacy Store + portable_runtime.Work via AlertmanagerTrigger, app.state.portable_runtime exposed.
 
 ## Verification
 
