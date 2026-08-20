@@ -1,5 +1,8 @@
 # control-plane
 
+[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=coverage)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
+
+
 ## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)
 
 ```powershell
