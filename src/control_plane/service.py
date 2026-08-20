@@ -2026,13 +2026,16 @@ class RepairService:
                 TestsVerifierProvider,
             )
             reg = ProviderRegistry()
-            reg.register(HttpVerifierProvider())
-            # prometheus_url from config, fallback to localhost
+            # Inject service dependencies so verifiers respect FakeExecutor/http mocks (fixes Linux CI)
+            async def _probe_wrapper(url: str, expected: set[int] | None = None, body_contains: str | None = None, timeout: int = 20) -> tuple[bool, str, str]:  # noqa: E501
+                ok, msg = await _probe(self.http, url, timeout=timeout, expected=expected, body_contains=body_contains)
+                return ok, msg, ""
             prom_url = getattr(self.config, "prometheus_url", "http://127.0.0.1:19090")
-            reg.register(PromqlVerifierProvider(prometheus_url=prom_url))
-            reg.register(ContainerVerifierProvider())
-            reg.register(GitVerifierProvider())
-            reg.register(LogsVerifierProvider())
+            reg.register(HttpVerifierProvider(probe_fn=_probe_wrapper, http_client=self.http))
+            reg.register(PromqlVerifierProvider(prometheus_url=prom_url, promql_fn=self._check_promql, http_client=self.http))  # noqa: E501
+            reg.register(ContainerVerifierProvider(check_fn=self._check_containers))
+            reg.register(GitVerifierProvider(check_fn=self._check_git))
+            reg.register(LogsVerifierProvider(check_fn=self._check_logs))
             reg.register(TestsVerifierProvider())
             reg.register(GitDiffVerifierProvider())
             svc: CapabilityService = CapabilityService(reg)
