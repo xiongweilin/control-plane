@@ -20,12 +20,15 @@ dev = [
     "mypy>=1.10,<2",
 ]
 
+[project.scripts]
+runtime = "portable_runtime.__main__:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/control_plane"]
+packages = ["src/control_plane", "src/portable_runtime"]
 
 [tool.ruff]
 target-version = "py312"
