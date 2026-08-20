@@ -77,7 +77,7 @@ def _parse_jsonl(data: bytes) -> list[dict[str, object]]:
 
 def _try_import_zstd():
     try:
-        import zstandard as zstd
+        import zstandard as zstd  # type: ignore[import-not-found]
         return zstd
     except ImportError:
         return None
