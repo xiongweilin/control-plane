@@ -38,7 +38,7 @@
 ### B5 已完成（最终收口）
 - **文档**：`README` QuickStart 首屏不依赖 Codex/Feishu/Docker/Prometheus；`docs/architecture.md` + `provider-api.md` + `provider-protocol.md` + `plugin-authoring.md`（陌生助手仅读此档即可新增 Provider）+ `workflow-authoring.md` + `store-api.md` + `state-migration.md` + `legacy-control-plane.md` + `deployment-local.md` + `deployment-windows-personal-platform.md` 全部按 §60 完成。
 - **模板**：`templates/provider-python`（<50行）+ `provider-stdio` + `trigger` + `workflow` 可直接拷贝。
-- **DoD 验证**：`ruff check .` ✅ `mypy src/portable_runtime` ✅ `check_portable_core_imports.py` ✅ `pytest` 211 passed（新增 `test_portable_b2_b4.py` 12项覆盖 ProcessExecutor/Codex/health/Verifier/Workflow/Trigger/PluginManager/Deployment/Export）。
+- **DoD 验证**：`ruff check .` ✅ `mypy src/portable_runtime` ✅ `check_portable_core_imports.py` ✅ `pytest` 223 passed（新增 `test_portable_b2_b4.py` 12项覆盖 ProcessExecutor/Codex/health/Verifier/Workflow/Trigger/PluginManager/Deployment/Export）。
 
 ## 批次设计
 
@@ -52,9 +52,12 @@
 ## Verification
 
 - `D:\agent\control-plane\.venv\Scripts\python.exe -m ruff check .` -> All checks passed
-- `D:\agent\control-plane\.venv\Scripts\python.exe -m mypy src/portable_runtime` -> Success: 67 files
+- `D:\agent\control-plane\.venv\Scripts\python.exe -m mypy src/portable_runtime` -> Success: 68 files
 - `D:\agent\control-plane\.venv\Scripts\python.exe scripts/check_portable_core_imports.py` -> passed
-- `D:\agent\control-plane\.venv\Scripts\python.exe -m pytest -q` -> 211 passed
+- `D:\agent\control-plane\.venv\Scripts\python.exe -m pytest -q` -> 223 passed
 
 遗留 intentionally deferred 项已全部落地；后续仅需按 §58 按 commit 粒度持续演进，无需架构反转。
 
+
+## 2026-08-20 integration_push S60-64 done
+- tests/test_full_replacement.py 6 passed
