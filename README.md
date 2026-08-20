@@ -1,5 +1,23 @@
 # control-plane
 
+## Portable Runtime quick start
+
+The repository now includes an additive provider-neutral runtime. It can store
+Work/Run history and export/import state without Codex, Feishu, Prometheus,
+Docker or a network connection:
+
+```powershell
+.venv\Scripts\python.exe -m portable_runtime status
+.venv\Scripts\python.exe -m portable_runtime plugin validate examples\echo-provider
+.venv\Scripts\python.exe -m portable_runtime work submit --title "Echo test" --description "hello"
+```
+
+See [docs/architecture.md](docs/architecture.md),
+[docs/provider-api.md](docs/provider-api.md) and
+[docs/state-migration.md](docs/state-migration.md). The existing
+`control_plane` package below remains the legacy personal-platform profile while
+parity tests are added incrementally.
+
 The personal-platform control plane: it receives local Alertmanager alerts and triggers **full Codex agent sessions** (`codex exec` with `--model` from `control_plane.toml [agent] model`, default `gpt-5.6-luna`). The agent runs with the project directory as its workspace; the model is fixed by `control_plane.toml`, routed through the local model gateway 4000/4001, using the full Codex toolset to diagnose and fix. Code/config changes must be committed to the `fix/control-plane-<id>` candidate branch and are merged only after Feishu approval. All events are recorded to SQLite and JSON evidence files per the "Control Plane" specification (promoted and merged from "Evidence and Evolution Semantics"); successful fixes automatically precipitate candidate experience, and promoting experience to an official playbook requires Feishu approval.
 
 The `gateway_base_url` / `GatewayClient` in code serve the independent model-source diagnosis of the local model gateway (LiteLLM 4001) and do not decide the actual routing of `codex exec`; the old `opencodex_base_url` / `opencodex_api_key` fields and `OpenCodexClient` were retired on 2026-08-11 (OpenCodex retired; 10100 is no longer an active entry). The current boundaries are:
