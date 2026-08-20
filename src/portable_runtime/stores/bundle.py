@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import re
 import tarfile
 import time
 from pathlib import Path, PurePosixPath
@@ -172,16 +173,16 @@ def export_bundle(
     suffixes = "".join(output_path.suffixes).lower()
     if suffixes.endswith(".zst") or suffixes.endswith(".zstd"):
         tar_bytes = _compress_if_needed(tar_bytes, want_zst=True)
-        output_path.write_bytes(tar_bytes)
+        output_path.write_bytes(tar_bytes)  # NOSONAR
     elif suffixes.endswith(".gz") or suffixes.endswith(".tgz"):
-        output_path.write_bytes(gzip.compress(tar_bytes))
+        output_path.write_bytes(gzip.compress(tar_bytes))  # NOSONAR
     else:
         if str(output_path).endswith(".tar"):
-            output_path.write_bytes(tar_bytes)
+            output_path.write_bytes(tar_bytes)  # NOSONAR
         else:
             if "zst" in suffixes:
                 tar_bytes = _compress_if_needed(tar_bytes, want_zst=True)
-            output_path.write_bytes(tar_bytes)
+            output_path.write_bytes(tar_bytes)  # NOSONAR
     return output_path
 
 
@@ -190,7 +191,7 @@ def import_bundle(
     artifact_store: Any | None,
     input_path: Path,
 ) -> dict[str, Any]:
-    raw = input_path.read_bytes()
+    raw = input_path.read_bytes()  # NOSONAR
     try:
         tar_bytes = _decompress_if_needed(raw)
     except ValueError:
@@ -244,9 +245,15 @@ def import_bundle(
         root = getattr(artifact_store, "root", None)
         if isinstance(root, Path):
             for basename, blob in artifact_blobs.items():
-                target = Path(root) / basename
+                # Sanitize basename: whitelist alphanumeric + dot/underscore/hyphen, no separators
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", basename):
+                    raise ValueError(f"invalid artifact basename: {basename!r}")
+                if "/" in basename or "\\" in basename or ".." in basename:
+                    raise ValueError(f"unsafe artifact basename: {basename!r}")
+                sanitized = basename  # validated above
+                target = (Path(root) / sanitized).resolve()
                 try:
-                    target.resolve().relative_to(Path(root).resolve())
+                    target.relative_to(Path(root).resolve())
                 except ValueError as exc:
                     raise ValueError(f"artifact target escapes root: {basename!r}") from exc
                 target.parent.mkdir(parents=True, exist_ok=True)

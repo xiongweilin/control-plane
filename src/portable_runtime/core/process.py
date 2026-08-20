@@ -11,7 +11,6 @@ import contextlib
 import dataclasses
 import logging
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -123,13 +122,17 @@ class PortableSubprocessExecutor:
             return
         with contextlib.suppress(Exception):
             if sys.platform == "win32":
-                subprocess.run(  # noqa: S603
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],  # noqa: S607
-                    capture_output=True,
-                    timeout=10,
-                    shell=False,
-                    check=False,
-                )  # noqa: S603,S607
+                proc2 = await asyncio.create_subprocess_exec(  # noqa: S607
+                    "taskkill",
+                    "/PID",
+                    str(pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(proc2.wait(), timeout=10)
             else:
                 os.kill(pid, 9)  # noqa: S606
 
