@@ -36,3 +36,27 @@ class FilesystemArtifactStore:
         if candidate == root:
             raise ValueError("invalid artifact URI")
         return candidate.read_bytes()
+
+    # ---- bundle helpers ----
+
+    def export_artifacts(self) -> list[str]:
+        """List artifact digests present in this store (for bundle manifest)."""
+        return [p.name for p in self.root.iterdir() if p.is_file()]
+
+    def import_artifact_bytes(self, digest: str, data: bytes) -> Path:
+        """Import raw bytes under a given digest (used by bundle import)."""
+        if not digest or "/" in digest or "\\" in digest or ".." in digest:
+            raise ValueError(f"invalid digest: {digest!r}")
+        target = self.root / digest
+        # Safety: ensure inside root
+        try:
+            target.resolve().relative_to(self.root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"artifact digest escapes root: {digest!r}") from exc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_bytes(data)
+        return target
+
+    def list_artifact_uris(self) -> list[str]:
+        return [(self.root / name).as_uri() for name in self.export_artifacts()]
