@@ -17,7 +17,6 @@ from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairService
 from control_plane.storage import Store
-from control_plane.tools import ToolError
 from control_plane.verifier import LegacyVerifier, Verifier
 from portable_runtime.core.capabilities import (  # noqa: E501
     CapabilityResult,
