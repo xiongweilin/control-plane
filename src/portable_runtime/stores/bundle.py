@@ -252,6 +252,31 @@ def import_bundle(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not target.exists() or target.read_bytes() != blob:
                     target.write_bytes(blob)
+            # Rewrite artifact URIs to new root for portability (Windows -> Linux)
+            try:
+                for rec in state.get("artifact", []):
+                    old_uri = rec.get("uri")
+                    if not isinstance(old_uri, str) or not old_uri.startswith("file:"):
+                        continue
+                    from urllib.parse import unquote, urlparse
+                    parsed = urlparse(old_uri)
+                    basename = Path(unquote(parsed.path)).name
+                    if basename not in artifact_blobs:
+                        continue
+                    new_path = Path(root) / basename
+                    new_uri = new_path.as_uri()
+                    if old_uri != new_uri:
+                        art_id = rec.get("id")
+                        if isinstance(art_id, str) and hasattr(state_store, "get_artifact"):
+                            existing = state_store.get_artifact(art_id)
+                            if existing is not None and getattr(existing, "uri", None) != new_uri:
+                                try:
+                                    updated = existing.model_copy(update={"uri": new_uri})
+                                except Exception:  # noqa: S112
+                                    continue
+                                state_store.save_artifact(updated)
+            except Exception:  # noqa: S110
+                pass
         else:
             for _basename, blob in artifact_blobs.items():
                 try:

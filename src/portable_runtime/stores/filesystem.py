@@ -31,8 +31,18 @@ class FilesystemArtifactStore:
         root = self.root.resolve()
         try:
             candidate.relative_to(root)
-        except ValueError as exc:
-            raise ValueError("invalid artifact URI") from exc
+        except ValueError:
+            # Fallback: try basename lookup for migrated bundles (old absolute URI)
+            basename = Path(raw_path).name
+            if basename and basename not in (".", ".."):
+                fallback = (root / basename).resolve()
+                try:
+                    fallback.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError("invalid artifact URI") from exc
+                if fallback.is_file():
+                    return fallback.read_bytes()
+            raise ValueError("invalid artifact URI") from None
         if candidate == root:
             raise ValueError("invalid artifact URI")
         return candidate.read_bytes()
