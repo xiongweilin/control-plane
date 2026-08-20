@@ -16,11 +16,26 @@ from typing import Any
 import httpx
 from prometheus_client import Counter
 
+# Portable runtime bridge: RepairService now routes Codex execution via CapabilityService.
+# Legacy CodexRunner remains at control_plane.codex_runner but is only accessed
+# through portable_runtime.providers.codex.provider (or a wrapped adapter) via
+# CapabilityService -> CodexProvider. This preserves CLI parsing, preflight,
+# timeout, tree-kill and redaction while removing the direct subprocess call
+# from the core workflow path (see refactor plan S45).
+from portable_runtime.core.capabilities import (
+    CapabilityRequest,
+    CapabilityResult,
+    ProviderDescriptor,
+    ProviderHealth,
+)
+from portable_runtime.core.registry import ProviderRegistry
+from portable_runtime.core.router import CapabilityService
+
 from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
-from .codex_runner import CodexRunner
+from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionResult
 from .config import ControlPlaneConfig
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
@@ -59,6 +74,65 @@ repairs_skipped_dirty = Counter(
 )
 
 
+# --- Portable runtime adapter for legacy CodexRunner (S45) ---
+class _LegacyCodexRunnerAdapter:
+    def __init__(self, runner, provider_id="codex-legacy-adapter"):
+        self._runner = runner
+        self._descriptor = ProviderDescriptor(
+            id=provider_id,
+            name="Legacy Codex Adapter",
+            version="1.0.0",
+            capabilities=[
+                "reason.generate",
+                "code.read",
+                "code.edit",
+                "code.test",
+                "shell.exec",
+                "git.diff",
+            ],
+            priority=5,
+            tags={"legacy-adapter", "supports-files"},
+        )
+    @property
+    def descriptor(self):
+        return self._descriptor
+    async def health(self):
+        try:
+            if hasattr(self._runner, "cli_info"):
+                p, v = self._runner.cli_info()
+                return ProviderHealth(provider_id=self.descriptor.id, available=True, detail=f"{p} {v}"[:300])
+        except Exception as exc:
+            if exc.__class__.__name__ == "CodexCliUnavailableError":
+                return ProviderHealth(provider_id=self.descriptor.id, available=False, detail=str(exc)[:300])
+            return ProviderHealth(provider_id=self.descriptor.id, available=True, detail=f"legacy fake ok: {exc}"[:300])
+        return ProviderHealth(provider_id=self.descriptor.id, available=True, detail="legacy adapter ready")
+    async def invoke(self, request, context):
+        prompt = request.instruction or str(request.parameters.get("prompt", "") or "")
+        repo = str(request.parameters.get("repo", "") or "")
+        run_id = request.run_id or context.run_id or ""
+        repair_id = request.work_id or request.id
+        if not prompt:
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "invalid_request", "message": "missing prompt/instruction"})  # noqa: E501
+        try:
+            result = await self._runner.run_task(repair_id=repair_id, repo=repo or ".", prompt=prompt, run_id=run_id)
+        except CodexCliUnavailableError as exc:
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "CodexCliUnavailableError", "message": str(exc)})  # noqa: E501
+        except Exception as exc:
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": type(exc).__name__, "message": str(exc)[:2000]})  # noqa: E501
+        if getattr(result, "timed_out", False):
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "timeout", "message": "codex session timed out", "stderr": getattr(result, "stderr_tail", "")[-2000:]}, message=getattr(result, "last_message", ""), metadata={"exit_code": getattr(result, "exit_code", 124), "timed_out": True})  # noqa: E501
+        if getattr(result, "exit_code", 0) != 0:
+            return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "codex_exit", "message": f"exit {getattr(result, 'exit_code', 1)}", "stderr": getattr(result, "stderr_tail", "")[-2000:]}, message=getattr(result, "last_message", ""), metadata={"exit_code": getattr(result, "exit_code", 0)})  # noqa: E501
+        return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message=getattr(result, "last_message", ""), metadata={"exit_code": getattr(result, "exit_code", 0)})  # noqa: E501
+    async def cancel(self, request_id):
+        return None
+
+def _build_capability_service_for_runner(runner, provider_id="codex-legacy-adapter"):
+    registry = ProviderRegistry()
+    registry.register(_LegacyCodexRunnerAdapter(runner, provider_id=provider_id))
+    return CapabilityService(registry)
+
+
 class RepairRejectedError(RuntimeError):
     pass
 
@@ -73,18 +147,22 @@ class RepairService:
         config: ControlPlaneConfig,
         store: Store,
         budget: Budget,
-        agent: CodexRunner,
-        approvals: ApprovalManager,
-        notifier: Notifier,
+        agent: CodexRunner | Any | None = None,
+        approvals: ApprovalManager | None = None,
+        notifier: Notifier | None = None,
         executor: CommandExecutor | None = None,
         http: httpx.AsyncClient | None = None,
+        *,
+        capability_service: CapabilityService | None = None,
+        provider_registry: ProviderRegistry | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.budget = budget
+        # agent is retained for compat but execution now goes via CapabilityService
         self.agent = agent
-        self.approvals = approvals
-        self.notifier = notifier
+        self.approvals = approvals if approvals is not None else ApprovalManager()
+        self.notifier = notifier if notifier is not None else Notifier(config)
         self.executor = executor or CommandExecutor(config)
         self.http = http or httpx.AsyncClient(timeout=30, limits=HTTP_LIMITS)
         self._owns_http = http is None
@@ -95,8 +173,93 @@ class RepairService:
         self.run_id = config.run_id or current_run_id()
         if hasattr(self.executor, "attach_store"):
             self.executor.attach_store(store)
-        if hasattr(agent, "attach_store"):
+        if agent is not None and hasattr(agent, "attach_store"):
             agent.attach_store(store)
+        # Portable bridge: build CapabilityService if not supplied.
+        # Prefer explicit capability_service; else wrap legacy agent; else try to
+        # build a real CodexProvider from config (portable path).
+        if capability_service is not None:
+            self.capability_service = capability_service
+            self._provider_registry = provider_registry or getattr(capability_service, "registry", None)
+        elif agent is not None:
+            self.capability_service = _build_capability_service_for_runner(agent)
+            self._provider_registry = self.capability_service.registry
+        else:
+            # No agent supplied: try to create a real CodexProvider from config
+            try:
+                from portable_runtime.providers.codex.provider import CodexProvider
+                reg = provider_registry or ProviderRegistry()
+                # Use model/cli from config; working_directory left None (service picks repo per request)
+                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))
+                self.capability_service = CapabilityService(reg)
+                self._provider_registry = reg
+            except Exception:
+                # Fallback: empty registry (capability unavailable, but runtime stays up per S46)
+                reg = provider_registry or ProviderRegistry()
+                self.capability_service = CapabilityService(reg)
+                self._provider_registry = reg
+
+    async def _invoke_codex_via_capability(self, *, repair_id: str, repo: str, prompt: str) -> CodexSessionResult:
+        """Route Codex execution via CapabilityService (S45).
+
+        The portable path is: RepairService -> CapabilityService -> CodexProvider (or legacy adapter).
+        Internal CodexProvider still reuses CLI resolution, preflight, timeout,
+        tree-kill and redaction. This method translates CapabilityResult back to
+        CodexSessionResult for existing call sites so repair_flow semantics stay identical.
+        """
+        req = CapabilityRequest(
+            id=f"req-{repair_id}-{uuid.uuid4().hex[:6]}",
+            capability="reason.generate",
+            work_id=repair_id,
+            run_id=self.run_id,
+            instruction=prompt,
+            parameters={"prompt": prompt, "repo": repo, "model": self.config.model},
+            timeout_seconds=float(self.config.exec_timeout_seconds or self.config.per_repair_timeout_seconds or 900),
+        )
+        result = await self.capability_service.invoke(req)
+        # Translate capability result to CodexSessionResult
+        if result.status == "succeeded":
+            return CodexSessionResult(
+                exit_code=0,
+                last_message=result.message or "",
+                timed_out=False,
+                stderr_tail="",
+            )
+        # failed / unavailable - map error
+        err = result.error or {}
+        msg = err.get("message", "") or result.message or ""
+        stderr_tail = err.get("stderr", "") or msg[:2000]
+        # Detect timeout marker
+        timed_out = err.get("type") == "timeout" or "timed out" in msg.lower() or result.metadata.get("timed_out", False)  # noqa: E501
+        exit_code = int(result.metadata.get("exit_code", 1) or err.get("exit_code", 1) if isinstance(err.get("exit_code"), int) else 1)  # noqa: E501
+        if timed_out:
+            exit_code = 124
+        return CodexSessionResult(
+            exit_code=exit_code,
+            last_message=result.message or msg,
+            timed_out=timed_out,
+            stderr_tail=stderr_tail[:5000],
+        )
+
+    async def _codex_cli_info_via_capability(self) -> tuple[Any, str]:
+        """Probe CLI via CapabilityService health, fallback to legacy agent."""
+        # Try via capability health first
+        try:
+            descs = self.capability_service.registry.descriptors_for("reason.generate")
+            for d in descs:
+                h = await self.capability_service.registry.health(d.id)
+                if h.available and h.detail:
+                    # detail is like "path version" or provider detail; try to parse
+                    parts = h.detail.split()
+                    if parts:
+                        from pathlib import Path as _Path  # noqa: N814
+                        return _Path(parts[0]), parts[1] if len(parts) > 1 else h.detail[:200]  # noqa: E501
+        except Exception:  # noqa: S110
+            pass
+        # Fallback to direct agent
+        if self.agent is not None and hasattr(self.agent, "cli_info"):
+            return self.agent.cli_info()
+        raise CodexCliUnavailableError("codex CLI not available via capability or legacy agent")
 
     @property
     def paused(self) -> bool:
@@ -466,11 +629,8 @@ class RepairService:
                 "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
                 "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
             )
-            result = await self.agent.run_task(
-                repair_id=task_id,
-                repo=repo,
-                prompt=task_prompt,
-                run_id=self.run_id,
+            result = await self._invoke_codex_via_capability(
+                repair_id=task_id, repo=repo, prompt=task_prompt
             )
             self.store.increment_agent_calls(task_id)
             self.budget.spend()
@@ -561,11 +721,8 @@ class RepairService:
         )
 
         task_id = f"digest-{today}"
-        result = await self.agent.run_task(
-            repair_id=task_id,
-            repo=repo,
-            prompt="\n".join(lines),
-            run_id=self.run_id,
+        result = await self._invoke_codex_via_capability(
+            repair_id=task_id, repo=repo, prompt="\n".join(lines)
         )
         self.budget.spend()
         if result.timed_out or result.exit_code != 0:
@@ -1073,11 +1230,8 @@ class RepairService:
         workspaces = await self._capture_workspace_states(main_repo)
         prompt = self._build_agent_prompt(alert, repo_root, repair_id, branch)
         try:
-            result = await self.agent.run_task(
-                repair_id=repair_id,
-                repo=repo_root,
-                prompt=prompt,
-                run_id=self.run_id,
+            result = await self._invoke_codex_via_capability(
+                repair_id=repair_id, repo=repo_root, prompt=prompt
             )
             self.store.increment_agent_calls(repair_id)
             self.budget.spend()
@@ -1855,19 +2009,65 @@ class RepairService:
                             names.append(candidate)
         return [name for name in dict.fromkeys(names) if name][:12]
 
+    def _get_verifier_capability_service(self) -> CapabilityService:
+        """Build verifier CapabilityService with six providers (S46)."""
+        if hasattr(self, "_verifier_capability_service") and self._verifier_capability_service is not None:
+            return self._verifier_capability_service
+        try:
+            from portable_runtime.providers.verifiers.http_promql import (
+                ContainerVerifierProvider,
+                GitVerifierProvider,
+                HttpVerifierProvider,
+                PromqlVerifierProvider,
+            )
+            from portable_runtime.providers.verifiers.logs_tests import (
+                GitDiffVerifierProvider,
+                LogsVerifierProvider,
+                TestsVerifierProvider,
+            )
+            reg = ProviderRegistry()
+            reg.register(HttpVerifierProvider())
+            # prometheus_url from config, fallback to localhost
+            prom_url = getattr(self.config, "prometheus_url", "http://127.0.0.1:19090")
+            reg.register(PromqlVerifierProvider(prometheus_url=prom_url))
+            reg.register(ContainerVerifierProvider())
+            reg.register(GitVerifierProvider())
+            reg.register(LogsVerifierProvider())
+            reg.register(TestsVerifierProvider())
+            reg.register(GitDiffVerifierProvider())
+            svc: CapabilityService = CapabilityService(reg)
+            self._verifier_capability_service: CapabilityService = svc
+            return svc
+        except Exception:
+            # Fallback to direct mode if providers unavailable
+            reg2 = ProviderRegistry()
+            svc2: CapabilityService = CapabilityService(reg2)
+            self._verifier_capability_service = svc2
+            return svc
+
     async def _verify(
         self,
         ctx: ToolContext,
         repair_id: str,
         alert: Alert,
     ):
-        verifier = Verifier(
-            probe=lambda url: _probe(self.http, url),
-            container_status=self._check_containers,
-            promql=self._check_promql,
-            logs=self._check_logs,
-            git=self._check_git,
-        )
+        # Prefer capability-routed verifier (S46); fallback to direct for tests
+        _verifier_svc = None
+        try:
+            _verifier_svc = self._get_verifier_capability_service()
+            # If registry has at least one verifier provider, use capability path
+            if _verifier_svc.registry.list():
+                verifier = Verifier(capability_service=_verifier_svc)
+            else:
+                raise RuntimeError("empty verifier registry")
+        except Exception:
+            verifier = Verifier(
+                probe=lambda url, **kw: _probe(self.http, url, **kw),
+                container_status=self._check_containers,
+                promql=self._check_promql,
+                logs=self._check_logs,
+                git=self._check_git,
+            )
         actions = [
             {
                 "tool": row["tool"],
@@ -2321,7 +2521,7 @@ class RepairService:
 
         cli: dict[str, Any] = {"ok": False, "path": "", "version": "", "error": ""}
         try:
-            path, version = self.agent.cli_info()
+            path, version = await self._codex_cli_info_via_capability()
             cli.update(ok=True, path=str(path), version=version)
         except CodexCliUnavailableError as exc:
             cli["error"] = str(exc)
