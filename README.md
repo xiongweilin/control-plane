@@ -1,6 +1,6 @@
 # control-plane
 
-[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
+[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=coverage)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 
 
 ## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)
@@ -42,11 +42,12 @@ See [docs/architecture.md](docs/architecture.md),
 
 ---
 
-## Personal Platform Profile
+> [!WARNING]
+> Legacy control_plane package is deprecated. Portable Runtime (`portable_runtime`) is now the primary runtime. This package will be archived after §64 replacement test passes. New code must use `portable_runtime`.
 
-Personal deployment of portable-runtime for Windows + Feishu + Prometheus (private). See public generic library at [ratiolin/portable-runtime](https://github.com/ratiolin/portable-runtime).
+## Personal Platform Profile (legacy control plane with Codex/Feishu/Prometheus/Docker on Windows)
 
-This profile uses `portable_runtime` with local data (`control_plane.toml`, `data/`, `CONTROL_PLANE_API_KEY`) and Windows-specific integrations under `scripts/` and `deployments/windows-personal-platform`. Only this section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
+The existing `control_plane` package below remains the legacy personal-platform profile while parity tests are added incrementally. Only this section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
 
 ## Architecture
 
@@ -310,19 +311,4 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 - [0010 OpenCodex network boundary and model source](/docs/decisions/0010-opencodex-network-boundary.md)
 - [0012 model-gateway connectivity diagnosis (after OpenCodex retirement)](/docs/decisions/0012-model-gateway-connectivity.md)
 
-## Code of conduct
-
-See [Code of conduct](CODE_OF_CONDUCT.md).
-
-## Contributing
-
-See [Contributing](CONTRIBUTING.md).
-
-## License
-
-[MIT license](LICENSE)
-
-## Security
-
-See [Security](SECURITY.md).
 
