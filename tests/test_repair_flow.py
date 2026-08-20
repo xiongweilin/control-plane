@@ -224,7 +224,11 @@ async def test_noise_alert_ignored(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -265,7 +269,11 @@ async def test_smoke_instance_alert_ignored(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -305,7 +313,11 @@ async def test_policy_ignore_skips_repair(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -335,7 +347,11 @@ async def test_policy_manual_pending_then_run(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -374,7 +390,11 @@ async def test_attempt_count_resets_after_resolution(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -499,7 +519,11 @@ async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -533,7 +557,11 @@ async def test_git_check_skips_non_git_repo(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutorNoGit()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -589,7 +617,11 @@ async def test_alert_is_firing(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -617,7 +649,11 @@ async def test_cancel_in_progress_repair(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -678,7 +714,11 @@ async def test_check_containers_fails_on_unhealthy(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutorUnhealthy()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -702,7 +742,11 @@ async def test_resolve_project_maps_legacy_docker_alias(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -768,7 +812,11 @@ async def test_run_digest_no_records(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -793,7 +841,11 @@ async def test_run_digest_drops_candidate(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor()
     agent = FakeCodexRunnerWithSummary("DROP cand-x: 无价值，重复且无证据\nKEEP cand-y: 有真实证据")
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -922,7 +974,11 @@ async def test_reject_closes_repair_without_candidate(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=True)
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
@@ -958,7 +1014,11 @@ async def test_operations_only_repair_closes_without_approval(tmp_path) -> None:
     approvals = ApprovalManager()
     executor = FakeExecutor(branch_exists=False)
     agent = FakeCodexRunner()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    def _mock(request):
+        if "api/v1/query" in str(request.url):
+            return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [0, "1"]}]}})
+        return httpx.Response(200, json={})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_mock))
     service = RepairService(
         config,
         store,
