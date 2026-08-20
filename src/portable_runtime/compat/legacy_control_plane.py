@@ -7,11 +7,7 @@ from portable_runtime.interfaces.store import StateStore
 
 
 def import_legacy_repair(row: Mapping[str, object], store: StateStore) -> tuple[Work, Run]:
-    """Create stable Work/Run IDs for a legacy repair row.
-
-    The adapter is deliberately data-only: it does not import or invoke the
-    legacy service, and it leaves the original repair row untouched.
-    """
+    """Create stable Work/Run IDs for a legacy repair row."""
 
     repair_id = str(row.get("id", ""))
     if not repair_id:
@@ -35,3 +31,17 @@ def import_legacy_repair(row: Mapping[str, object], store: StateStore) -> tuple[
     store.save_run(run)
     return work, run
 
+
+def legacy_work_id(repair_id: str) -> str:
+    return f"work_legacy_{repair_id}"
+
+
+def legacy_run_id(repair_id: str) -> str:
+    return f"run_legacy_{repair_id}"
+
+
+def get_legacy_mapping(work: Work) -> dict[str, str] | None:
+    rid = work.metadata.get("legacy_repair_id")
+    if not rid:
+        return None
+    return {"legacy_repair_id": str(rid), "work_id": work.id}

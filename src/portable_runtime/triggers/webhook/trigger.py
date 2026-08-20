@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from .base import TriggerDescriptor, TriggerEmitter, TriggerEvent
+from ..base import TriggerDescriptor, TriggerEmitter, TriggerEvent
 
 
 class WebhookTrigger:
