@@ -8,3 +8,5 @@ coverage.xml
 data/
 *.patch.tmp
 control_plane.toml
+
+.scannerwork/
