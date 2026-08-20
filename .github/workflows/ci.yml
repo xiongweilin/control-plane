@@ -33,7 +33,10 @@ jobs:
         run: uv run ruff check .
 
       - name: Mypy (src)
-        run: uv run mypy src/control_plane
+        run: uv run mypy src
+
+      - name: Portable core import boundary
+        run: uv run python scripts/check_portable_core_imports.py
 
       - name: Pytest (portable suite)
         # test_env_scan_all_healthy and test_terminate_process_tree_kills_children
