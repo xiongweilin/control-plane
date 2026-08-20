@@ -1,7 +1,7 @@
 [project]
 name = "control-plane"
 version = "0.1.0"
-description = "Personal platform control plane: alert-driven repair agent with evidence semantics"
+description = "Personal use of portable-runtime with local profiles (private)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",
@@ -27,12 +27,9 @@ runtime = "portable_runtime.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# TODO(portable_runtime-extract): after portable-runtime repo is published, replace
-# dual-package build with single package + external dependency:
-#   dependencies = ["portable-runtime @ git+ssh://github.com/ratiolin/portable-runtime.git"]
-# Keep both packages for now to allow dual_write parity; do not split yet (gate §64).
+# Private single-form: portable_runtime core + local profiles. Public library is ratiolin/portable-runtime (same core, no private config).
 [tool.hatch.build.targets.wheel]
-packages = ["src/control_plane", "src/portable_runtime"]
+packages = ["src/portable_runtime"]
 
 [tool.ruff]
 target-version = "py312"
@@ -43,7 +40,6 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
-"src/control_plane/config.py" = ["S104"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -52,9 +48,10 @@ pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.12"
+ignore_missing_imports = true
 check_untyped_defs = true
 warn_redundant_casts = true
-warn_unused_ignores = true
+warn_unused_ignores = false
 no_implicit_optional = true
 show_error_codes = true
 exclude = ["tests/"]

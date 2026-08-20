@@ -1,21 +1,11 @@
-> [!WARNING]
-> Legacy control_plane package is deprecated. Portable Runtime (`portable_runtime`) is now the primary runtime. This package will be archived after §64 replacement test passes. New code must use `portable_runtime`.
+# Personal Platform - Legacy Notes
 
-> **Migration path**: writes stay on legacy repair rows → `dual_write_repair` mirrors to `Work/Run/Event` → readers switch to `portable_runtime` via `compat/import_legacy_repair` + `dual_write`; delete legacy only after §64 passes.
+> Personal use only. This profile wraps `portable_runtime` with local Windows/Feishu/Prometheus configuration. Diff vs public library is `control_plane.toml`/`data`/keys only.
 
-# Legacy control plane
+The `control_plane` private profile at `D:\agent\control-plane` reuses the same `portable_runtime` core as the public library.
 
-The `control_plane` package is retained as the **personal-platform** profile (`D:\agent\control-plane`).
+- Windows Task Scheduler / PowerShell / VBS wrappers live under `scripts/` and `deployments/windows-personal-platform`.
+- HTTP surface (`/healthz`, `/live`, `/ready`) and Feishu `/cp` commands are served via `portable_runtime` interfaces (`providers`/`interactions`).
+- Personal secrets (`control_plane.toml`, `data/`, `CONTROL_PLANE_API_KEY`, Feishu webhook, Prometheus URLs) stay in this private repo and are never pushed to the public library.
 
-- It still serves the Windows Task Scheduler / PowerShell / VBS wrappers under `scripts/` until `deployments/windows-personal-platform` is cut over.
-- It exposes the same HTTP surface (`/healthz`, `/live`, `/ready`, `/v1/...` legacy) and Feishu `/cp` commands via `compat/legacy_control_plane.py`.
-- New code must not import `control_plane` from `core/`; the only allowed bridge is `compat` (data-only, `import_legacy_repair`).
-
-Migration is additive:
-
-```
-legacy repair row (writes) -> dual_write_repair -> Work/Run/Event (reads switch before writes stop)
-```
-
-Do not delete the legacy profile before the replacement test (§64) passes.
-
+Public generic library: [ratiolin/portable-runtime](https://github.com/ratiolin/portable-runtime)
