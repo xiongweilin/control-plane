@@ -14,8 +14,13 @@ class GenericTaskWorkflow:
         return True
 
     async def run(self, context: WorkflowContext, work: Work, run: Run) -> str:
-        for cap in work.requested_capabilities or ["reason.generate"]:
+        caps = work.requested_capabilities or ["reason.generate"]
+        for cap in caps:
             result = await context.invoke(cap, instruction=work.description or work.title)
             if result.status == "failed":
                 return "failed"
+            if result.status == "needs-input":
+                return "waiting"
+            if result.status == "unavailable":
+                return "blocked"
         return "succeeded"

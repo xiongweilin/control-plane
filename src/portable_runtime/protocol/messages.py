@@ -26,4 +26,3 @@ class ResultMessage(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     message: str | None = None
     error: dict[str, Any] | None = None
-

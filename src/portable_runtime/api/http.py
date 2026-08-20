@@ -152,4 +152,92 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="artifact not found")
         return artifact.model_dump(mode="json")
 
+    # ---- Alertmanager / webhook triggers (B2) ----
+    @app.post("/v1/triggers/alertmanager")
+    async def alertmanager_webhook(body: dict[str, Any]) -> dict[str, Any]:
+        from portable_runtime.triggers.alertmanager.trigger import AlertmanagerTrigger
+
+        trigger = AlertmanagerTrigger()
+
+        async def _emit(event):
+            work_fields = trigger.to_work_fields(event)
+            runtime.create_work(**work_fields)
+
+        await trigger.start(_emit)
+        events = await trigger.handle_webhook(body)
+        return {"events": [e.model_dump(mode="json") for e in events], "works_created": len(events)}
+
+    @app.post("/v1/triggers/webhook")
+    async def webhook_trigger(body: dict[str, Any], kind: str = "webhook") -> dict[str, Any]:
+        from portable_runtime.triggers.webhook.trigger import WebhookTrigger
+
+        trigger = WebhookTrigger()
+
+        async def _emit(event):
+            runtime.create_work(
+                title=f"Webhook {event.kind}",
+                description=str(event.payload)[:20000],
+                kind="generic-task",
+                requested_capabilities=[kind] if kind != "webhook" else [],
+            )
+
+        await trigger.start(_emit)
+        event = await trigger.handle(body, kind=kind)
+        return event.model_dump(mode="json")
+
+    @app.post("/v1/triggers/schedule/emit")
+    async def schedule_emit(kind: str = "maintenance-scan") -> dict[str, Any]:
+        from portable_runtime.triggers.schedule.trigger import ScheduleTrigger
+
+        trigger = ScheduleTrigger(kind=kind)
+
+        async def _emit(event):
+            runtime.create_work(
+                title=f"Scheduled {event.kind}",
+                description="schedule trigger",
+                kind=event.kind,
+            )
+
+        await trigger.start(_emit)
+        event = await trigger.emit_once()
+        return event.model_dump(mode="json")
+
+    # ---- Workflow execution (B2) ----
+    @app.post("/v1/work/{work_id}/workflow/{workflow_id}")
+    async def run_workflow(work_id: str, workflow_id: str) -> dict[str, Any]:
+        work = runtime.get_work(work_id)
+        if work is None:
+            raise HTTPException(status_code=404, detail="work not found")
+        run = runtime.start_run(work_id, workflow_id=workflow_id)
+        # Resolve workflow
+        workflow: Any = None
+        if workflow_id in {"incident-repair", "incident"}:
+            from portable_runtime.workflows.incident_repair.workflow import IncidentRepairWorkflow
+
+            workflow = IncidentRepairWorkflow()
+        elif workflow_id in {"generic-task", "generic"}:
+            from portable_runtime.workflows.generic_task.workflow import GenericTaskWorkflow
+
+            workflow = GenericTaskWorkflow()
+        elif workflow_id == "daily-scan":
+            from portable_runtime.workflows.daily_scan.workflow import DailyScanWorkflow
+
+            workflow = DailyScanWorkflow()
+        elif workflow_id == "knowledge-consolidation":
+            from portable_runtime.workflows.knowledge_consolidation.workflow import KnowledgeConsolidationWorkflow
+
+            workflow = KnowledgeConsolidationWorkflow()
+        else:
+            raise HTTPException(status_code=404, detail=f"unknown workflow: {workflow_id}")
+        from portable_runtime.workflows.context import WorkflowContext
+
+        ctx = WorkflowContext(work=work, run=run, store=runtime.store, capabilities=runtime.capabilities, registry=runtime.registry)  # noqa: E501
+        status = await workflow.run(ctx, work, run)
+        # Update work/run status
+        updated_work = work.model_copy(update={"status": "completed" if status == "succeeded" else status, "updated_at": utcnow()})  # noqa: E501
+        runtime.store.save_work(updated_work)
+        updated_run = run.model_copy(update={"status": status})
+        runtime.store.save_run(updated_run)
+        return {"work_id": work_id, "run_id": run.id, "workflow_id": workflow_id, "status": status}
+
     return app

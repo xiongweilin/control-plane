@@ -61,4 +61,3 @@ class CapabilityResult(BaseModel):
     message: str | None = None
     error: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-

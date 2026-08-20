@@ -1,6 +1,16 @@
-import json
-import sys
+from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult
+from portable_runtime.plugin import provider
 
-for line in sys.stdin:
-    request = json.loads(line)
-    print(json.dumps({"type": "result", "request_id": request["id"], "status": "succeeded"}), flush=True)
+
+@provider(
+    id="example",
+    version="1.0.0",
+    capabilities=["text.example"],
+)
+async def invoke(request: CapabilityRequest) -> CapabilityResult:
+    return CapabilityResult(
+        request_id=request.id,
+        provider_id="example",
+        status="succeeded",
+        message=request.instruction,
+    )

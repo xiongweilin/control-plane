@@ -9,4 +9,3 @@ class Trigger(Protocol):
     id: str
 
     async def receive(self) -> list[Work]: ...
-
