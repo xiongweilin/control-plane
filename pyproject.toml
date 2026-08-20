@@ -27,6 +27,10 @@ runtime = "portable_runtime.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# TODO(portable_runtime-extract): after portable-runtime repo is published, replace
+# dual-package build with single package + external dependency:
+#   dependencies = ["portable-runtime @ git+ssh://github.com/ratiolin/portable-runtime.git"]
+# Keep both packages for now to allow dual_write parity; do not split yet (gate §64).
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]
 
@@ -57,3 +61,4 @@ exclude = ["tests/"]
 
 [tool.coverage.run]
 omit = ["tests/*", ".venv/*"]
+

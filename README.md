@@ -42,6 +42,9 @@ See [docs/architecture.md](docs/architecture.md),
 
 ---
 
+> [!WARNING]
+> Legacy control_plane package is deprecated. Portable Runtime (`portable_runtime`) is now the primary runtime. This package will be archived after §64 replacement test passes. New code must use `portable_runtime`.
+
 ## Personal Platform Profile (legacy control plane with Codex/Feishu/Prometheus/Docker on Windows)
 
 The existing `control_plane` package below remains the legacy personal-platform profile while parity tests are added incrementally. Only this section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
@@ -307,4 +310,5 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 - [0009 upgrade vs fix authorization](/docs/decisions/0009-upgrade-vs-fix-authorization.md)
 - [0010 OpenCodex network boundary and model source](/docs/decisions/0010-opencodex-network-boundary.md)
 - [0012 model-gateway connectivity diagnosis (after OpenCodex retirement)](/docs/decisions/0012-model-gateway-connectivity.md)
+
 
