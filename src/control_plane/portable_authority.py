@@ -389,10 +389,274 @@ class PortableRuntimeAuthority:
         result = await self.runtime.capabilities.invoke(request)
         final_run = self.runtime.store.get_run(run.id)
         if final_run is not None:
-            status = "succeeded" if result.status == "succeeded" else "failed"
-            self.runtime.store.save_run(final_run.model_copy(update={"status": status, "ended_at": datetime.now(UTC)}))
+            status = "waiting" if result.status == "succeeded" else "failed"
+            update: dict[str, Any] = {"status": status}
+            if status == "failed":
+                update["ended_at"] = datetime.now(UTC)
+            self.runtime.store.save_run(final_run.model_copy(update=update))
         final_work = self.runtime.store.get_work(work.id)
         if final_work is not None:
-            status = "completed" if result.status == "succeeded" else "failed"
+            status = "waiting" if result.status == "succeeded" else "failed"
             self.runtime.store.save_work(final_work.model_copy(update={"status": status, "updated_at": utcnow()}))
+        return result
+
+    def finalize_repair(
+        self,
+        repair_id: str,
+        *,
+        verified: bool,
+        verification_refs: list[str] | None = None,
+        summary: str = "",
+    ) -> None:
+        """Close canonical Work/Run only after deterministic verification."""
+
+        work_id = f"work_legacy_{repair_id}"
+        run_id = f"run_legacy_{repair_id}"
+        work = self.runtime.store.get_work(work_id)
+        run = self.runtime.store.get_run(run_id)
+        if work is None or run is None:
+            return
+        now = datetime.now(UTC)
+        refs = list(
+            verification_refs
+            if verification_refs is not None
+            else work.metadata.get("verification_refs", [])
+        )
+        work_metadata = dict(work.metadata)
+        work_metadata.update({"verification_refs": refs, "verification_summary": summary, "verified": verified})
+        run_metadata = dict(run.metadata)
+        run_metadata.update({"verification_refs": refs, "verification_summary": summary, "verified": verified})
+        self.runtime.store.save_work(
+            work.model_copy(
+                update={
+                    "status": "completed" if verified else "failed",
+                    "metadata": work_metadata,
+                    "updated_at": now,
+                }
+            )
+        )
+        self.runtime.store.save_run(
+            run.model_copy(
+                update={
+                    "status": "succeeded" if verified else "failed",
+                    "metadata": run_metadata,
+                    "ended_at": now,
+                }
+            )
+        )
+
+    def record_verification(
+        self,
+        repair_id: str,
+        *,
+        passed: bool,
+        summary: str,
+        evidence_refs: list[str] | None = None,
+    ) -> list[str]:
+        """Persist deterministic verifier output before canonical closure."""
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return []
+        token = self._stable_token(f"verification:{repair_id}:{summary}")
+        version_refs = list(work.metadata.get("subject_version_refs", []))
+        verification = self._record(
+            BaseRecord(
+                id=f"record_{repair_id}_{token}_verification",
+                record_type="Assertion",
+                lifecycle_status="current",
+                epistemic_status="supported" if passed else "contested",
+                metadata={
+                    "qualification_kind": "verification",
+                    "result": "pass" if passed else "fail",
+                    "target_refs": [work.id, run.id],
+                    "subject_version_refs": version_refs,
+                    "verifier_ref": "control-plane.deterministic-verifier",
+                    "summary": summary[:4_000],
+                },
+            )
+        )
+        evidence = self._record(
+            BaseRecord(
+                id=f"record_{repair_id}_{token}_verification_evidence",
+                record_type="EvidenceArtifact",
+                lifecycle_status="current",
+                metadata={
+                    "qualification_kind": "evidence",
+                    "target_refs": [work.id, run.id],
+                    "subject_version_refs": version_refs,
+                    "verifier_ref": "control-plane.deterministic-verifier",
+                    "evidence_refs": list(evidence_refs or []),
+                    "summary": summary[:4_000],
+                },
+            )
+        )
+        relation_id = f"relation_{repair_id}_{token}_verification"
+        get_relation = getattr(self.runtime.store, "get_relation", None)
+        relation = get_relation(relation_id) if callable(get_relation) else None
+        if not isinstance(relation, RecordRelation):
+            relation = RecordRelation(
+                id=relation_id,
+                relation_type="validated-under",
+                subject_ref=evidence.id,
+                object_ref=verification.id,
+                scope={"work_id": work.id, "run_id": run.id},
+                created_by="control-plane.deterministic-verifier",
+                metadata={"qualification_kind": "relation"},
+            )
+            save_relation = getattr(self.runtime.store, "save_relation", None)
+            if not callable(save_relation):
+                raise RuntimeError("portable authority store cannot persist verification relation")
+            save_relation(relation)
+        refs = [verification.id, evidence.id, relation.id]
+        verification_status = "passed" if passed else "failed"
+        work_metadata = dict(work.metadata)
+        work_metadata.update(
+            {
+                "verification_refs": refs,
+                "verification_status": verification_status,
+                "verification_summary": summary[:4_000],
+            }
+        )
+        run_metadata = dict(run.metadata)
+        run_metadata.update(
+            {
+                "verification_refs": refs,
+                "verification_status": verification_status,
+                "verification_summary": summary[:4_000],
+            }
+        )
+        self.runtime.store.save_work(work.model_copy(update={"metadata": work_metadata, "updated_at": utcnow()}))
+        self.runtime.store.save_run(run.model_copy(update={"metadata": run_metadata}))
+        return refs
+
+    async def invoke_operation(
+        self,
+        *,
+        repair_id: str,
+        capability: str,
+        resource_ref: str,
+        parameters: dict[str, Any],
+        effect_class: str,
+        subject_version_refs: list[str] | None = None,
+        instruction: str | None = None,
+    ) -> CapabilityResult:
+        """Invoke a non-Codex personal operation through the Runtime.
+
+        Git merge/push and Docker lifecycle actions use the same Work/Run as
+        the repair, but receive a separate capability-scoped Decision and
+        AuthorizationGrant.  A successful provider invocation leaves the Run
+        in ``waiting``; deterministic repair verification owns final closure.
+        """
+
+        work_id = f"work_legacy_{repair_id}"
+        run_id = f"run_legacy_{repair_id}"
+        work = self.runtime.store.get_work(work_id)
+        run = self.runtime.store.get_run(run_id)
+        if work is None or run is None:
+            raise RuntimeError(f"portable operation requires canonical Work/Run for {repair_id}")
+        versions = list(subject_version_refs or [])
+        token = self._stable_token(f"{capability}:{resource_ref}:{','.join(versions)}")
+        decision_id = f"decision_{repair_id}_{capability.replace('.', '_')}_{token}"
+        decision = Decision(
+            id=decision_id,
+            work_id=work.id,
+            decision_type="personal-operation-authorization",
+            selected_option=capability,
+            rationale_artifact_refs=[
+                str(ref.get("id")) if isinstance(ref, dict) else str(ref)
+                for ref in work.metadata.get("procedure_proof_refs", [])
+            ],
+            authorized_by=[self.principal_ref],
+        )
+        save_decision = getattr(self.runtime.store, "save_decision", None)
+        if not callable(save_decision):
+            raise RuntimeError("portable operation store cannot persist Decision")
+        save_decision(decision)
+        grant_id = f"authz_{repair_id}_{capability.replace('.', '_')}_{token}"
+        grant = AuthorizationGrant(
+            id=grant_id,
+            principal_ref=self.principal_ref,
+            grantee_ref=self.actor_ref,
+            allowed_capabilities=[capability],
+            resource_scope=[resource_ref],
+            effect_ceiling=effect_class,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            subject_version_refs=versions,
+            source_decision_ref=decision.id,
+            metadata={"authority": "personal-owner-policy", "operation": capability, "work_id": work.id},
+        )
+        save_authorization = getattr(self.runtime.store, "save_authorization", None)
+        if not callable(save_authorization):
+            raise RuntimeError("portable operation store cannot persist AuthorizationGrant")
+        save_authorization(grant)
+        procedure_refs = list(work.metadata.get("procedure_proof_refs", []))
+        procedure_refs.append({"id": decision.id, "kind": "decision"})
+        work_metadata = dict(work.metadata)
+        work_metadata.update(
+            {
+                "authorization_refs": [
+                    *work_metadata.get("authorization_refs", []),
+                    {"id": grant.id, "kind": "authorization"},
+                ],
+                "authorization_grant_id": grant.id,
+                "procedure_proof_refs": procedure_refs,
+                "operation_capability": capability,
+                "operation_resource_ref": resource_ref,
+            }
+        )
+        self.runtime.store.save_work(
+            work.model_copy(
+                update={"status": "waiting", "metadata": work_metadata, "updated_at": utcnow()}
+            )
+        )
+        run_metadata = dict(run.metadata)
+        run_metadata.update(
+            {
+                "authorization_refs": [
+                    *run_metadata.get("authorization_refs", []),
+                    {"id": grant.id, "kind": "authorization"},
+                ],
+                "authorization_grant_id": grant.id,
+                "procedure_proof_refs": procedure_refs,
+                "procedure_profile": "standard",
+                "operation_capability": capability,
+                "operation_resource_ref": resource_ref,
+            }
+        )
+        self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata}))
+        request = CapabilityRequest(
+            id=f"req-{repair_id}-{capability.replace('.', '-')}-{token}",
+            capability=capability,
+            work_id=work.id,
+            run_id=run.id,
+            instruction=instruction or capability,
+            parameters=dict(parameters),
+            resource_ref=resource_ref,
+            subject_version_refs=versions,
+            actor_ref=self.actor_ref,
+            effect_class=effect_class,  # type: ignore[arg-type]
+            idempotency_key=f"{work.id}:{capability}:{token}",
+            metadata={
+                "portable_authority": "personal-runtime",
+                "procedure_profile": "standard",
+                "resource_ref": resource_ref,
+                "subject_version_refs": versions,
+                "actor_ref": self.actor_ref,
+                "authorization_refs": [{"id": grant.id, "kind": "authorization"}],
+                "authorization_grant_id": grant.id,
+                "procedure_proof_refs": procedure_refs,
+            },
+        )
+        result = await self.runtime.capabilities.invoke(request)
+        if result.status != "succeeded":
+            final_run = self.runtime.store.get_run(run.id)
+            if final_run is not None:
+                self.runtime.store.save_run(
+                    final_run.model_copy(update={"status": "failed", "ended_at": datetime.now(UTC)})
+                )
+            final_work = self.runtime.store.get_work(work.id)
+            if final_work is not None:
+                self.runtime.store.save_work(final_work.model_copy(update={"status": "failed", "updated_at": utcnow()}))
         return result

@@ -135,6 +135,25 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
         "",
         "repair-1",
     )
+    authority = app.state.service.portable_authority
+    authority.ensure_repair_projection(
+        repair_id="repair-1",
+        fingerprint="HighCPU|dify|*",
+        payload_json="{}",
+        attempt=1,
+    )
+    verification_refs = authority.record_verification(
+        "repair-1",
+        passed=True,
+        summary="container verifier passed",
+        evidence_refs=["container_status"],
+    )
+    authority.finalize_repair(
+        "repair-1",
+        verified=True,
+        verification_refs=verification_refs,
+        summary="container verifier passed",
+    )
     client = TestClient(app)
     headers = {"X-Control-Plane-Key": "secret"}
     assert client.post(

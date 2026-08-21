@@ -105,8 +105,8 @@ uv run python -m control_plane
 - Codex capability requests use a physical sandbox ceiling: `reason.generate`, `code.read` and `git.diff` run `read-only`; `code.edit`, `code.test` and `shell.exec` run `workspace-write`. Unknown capabilities fail closed to `read-only`; `danger-full-access` is not a personal-profile sandbox.
 - A repair session requests `code.edit` explicitly and is still constrained to the designated candidate workspace, the task-prompt hard constraints, the Codex global AGENTS.md (`~/.codex/AGENTS.md`), and the control plane's independent verification.
 - Remote/deployment effects are not delegated to the Codex session. They require a separate Provider behind Portable Runtime's RealityBoundary and its authorization/reliability checks.
-- Automatic operations (reversible): the agent may run `restart` / `up -d` on allowlisted compose projects, read-only diagnostics, cleanup, and health waits; the control plane independently verifies container state and git state afterward.
-- Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval merges to main and pushes. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
+- Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are private typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly.
+- Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval invokes the separately authorized Git provider. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
 - Denied by default: file writes (except candidate branches), dependency changes, database writes, cloud writes, credential access, data deletion, and modifying verifiers/alert rules/permissions.
 
 ## Agent trigger notes
@@ -181,7 +181,7 @@ Both the main task and the watchdog use the `wscript.exe //B //NoLogo` hidden wr
 
 ## Agent operation boundary
 
-The agent may run `docker compose restart / up -d`, `docker restart`, and read-only diagnostics on running Compose projects (dify, docker, commerce-orchestrator, observability, feishu-dify-gateway; feedback/catalog merged into commerce-orchestrator since 2026-08-14), plus URL probes and PromQL queries. Irreversible operations are forbidden: deleting/emptying data volumes or databases (`docker compose down -v`, `docker volume rm`, DROP/TRUNCATE, deleting persisted data), `docker compose down`, `git push --force` or deleting main/protected branches, modifying credentials/firewall/sshd, and stopping or deleting containers holding persisted data.
+The Codex agent may run read-only diagnostics, URL probes and PromQL queries. It may not execute `docker restart`, `docker compose restart/up -d`, `git merge` or `git push`. Those effects are performed only by the private typed Git/Docker providers after a scoped `AuthorizationGrant`; the provider allowlists Compose projects and rejects force-push, destructive volume/database operations, credential/firewall/sshd changes, and stopping or deleting containers holding persisted data.
 
 ## Verifier (deterministic checks)
 
@@ -278,13 +278,13 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 
 ### External side-effect gate
 
-- With `external_side_effects_require_approval = true`, actions that restart external services (restart_service/compose_up/cleanup_docker) are marked `needs_approval` and wait for human approval like code candidates.
+- With `external_side_effects_require_approval = true`, runtime-changing repair actions are marked `needs_approval`; approved restarts and Compose lifecycle changes enter the typed Docker provider instead of the Codex process. Docker cache cleanup remains a separate maintenance path and is not implied by the runtime provider contract.
 - The path blacklist `blocked_paths` prevents the agent/tools from accessing credentials and sensitive user files; any candidate diff touching `.env`/credentials/secrets/id_rsa/`.pem`/`.key`/token/password and similar paths is always refused for merge.
 - `data/protection-*.json` are GitHub branch-protection rule snapshots (inspection targets), not an allowlist for the scripts directory; scripts/ actually contains only the install script.
 
 ### GitHub SSH 443 fallback
 
-- `git push` prefers 22; network-class failures automatically fall back to `ssh.github.com:443` (`github_ssh_host_port` configurable), injecting a restricted `GIT_SSH_COMMAND` (BatchMode + ConnectTimeout + accept-new); two failures throw a classified error.
+- The typed `git.push` provider prefers SSH port 22; network-class failures automatically fall back to `ssh.github.com:443` (`github_ssh_host_port` configurable), injecting a restricted `GIT_SSH_COMMAND` (BatchMode + ConnectTimeout + accept-new); two failures throw a classified error.
 
 ## Hardening (batch 5)
 

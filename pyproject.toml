@@ -46,8 +46,9 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 # intentionally long fixtures, import-order probes, and security-test literals.
 "tests/*" = ["S101", "S108", "S105", "S106", "E501", "B017", "N817", "B011", "F841", "S311", "S112", "E702", "E701", "E401", "E402", "I001", "F401", "N806", "SIM110", "N814", "N812"]
 "src/control_plane/config.py" = ["S104"]
-# Vendored src/portable_runtime mirrors ratiolin/portable-runtime pyproject
-# per-file-ignores so the tree stays byte-identical to upstream.
+# Vendored src/portable_runtime follows the public project's lint baseline;
+# private semantic hardening deltas are documented in MIGRATION.md and must not
+# be described as byte-identical until they are upstreamed.
 "src/portable_runtime/core/knowledge.py" = ["E501", "S110", "SIM102", "W291"]
 "src/portable_runtime/core/registry.py" = ["E501"]
 "src/portable_runtime/core/router.py" = ["S110", "SIM105", "E501", "S112", "F841", "SIM102"]
