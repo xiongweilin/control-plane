@@ -92,8 +92,11 @@ private Windows implementation.
    qualification and owns repair closure.
 5. Git merge/push and Docker lifecycle effects are separate typed providers;
    Codex sessions can propose them but cannot execute them.
-6. Provider execution success is an execution outcome, not repair verification;
-   Work/Run remain waiting until deterministic verification finalizes them.
+6. Provider execution success and artifact delivery are separate from objective
+   verification. The default `generic-task` postcondition proves only that a
+   run-associated result artifact was delivered; Work/Run remain waiting and
+   no `verified=True` or completed Work is written until a task-specific
+   objective verifier establishes the requested outcome.
 7. Candidate promotion must preserve typed evidence, verification, decision,
    authorization and scope/version records before the legacy official row is
    projected.
