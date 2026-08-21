@@ -53,6 +53,14 @@ stricter profile but can never downgrade one.  The independent verifier still
 owns post-edit verification and repair closure; the pre-execution source
 version assertion is not treated as the final repair result.
 
+Runtime-changing effects are separate capabilities. Codex may describe a
+recommended merge, push or service restart, but it cannot perform those
+effects. The private profile registers `git.merge`, `git.push`, `git.rollback`,
+`docker.restart` and `docker.compose.up` providers with scoped contracts and
+uses a separate Decision + AuthorizationGrant for each operation. The
+deterministic verifier remains responsible for final repair closure after those
+providers return.
+
 The legacy SQLite row remains writable only as a compatibility projection for
 the existing HTTP/Feishu/state-machine API.  Its status updates are mirrored
 to the canonical Work/Run when the portable store is attached.  Historical
@@ -65,6 +73,7 @@ rows continue to be imported with `dual_write_repair`.
 | Alert/task → Work/Run | Portable authority | idempotent stable ids; projection failure blocks admission |
 | policy → AuthorizationGrant | personal owner policy | version/resource scoped; expiry or mismatch denies |
 | request → provider | `RealityBoundary` | qualification/policy/procedure/reliability/precommit gates; fail closed |
+| approved effect → host/remote | typed Git/Docker provider | separate capability, resource grant and reliability decision; Codex cannot invoke directly |
 | provider result → canonical outcome | Portable Runtime | post-fencing/commit failure becomes unknown |
 | canonical result → legacy status | compatibility projection | best-effort mirror; canonical state remains inspectable |
 | candidate → official knowledge | Portable `KnowledgeProjection` | typed verification/evidence/decision/grant/scope must promote first; legacy playbook is a projection |

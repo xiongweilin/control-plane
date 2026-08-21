@@ -91,7 +91,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg.evidence_dir.mkdir(parents=True, exist_ok=True)
 
     store = Store(cfg.state_db)
-    # Portable runtime (additive, separate DB, never blocks legacy)
+    # Portable runtime is the canonical authority; the legacy DB remains a
+    # compatibility projection and is updated only after canonical writes.
     if not _PORTABLE_AVAILABLE or create_personal_platform_runtime is None:
         raise RuntimeError("portable runtime is required for the personal control-plane app")
     try:
@@ -132,6 +133,78 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         notifier,
         portable_runtime=portable_runtime,
     )
+    # Personal runtime effects are explicit providers, never Codex prompt
+    # permissions.  The contracts are registered on the private Runtime
+    # instance so authorization/reliability/procedure gates run before Git or
+    # Docker touches the host or a remote repository.
+    from portable_runtime.core.capability_contract import CapabilityContract
+
+    from .personal_operations import PersonalOperationsProvider
+
+    for contract in (
+        CapabilityContract(
+            capability="git.merge",
+            minimum_impact_class="write-local",
+            effect_semantics="idempotent",
+            reversibility="reversible",
+            authorization_requirement="required",
+            minimum_procedure_profile="standard",
+            resource_required=True,
+            subject_version_required=True,
+            blast_radius=1,
+            exposure=1,
+        ),
+        CapabilityContract(
+            capability="git.push",
+            minimum_impact_class="write-remote",
+            effect_semantics="reconcilable",
+            reversibility="compensatable",
+            authorization_requirement="required",
+            minimum_procedure_profile="standard",
+            resource_required=True,
+            subject_version_required=True,
+            blast_radius=2,
+            exposure=2,
+        ),
+        CapabilityContract(
+            capability="git.rollback",
+            minimum_impact_class="write-local",
+            effect_semantics="idempotent",
+            reversibility="reversible",
+            authorization_requirement="required",
+            minimum_procedure_profile="standard",
+            resource_required=True,
+            subject_version_required=True,
+            blast_radius=1,
+            exposure=1,
+        ),
+        CapabilityContract(
+            capability="docker.restart",
+            minimum_impact_class="write-remote",
+            effect_semantics="reconcilable",
+            reversibility="compensatable",
+            authorization_requirement="required",
+            minimum_procedure_profile="standard",
+            resource_required=True,
+            subject_version_required=False,
+            blast_radius=2,
+            exposure=2,
+        ),
+        CapabilityContract(
+            capability="docker.compose.up",
+            minimum_impact_class="write-remote",
+            effect_semantics="reconcilable",
+            reversibility="compensatable",
+            authorization_requirement="required",
+            minimum_procedure_profile="standard",
+            resource_required=True,
+            subject_version_required=False,
+            blast_radius=3,
+            exposure=3,
+        ),
+    ):
+        portable_runtime.contract_registry.register(contract)
+    portable_runtime.registry.register(PersonalOperationsProvider(cfg, service.executor))
     with suppress(ValueError):
         # skip if already registered (e.g. test app created twice)
         REGISTRY.register(ControlPlaneCollector(store, budget.remaining))
@@ -508,7 +581,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not candidate["verifier_ids"]:
             return ApprovalDecisionResponse(accepted=False, message="Candidate has no verifier")
         source_repair_id = str(candidate["source_repair_id"] or "")
-        source_repair = store.get_repair_with_fallback(source_repair_id) if source_repair_id else None
+        source_repair = store.get_repair(source_repair_id) if source_repair_id else None
         if source_repair is None or source_repair["status"] != "closed":
             return ApprovalDecisionResponse(
                 accepted=False,
@@ -521,9 +594,44 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if _PORTABLE_AVAILABLE and portable_runtime is not None:
             from portable_runtime.records.authorization import record_human_approval
             from portable_runtime.records.knowledge import KnowledgeProjection, promote_to_official
-            from portable_runtime.records.models import BaseRecord
-            from portable_runtime.records.relations import RecordRelation
 
+            source_work = portable_runtime.store.get_work(f"work_legacy_{source_repair_id}")
+            source_metadata = getattr(source_work, "metadata", {}) if source_work is not None else {}
+            if (
+                source_work is None
+                or source_work.status != "completed"
+                or source_metadata.get("verification_status") != "passed"
+            ):
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Canonical source repair is not completed and verified",
+                )
+            verification_refs = (
+                list(source_metadata.get("verification_refs", []))
+            )
+            record_getter = getattr(portable_runtime.store, "get_record", None)
+            relation_getter = getattr(portable_runtime.store, "get_relation", None)
+            verification = None
+            evidence = None
+            relation = None
+            for ref in verification_refs:
+                value = None
+                if callable(record_getter):
+                    value = record_getter(str(ref))
+                if value is None and callable(relation_getter):
+                    value = relation_getter(str(ref))
+                metadata = getattr(value, "metadata", {}) if value is not None else {}
+                if getattr(value, "relation_type", None) == "validated-under":
+                    relation = value
+                elif metadata.get("qualification_kind") == "verification" and metadata.get("result") == "pass":
+                    verification = value
+                elif metadata.get("qualification_kind") == "evidence":
+                    evidence = value
+            if verification is None or evidence is None or relation is None:
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Canonical verification evidence is missing; complete deterministic verification first",
+                )
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
             decision, grant = record_human_approval(
                 portable_runtime.store,
@@ -541,50 +649,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     accepted=False,
                     message="Portable authorization record was not persisted",
                 )
-            record_getter = getattr(portable_runtime.store, "get_record", None)
-            evidence_id = f"evidence_candidate_{candidate_id}"
-            verification_id = f"verification_candidate_{candidate_id}"
-            evidence = record_getter(evidence_id) if callable(record_getter) else None
-            if evidence is None:
-                evidence = BaseRecord(
-                    id=evidence_id,
-                    record_type="EvidenceArtifact",
-                    lifecycle_status="current",
-                    metadata={
-                        "qualification_kind": "evidence",
-                        "candidate_id": candidate_id,
-                        "source_repair_id": source_repair_id,
-                        "verifier_ids": str(candidate["verifier_ids"]),
-                    },
-                )
-                portable_runtime.store.save_record(evidence)
-            verification = record_getter(verification_id) if callable(record_getter) else None
-            if verification is None:
-                verification = BaseRecord(
-                    id=verification_id,
-                    record_type="Assertion",
-                    lifecycle_status="current",
-                    epistemic_status="supported",
-                    metadata={
-                        "qualification_kind": "verification",
-                        "result": "pass",
-                        "candidate_id": candidate_id,
-                        "source_repair_id": source_repair_id,
-                    },
-                )
-                portable_runtime.store.save_record(verification)
-            relation_id = f"relation_candidate_{candidate_id}"
-            relation_getter = getattr(portable_runtime.store, "get_relation", None)
-            relation = relation_getter(relation_id) if callable(relation_getter) else None
-            if relation is None:
-                relation = RecordRelation(
-                    id=relation_id,
-                    relation_type="validated-under",
-                    subject_ref=evidence.id,
-                    object_ref=verification.id,
-                    metadata={"candidate_id": candidate_id},
-                )
-                portable_runtime.store.save_relation(relation)
             projection_id = f"knowledge_candidate_{candidate_id}"
             projection_getter = getattr(portable_runtime.store, "get_knowledge_projection", None)
             projection = projection_getter(projection_id) if callable(projection_getter) else None

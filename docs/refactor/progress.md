@@ -156,3 +156,22 @@
   `KnowledgeProjection` (typed verification/evidence relation, human Decision,
   AuthorizationGrant and scope/version) before updating the legacy candidate
   and playbook projection to `official`.
+
+## 2026-08-21: RealityBoundary last-mile effects
+
+- Codex prompts no longer authorize Docker restarts, Compose lifecycle changes,
+  Git merge or Git push. Those effects are separate private Runtime
+  capabilities implemented by `PersonalOperationsProvider`.
+- `git.merge`, `git.push`, `git.rollback`, `docker.restart` and
+  `docker.compose.up` are registered with explicit effect contracts; each
+  operation receives its own scoped Decision + AuthorizationGrant and passes
+  through the same procedure/reliability/precommit boundary.
+- Candidate merge/push and rollback no longer call the raw executor directly.
+  The production app requires the portable authority; compatibility-only
+  service instances use the same typed provider without a Runtime bootstrap.
+- Portable Work/Run remain `waiting` after provider execution. Only the
+  deterministic verifier calls the canonical finalization path that marks the
+  Run `succeeded` and Work `completed`; verification failure marks them failed.
+- Repair lifecycle projection is now canonical-first: when a portable store is
+  attached, a failed Work/Run projection prevents the legacy SQLite status
+  update from committing.
