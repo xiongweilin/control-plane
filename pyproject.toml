@@ -30,10 +30,9 @@ build-backend = "hatchling.build"
 # The public portable-runtime repository is the semantic upstream.  This private
 # profile intentionally ships the vendored runtime alongside control_plane so a
 # Windows installation is reproducible, but the vendored tree is not a second
-# authority.  Capability-scoped Codex sandbox and monotonic procedure changes
-# are tracked as explicit upstream follow-ups in MIGRATION.md and ADR-0015;
-# after they land publicly, update the pin and remove the corresponding local
-# semantic delta.  Do not describe this package as zero-drift in the meantime.
+# authority.  Provider-neutral capability, procedure, qualification, store,
+# and Codex sandbox semantics follow public portable-runtime pin 2bf0932;
+# private Windows execution-boundary code remains an adapter in control_plane.
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]
 
@@ -50,8 +49,8 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 "tests/*" = ["S101", "S108", "S105", "S106", "E501", "B017", "N817", "B011", "F841", "S311", "S112", "E702", "E701", "E401", "E402", "I001", "F401", "N806", "SIM110", "N814", "N812"]
 "src/control_plane/config.py" = ["S104"]
 # Vendored src/portable_runtime follows the public project's lint baseline;
-# private semantic hardening deltas are documented in MIGRATION.md and must not
-# be described as byte-identical until they are upstreamed.
+# the remaining private differences are deployment-specific adapters documented
+# in MIGRATION.md.
 "src/portable_runtime/core/knowledge.py" = ["E501", "S110", "SIM102", "W291"]
 "src/portable_runtime/core/registry.py" = ["E501"]
 "src/portable_runtime/core/router.py" = ["S110", "SIM105", "E501", "S112", "F841", "SIM102"]

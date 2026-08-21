@@ -18,12 +18,12 @@ def compute_effective_procedure_profile(
     contract_minimum: str | None = None,
     *requested_profiles: str | None,
 ) -> ProcedureProfileLiteral:
-    """Resolve a procedure profile without allowing callers to downgrade it.
+    """Resolve a procedure profile without allowing a governance downgrade.
 
-    A contract's profile is a minimum. Work, Run, and request metadata may
-    require a stricter profile, but they can never replace ``standard`` or
-    ``enhanced`` with ``minimal``. Unknown values fail closed so malformed
-    governance metadata cannot silently lower a gate.
+    A contract profile is a minimum. Work, Run, and request metadata may ask
+    for a stricter profile, but a caller cannot replace ``standard`` or
+    ``enhanced`` with ``minimal``. Unknown values fail closed rather than
+    silently selecting a weaker procedure.
     """
 
     values = [contract_minimum or "minimal", *(value for value in requested_profiles if value is not None)]
@@ -32,6 +32,8 @@ def compute_effective_procedure_profile(
     except (KeyError, TypeError) as exc:
         raise ValueError(f"unknown procedure profile in {values!r}; refusing to downgrade governance") from exc
     return effective  # type: ignore[return-value]
+
+
 class EffectContractInvalid(Exception):  # noqa: N818
     def __init__(self, capability: str, message: str | None = None) -> None:
         self.capability = capability
@@ -170,10 +172,6 @@ def _is_side_effect_capability(contract, capability: str) -> bool:
         return False
     if lower.startswith(("observe.", "verify.", "human.", "reason.")):
         return False
-    # Preserve the historical extension point for unrelated plugin
-    # capabilities such as ``text.echo``.  The strict namespace rule is
-    # specifically for unknown code actions, where a read default would be a
-    # privilege downgrade.
     if lower.startswith("code."):
         return True
     if any(k in lower for k in ("deploy", "admin", "irreversible", "write", "side_effect")):
