@@ -25,11 +25,12 @@ from prometheus_client import Counter
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
+    InvocationContext,
     ProviderDescriptor,
     ProviderHealth,
 )
 from portable_runtime.core.registry import ProviderRegistry
-from portable_runtime.core.router import CapabilityService
+from portable_runtime.core.router import CapabilityService, ConstraintRouter
 
 from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_pattern
@@ -126,11 +127,87 @@ class _LegacyCodexRunnerAdapter:
         return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message=getattr(result, "last_message", ""), metadata={"exit_code": getattr(result, "exit_code", 0)})  # noqa: E501
     async def cancel(self, request_id):
         return None
+    async def reconcile(self, request_id: str) -> CapabilityResult | None:
+        """Legacy adapter keeps no recovery reconciliation state."""
+
+        return None
+
+
+class _LegacyRoutingBoundary:
+    """Legacy compat seam for the deprecated repair path (S45 / ADR-0013).
+
+    The portable V2 CapabilityService routes every invocation through the
+    RealityBoundary governance gates (fencing, procedure, authorization,
+    effect contracts).  The legacy ``control_plane`` repair flow predates
+    those gates and keeps its own lifecycle (repairs/verifier/approvals), so
+    it routes through this seam with the pre-V2 semantics: registry
+    discovery, health filter, deterministic routing, then provider
+    invocation.
+
+    Only the deprecated legacy path uses this boundary.  The portable
+    Runtime (dual-write Work/Run, workflows) always uses the full
+    RealityBoundary, keeping the portable core authoritative.
+    """
+
+    def __init__(
+        self,
+        registry: ProviderRegistry,
+        *,
+        store: Any | None = None,
+        runtime_id: str = "runtime",
+    ) -> None:
+        self.registry = registry
+        self.store = store
+        self.runtime_id = runtime_id
+        self.routing = ConstraintRouter(registry=registry)
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+        *,
+        capability_service: Any | None = None,
+    ) -> CapabilityResult:
+        try:
+            descriptors = self.registry.descriptors_for(
+                request.capability, request.excluded_provider_ids
+            )
+            healthy: list[ProviderDescriptor] = []
+            for descriptor in descriptors:
+                with suppress(Exception):
+                    health = await self.registry.health(descriptor.id)
+                    if health.available:
+                        healthy.append(descriptor)
+            selected = await self.routing.select(request, healthy)
+            if selected is None:
+                return CapabilityResult(
+                    request_id=request.id,
+                    provider_id="",
+                    status="failed",
+                    error={
+                        "type": "no_eligible_provider",
+                        "message": f"no eligible provider for {request.capability}",
+                    },
+                )
+            provider = self.registry.get(selected.id)
+            context = InvocationContext(
+                runtime_id=self.runtime_id,
+                work_id=request.work_id,
+                run_id=request.run_id,
+            )
+            return await provider.invoke(request, context)
+        except Exception as exc:
+            return CapabilityResult(
+                request_id=request.id,
+                provider_id="",
+                status="failed",
+                error={"type": type(exc).__name__, "message": str(exc)[:2000]},
+            )
+
 
 def _build_capability_service_for_runner(runner, provider_id="codex-legacy-adapter"):
     registry = ProviderRegistry()
     registry.register(_LegacyCodexRunnerAdapter(runner, provider_id=provider_id))
-    return CapabilityService(registry)
+    return CapabilityService(boundary=_LegacyRoutingBoundary(registry))
 
 
 class RepairRejectedError(RuntimeError):
@@ -190,13 +267,13 @@ class RepairService:
                 from portable_runtime.providers.codex.provider import CodexProvider
                 reg = provider_registry or ProviderRegistry()
                 # Use model/cli from config; working_directory left None (service picks repo per request)
-                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))
-                self.capability_service = CapabilityService(reg)
+                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))  # type: ignore[arg-type]
+                self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
             except Exception:
                 # Fallback: empty registry (capability unavailable, but runtime stays up per S46)
                 reg = provider_registry or ProviderRegistry()
-                self.capability_service = CapabilityService(reg)
+                self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
 
     async def _invoke_codex_via_capability(self, *, repair_id: str, repo: str, prompt: str) -> CodexSessionResult:
@@ -244,10 +321,13 @@ class RepairService:
     async def _codex_cli_info_via_capability(self) -> tuple[Any, str]:
         """Probe CLI via CapabilityService health, fallback to legacy agent."""
         # Try via capability health first
+        registry = self.capability_service.registry
+        if registry is None:
+            raise CodexCliUnavailableError("codex CLI registry unavailable via capability service")
         try:
-            descs = self.capability_service.registry.descriptors_for("reason.generate")
+            descs = registry.descriptors_for("reason.generate")
             for d in descs:
-                h = await self.capability_service.registry.health(d.id)
+                h = await registry.health(d.id)
                 if h.available and h.detail:
                     # detail is like "path version" or provider detail; try to parse
                     parts = h.detail.split()
@@ -2031,13 +2111,13 @@ class RepairService:
                 ok, msg = await _probe(self.http, url, timeout=timeout, expected=expected, body_contains=body_contains)
                 return ok, msg, ""
             prom_url = getattr(self.config, "prometheus_url", "http://127.0.0.1:19090")
-            reg.register(HttpVerifierProvider(probe_fn=_probe_wrapper, http_client=self.http))
-            reg.register(PromqlVerifierProvider(prometheus_url=prom_url, promql_fn=self._check_promql, http_client=self.http))  # noqa: E501
-            reg.register(ContainerVerifierProvider(check_fn=self._check_containers))
-            reg.register(GitVerifierProvider(check_fn=self._check_git))
-            reg.register(LogsVerifierProvider(check_fn=self._check_logs))
-            reg.register(TestsVerifierProvider())
-            reg.register(GitDiffVerifierProvider())
+            reg.register(HttpVerifierProvider(probe_fn=_probe_wrapper, http_client=self.http))  # type: ignore[arg-type]
+            reg.register(PromqlVerifierProvider(prometheus_url=prom_url, promql_fn=self._check_promql, http_client=self.http))  # type: ignore[arg-type]  # noqa: E501
+            reg.register(ContainerVerifierProvider(check_fn=self._check_containers))  # type: ignore[arg-type]
+            reg.register(GitVerifierProvider(check_fn=self._check_git))  # type: ignore[arg-type]
+            reg.register(LogsVerifierProvider(check_fn=self._check_logs))  # type: ignore[arg-type]
+            reg.register(TestsVerifierProvider())  # type: ignore[arg-type]
+            reg.register(GitDiffVerifierProvider())  # type: ignore[arg-type]
             svc: CapabilityService = CapabilityService(reg)
             self._verifier_capability_service: CapabilityService = svc
             return svc
@@ -2059,7 +2139,7 @@ class RepairService:
         try:
             _verifier_svc = self._get_verifier_capability_service()
             # If registry has at least one verifier provider, use capability path
-            if _verifier_svc.registry.list():
+            if _verifier_svc.registry is not None and _verifier_svc.registry.list():
                 verifier = Verifier(capability_service=_verifier_svc)
             else:
                 raise RuntimeError("empty verifier registry")
