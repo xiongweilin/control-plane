@@ -58,3 +58,25 @@ operation, persist a `ReconciliationObservation` after every fresh observation,
 and leave `unknown` or `concurrent-change` open for recovery. The authority
 layer must not turn those classifications into deterministic verification
 failure without a separate verifier result.
+
+## Startup recovery boundary
+
+The application lifespan consumes `list_open()` before it restores any
+approval waiters. Each descriptor is passed through the Portable Runtime
+capability reconciliation path (`request_id` plus `provider_id`); the private
+provider re-observes reality and updates the descriptor. Startup never invokes
+the original Git/Docker effect again.
+
+The resulting responsibility split is intentional:
+
+- `applied` records that the effect is already present and moves the legacy
+  repair to deterministic verification/closure without replaying the effect;
+- `not-applied` remains recoverable and records `reauthorize-or-policy-retry`;
+- `in-progress`, `concurrent-change`, and `mismatch` remain `recovering` with a
+  recovery-procedure or reopen/reframe action;
+- `unknown`, `pending`, and `needs-reconciliation` remain `recovering` and are
+  recorded for later observation or escalation.
+
+Only repairs that are still `needs_approval` after descriptor reconciliation
+are registered with the in-process approval waiter. This prevents a missing
+reality observation from being mistaken for a fresh authorization request.

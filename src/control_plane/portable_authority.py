@@ -179,6 +179,46 @@ class PortableRuntimeAuthority:
         self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata})
         )
 
+    def record_reconciliation_result(
+        self,
+        repair_id: str,
+        *,
+        descriptor_id: str,
+        state: str,
+        next_action: str,
+        summary: str,
+    ) -> None:
+        """Project durable reconciliation evidence onto canonical Work/Run.
+
+        Reconciliation is not verification and therefore never closes a
+        Work/Run.  ``applied`` only clears the execution uncertainty so the
+        service can run its deterministic verifier; every other state remains
+        waiting and explicitly requires further observation or policy.
+        """
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return
+        now = utcnow()
+        unresolved = state != "applied"
+        common = {
+            "reconciliation_descriptor_id": descriptor_id,
+            "reconciliation_state": state,
+            "reconciliation_status": "required" if unresolved else "applied",
+            "reconciliation_next_action": next_action,
+            "reconciliation_required": unresolved,
+            "reconciliation_reason": summary[:4_000],
+        }
+        work_metadata = dict(work.metadata)
+        work_metadata.update(common)
+        run_metadata = dict(run.metadata)
+        run_metadata.update(common)
+        self.runtime.store.save_work(
+            work.model_copy(update={"status": "waiting", "metadata": work_metadata, "updated_at": now})
+        )
+        self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata}))
+
     def _grant(
         self,
         repair_id: str,
@@ -224,6 +264,8 @@ class PortableRuntimeAuthority:
         repair_id: str,
         *,
         decided_by: str,
+        principal_ref: str | None = None,
+        principal_source: str = "request",
         action: str = "approve",
         note: str = "",
         operation_specs: Sequence[Mapping[str, Any]] | None = None,
@@ -252,7 +294,8 @@ class PortableRuntimeAuthority:
         run = self.runtime.store.get_run(run_id)
         if work is None or run is None:
             raise RuntimeError(f"human approval requires canonical Work/Run for {repair_id}")
-        actor = f"human:{decided_by.strip()}" if decided_by.strip() else "human:unknown"
+        raw_principal = (principal_ref or decided_by).strip()
+        actor = raw_principal if ":" in raw_principal else f"human:{raw_principal or 'unknown'}"
         decision_id = f"decision_{repair_id}_human_approval"
         get_decision = getattr(self.runtime.store, "get_decision", None)
         existing_decision = get_decision(decision_id) if callable(get_decision) else None
@@ -273,6 +316,8 @@ class PortableRuntimeAuthority:
                 metadata={
                     "repair_id": repair_id,
                     "decided_by": decided_by,
+                    "principal_ref": actor,
+                    "principal_source": principal_source,
                     "note": note[:4_000],
                     "source": "control-plane.approval",
                 },
@@ -337,6 +382,8 @@ class PortableRuntimeAuthority:
                         "source": "control-plane.approval",
                         "repair_id": repair_id,
                         "decided_by": decided_by,
+                        "principal_ref": actor,
+                        "principal_source": principal_source,
                         "note": note[:4_000],
                     },
                 )
@@ -363,6 +410,8 @@ class PortableRuntimeAuthority:
                 "human_approval_decision_ref": decision.id,
                 "human_approval_action": action,
                 "human_approval_decided_by": decided_by,
+                "human_approval_principal_ref": actor,
+                "human_approval_principal_source": principal_source,
                 "human_approval_note": note[:4_000],
                 "human_approval_grant_refs": existing_refs,
                 "authorization_refs": work_authorization_refs,

@@ -37,13 +37,18 @@ from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_patt
 from .approvals import ApprovalManager
 from .budget import Budget
 from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionResult
-from .config import ControlPlaneConfig
+from .config import ControlPlaneConfig, canonical_human_principal
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
 from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
 from .personal_operations import PersonalOperationsProvider
+from .reconciliation import (
+    ReconciliationDescriptor,
+    ReconciliationDescriptorStore,
+    ReconciliationState,
+)
 from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES, RepairState, require_transition
 from .storage import Store
@@ -321,6 +326,166 @@ class RepairService:
         """Resolve the immutable source version used by the owner grant."""
 
         return await self.executor.run(["git", "rev-parse", "HEAD"], cwd=repo, timeout=60)
+
+    async def reconcile_startup_descriptors(
+        self,
+        descriptor_store: ReconciliationDescriptorStore,
+    ) -> list[dict[str, Any]]:
+        """Re-observe durable personal operations before restoring approvals.
+
+        ``RECOVERING`` is an epistemic state: startup must first ask the
+        provider/runtime what happened in reality.  It must not be routed to
+        :meth:`resume_pending_approval`, which is reserved for repairs that
+        genuinely remain in ``NEEDS_APPROVAL``.  This method never re-invokes
+        an effect.  ``APPLIED`` transitions only into deterministic repair
+        verification; all other unresolved classifications remain recoverable
+        and are recorded for a later observation or policy decision.
+        """
+
+        capabilities = getattr(self.portable_runtime, "capabilities", None)
+        outcomes: list[dict[str, Any]] = []
+        for descriptor in descriptor_store.list_open():
+            repair_id = self._reconciliation_repair_id(descriptor)
+            result: CapabilityResult | None = None
+            try:
+                if capabilities is not None:
+                    result = await capabilities.reconcile(
+                        descriptor.request_id,
+                        descriptor.provider_id,
+                    )
+                refreshed = descriptor_store.get(descriptor.id) or descriptor
+                state = refreshed.state
+                message = (
+                    refreshed.last_observation.message
+                    if refreshed.last_observation is not None
+                    else (result.message if result is not None else "provider reconciliation unavailable")
+                ) or "provider reconciliation returned no message"
+                action = self._reconciliation_next_action(state)
+                if repair_id is not None:
+                    self._record_startup_reconciliation(
+                        repair_id,
+                        refreshed,
+                        action=action,
+                        message=message,
+                    )
+                    if state is ReconciliationState.APPLIED:
+                        row = self.store.get_repair(repair_id)
+                        if row is not None and row["status"] == RepairState.RECOVERING.value:
+                            # Verification may close the repair; it never
+                            # repeats the already-observed personal effect.
+                            await self._finish_resumed_repair(repair_id)
+                title = (
+                    "恢复操作已确认"
+                    if state is ReconciliationState.APPLIED
+                    else "恢复操作仍待确认"
+                )
+                await self._notify(
+                    "info" if state is ReconciliationState.APPLIED else "warning",
+                    title,
+                    f"descriptor={descriptor.id}\n"
+                    f"request_id={descriptor.request_id}\n"
+                    f"state={state.value}\n"
+                    f"next_action={action}\n{message}"[:4_000],
+                )
+                outcomes.append(
+                    {
+                        "descriptor_id": descriptor.id,
+                        "request_id": descriptor.request_id,
+                        "repair_id": repair_id,
+                        "state": state.value,
+                        "next_action": action,
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("startup reconciliation failed: %s", descriptor.id)
+                if repair_id is not None:
+                    # Keep the repair in RECOVERING and preserve the
+                    # descriptor for a later bounded observation.  A provider
+                    # transport error is not evidence that the effect failed.
+                    self._record_startup_reconciliation(
+                        repair_id,
+                        descriptor,
+                        action="observe-or-escalate",
+                        message=f"startup reconciliation unavailable: {exc}",
+                    )
+                outcomes.append(
+                    {
+                        "descriptor_id": descriptor.id,
+                        "request_id": descriptor.request_id,
+                        "repair_id": repair_id,
+                        "state": ReconciliationState.UNKNOWN.value,
+                        "next_action": "observe-or-escalate",
+                        "error": str(exc)[:2_000],
+                    }
+                )
+        return outcomes
+
+    @staticmethod
+    def _reconciliation_repair_id(descriptor: ReconciliationDescriptor) -> str | None:
+        """Resolve the legacy repair id from a durable request snapshot."""
+
+        snapshot = descriptor.request_snapshot
+        for key in ("legacy_repair_id", "repair_id"):
+            value = snapshot.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for key in ("work_id", "run_id"):
+            value = snapshot.get(key)
+            if isinstance(value, str) and value.startswith(("work_legacy_", "run_legacy_")):
+                return value.split("_legacy_", 1)[1]
+        return None
+
+    @staticmethod
+    def _reconciliation_next_action(state: ReconciliationState) -> str:
+        return {
+            ReconciliationState.APPLIED: "deterministic-verification",
+            ReconciliationState.NOT_APPLIED: "reauthorize-or-policy-retry",
+            ReconciliationState.IN_PROGRESS: "recovery-procedure",
+            ReconciliationState.CONCURRENT_CHANGE: "reopen-and-reframe",
+            ReconciliationState.MISMATCH: "reopen-and-reframe",
+            ReconciliationState.UNKNOWN: "observe-or-escalate",
+            ReconciliationState.PENDING: "observe-or-escalate",
+            ReconciliationState.NEEDS_RECONCILIATION: "observe-or-escalate",
+        }[state]
+
+    def _record_startup_reconciliation(
+        self,
+        repair_id: str,
+        descriptor: ReconciliationDescriptor,
+        *,
+        action: str,
+        message: str,
+    ) -> None:
+        """Project reconciliation evidence without replaying the operation."""
+
+        row = self.store.get_repair(repair_id)
+        if row is None:
+            return
+        state = descriptor.state
+        # A durable descriptor takes precedence over the approval waiter.  A
+        # descriptor means an effect was already admitted; even NOT_APPLIED
+        # needs a policy/authorization decision rather than a blind waiter.
+        target_status = (
+            RepairState.RECOVERING.value
+            if state is not ReconciliationState.APPLIED
+            else RepairState.RECOVERING.value
+        )
+        self.store.set_repair_status(
+            repair_id,
+            target_status,
+            error=message[:2_000],
+            recovery_error=message[:2_000],
+        )
+        if self.portable_authority is not None:
+            self.portable_authority.record_reconciliation_result(
+                repair_id,
+                descriptor_id=descriptor.id,
+                state=state.value,
+                next_action=action,
+                summary=message,
+            )
 
     async def _invoke_personal_operation(
         self,
@@ -1970,6 +2135,8 @@ class RepairService:
             await self._record_canonical_human_approval(
                 repair_id,
                 decided_by=decided_by,
+                principal_ref=self.config.owner_principal,
+                principal_source="control-plane-api-key",
                 action="approve",
                 note=note,
             )
@@ -1978,6 +2145,8 @@ class RepairService:
             await self._record_canonical_human_approval(
                 repair_id,
                 decided_by=decided_by,
+                principal_ref=self.config.owner_principal,
+                principal_source="control-plane-api-key",
                 action="rollback",
                 note=note,
             )
@@ -2089,6 +2258,8 @@ class RepairService:
         repair_id: str,
         *,
         decided_by: str,
+        principal_ref: str | None = None,
+        principal_source: str = "request",
         action: str,
         note: str,
     ) -> None:
@@ -2111,6 +2282,10 @@ class RepairService:
         self.portable_authority.record_human_approval(
             repair_id,
             decided_by=decided_by,
+            principal_ref=canonical_human_principal(
+                principal_ref or self.config.owner_principal
+            ),
+            principal_source=principal_source,
             action=action,
             note=note,
             operation_specs=specs,
@@ -2477,7 +2652,7 @@ class RepairService:
             reg2 = ProviderRegistry()
             svc2: CapabilityService = CapabilityService(reg2)
             self._verifier_capability_service = svc2
-            return svc
+            return svc2
 
     async def _verify(
         self,

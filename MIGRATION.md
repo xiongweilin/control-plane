@@ -84,6 +84,9 @@ tree in these semantic files (verified against the public checkout on
 - `portable_runtime/core/qualification.py`, `interfaces/store.py`,
   `stores/memory.py`, `stores/sqlite.py`: small typed-record/store compatibility
   changes required by the above semantics;
+- `portable_runtime/core/invocation.py`: preserve a caller's stricter
+  procedure-profile requirement instead of replacing it with the contract
+  minimum during request construction;
 - `portable_runtime/providers/codex/manifest.json`: provider manifest version
   metadata.
 

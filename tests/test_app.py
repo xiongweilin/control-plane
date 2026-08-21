@@ -118,7 +118,9 @@ def test_alertmanager_accepts_bearer_and_rejects_query_secret(tmp_path) -> None:
 
 
 def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
-    app = create_app(_config(tmp_path))
+    app = create_app(
+        replace(_config(tmp_path), owner_principal="human:configured-owner")
+    )
     store: Store = app.state.store
     store.create_repair("repair-1", "HighCPU|dify|*", "{}")
     store.set_repair_status("repair-1", "closed", result="verified", finished_at=2**31)
@@ -164,12 +166,19 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
     assert store.get_candidate("cand-1")["status"] == "official"
     portable_store = app.state.portable_runtime.store
     assert portable_store.list_authorizations()
+    assert all(
+        grant.principal_ref == "human:configured-owner"
+        for grant in portable_store.list_authorizations()
+    )
     assert portable_store.export_state()["decision"]
     projection = portable_store.get_knowledge_projection("knowledge_candidate_cand-1")
     assert projection is not None
     assert projection.lifecycle_status == "official"
     assert projection.authorization_refs
     assert projection.epistemic_judgment_refs
+    approval = store.get_approval("candidate", "cand-1", "promote")
+    assert approval is not None
+    assert approval["decided_by"] == "feishu"
 
 
 def test_pause_resume(tmp_path) -> None:

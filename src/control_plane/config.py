@@ -11,6 +11,20 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def canonical_human_principal(value: str, default: str = "human:owner") -> str:
+    """Return a stable human principal reference for authenticated actions.
+
+    Configuration may use the concise ``owner`` spelling for convenience, but
+    canonical records always carry the typed ``human:`` namespace.  Empty or
+    whitespace-only values intentionally fall back to the personal owner.
+    """
+
+    raw = value.strip() or default.strip()
+    if raw.startswith("human:"):
+        return raw
+    return f"human:{raw}"
+
+
 class ConfigurationError(RuntimeError):
     pass
 
@@ -71,6 +85,9 @@ class ControlPlaneConfig:
     host: str = "127.0.0.1"
     port: int = 18083
     api_key: str = ""
+    # The control-plane API key authenticates the configured personal owner.
+    # Request-body actor labels remain display/audit metadata only.
+    owner_principal: str = "human:owner"
     run_id: str = ""
 
     gateway_base_url: str = "http://127.0.0.1:4001/v1"
@@ -233,6 +250,7 @@ class ControlPlaneConfig:
         notifications = section("notifications")
         timeouts = section("timeouts")
         candidates = section("candidates")
+        auth = section("auth")
 
         allowed_projects = projects.get("allowed_auto")
         project_dirs = projects.get("project_dirs")
@@ -246,11 +264,20 @@ class ControlPlaneConfig:
             )
         gateway_base_url = str(agent.get("gateway_base_url", base.gateway_base_url))
         _validate_gateway_network(gateway_base_url)
+        owner_principal = canonical_human_principal(
+            str(
+                os.getenv(
+                    "CONTROL_PLANE_OWNER_PRINCIPAL",
+                    auth.get("owner_principal", base.owner_principal),
+                )
+            )
+        )
 
         return cls(
             host=str(server.get("host", base.host)),
             port=int(server.get("port", base.port)),
             api_key=api_key,
+            owner_principal=owner_principal,
             gateway_base_url=gateway_base_url,
             model=str(agent.get("model", base.model)),
             model_preflight_enabled=bool(
