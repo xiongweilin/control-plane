@@ -20,6 +20,7 @@ from portable_runtime.core.models import Checkpoint, Decision, Run, Work, utcnow
 from portable_runtime.core.runtime import Runtime
 from portable_runtime.records.authorization import AuthorizationGrant
 from portable_runtime.records.models import BaseRecord
+from portable_runtime.records.relations import RecordRelation
 from portable_runtime.stores.migration import dual_write_repair
 
 VersionResolver = Callable[[str], Awaitable[str]]
@@ -173,6 +174,37 @@ class PortableRuntimeAuthority:
                 },
             )
         )
+        evidence = self._record(
+            BaseRecord(
+                id=f"record_{repair_id}_{token}_evidence",
+                record_type="EvidenceArtifact",
+                lifecycle_status="current",
+                metadata={
+                    "qualification_kind": "evidence",
+                    "target_refs": [work.id],
+                    "subject_version_refs": [version_ref],
+                    "source": "git-version-resolution",
+                    "summary": "candidate workspace resolved to the requested git version",
+                },
+            )
+        )
+        relation_id = f"relation_{repair_id}_{token}_evidence"
+        get_relation = getattr(self.runtime.store, "get_relation", None)
+        relation = get_relation(relation_id) if callable(get_relation) else None
+        if not isinstance(relation, RecordRelation):
+            relation = RecordRelation(
+                id=relation_id,
+                relation_type="validated-under",
+                subject_ref=evidence.id,
+                object_ref=baseline.id,
+                scope={"work_id": work.id, "subject_version_ref": version_ref},
+                created_by=self.actor_ref,
+                metadata={"qualification_kind": "relation"},
+            )
+            save_relation = getattr(self.runtime.store, "save_relation", None)
+            if not callable(save_relation):
+                raise RuntimeError("portable authority store cannot persist qualification relation")
+            save_relation(relation)
         decision_id = f"decision_{repair_id}_{token}"
         decision = Decision(
             id=decision_id,
@@ -203,6 +235,10 @@ class PortableRuntimeAuthority:
         procedure_refs = [
             {"id": failure_stop.id, "kind": "failure-stop"},
             {"id": baseline.id, "kind": "verification"},
+            {"id": evidence.id, "kind": "evidence"},
+            {"id": relation.id, "kind": "relation"},
+            {"id": decision.id, "kind": "decision"},
+            {"id": checkpoint.id, "kind": "checkpoint"},
         ]
         metadata = dict(work.metadata)
         metadata.update(
@@ -213,8 +249,9 @@ class PortableRuntimeAuthority:
                 "resource_scope": resource,
                 "subject_version_refs": [version_ref],
                 "actor_ref": self.actor_ref,
-                "procedure_profile": "minimal",
-                "procedure_profile_source": "personal-owner-policy",
+                "candidate": True,
+                "procedure_profile": "standard",
+                "procedure_profile_source": "code.edit-contract-minimum",
                 "procedure_proof_refs": procedure_refs,
                 "authorization_refs": [{"id": grant.id, "kind": "authorization"}],
                 "authorization_grant_id": grant.id,
@@ -230,7 +267,7 @@ class PortableRuntimeAuthority:
                 "actor_ref": self.actor_ref,
                 "resource_ref": resource,
                 "subject_version_refs": [version_ref],
-                "procedure_profile": "minimal",
+                "procedure_profile": "standard",
                 "procedure_proof_refs": procedure_refs,
                 "authorization_refs": [{"id": grant.id, "kind": "authorization"}],
                 "authorization_grant_id": grant.id,
@@ -343,7 +380,7 @@ class PortableRuntimeAuthority:
             timeout_seconds=timeout_seconds,
             metadata={
                 "portable_authority": "personal-runtime",
-                "procedure_profile": "minimal",
+                "procedure_profile": "standard",
                 "resource_ref": resource,
                 "subject_version_refs": [version_ref],
                 "actor_ref": self.actor_ref,

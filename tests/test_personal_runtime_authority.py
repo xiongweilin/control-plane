@@ -13,8 +13,12 @@ from control_plane.portable_authority import PortableRuntimeAuthority
 from control_plane.service import RepairService
 from control_plane.storage import Store
 from portable_runtime.core.boundary import RealityBoundary
-from portable_runtime.core.capabilities import CapabilityResult, ProviderDescriptor, ProviderHealth
-from portable_runtime.core.capability_contract import CapabilityContractRegistry, EffectContractMissing
+from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult, ProviderDescriptor, ProviderHealth
+from portable_runtime.core.capability_contract import (
+    CapabilityContractRegistry,
+    EffectContractMissing,
+    compute_effective_procedure_profile,
+)
 from portable_runtime.core.registry import ProviderRegistry
 from portable_runtime.core.runtime import Runtime
 from portable_runtime.stores.memory import InMemoryStateStore
@@ -95,6 +99,70 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert len(grants) == 1
     assert grants[0].grantee_ref == "personal-agent"
     assert grants[0].subject_version_refs == ["git:abc123"]
+
+
+def test_procedure_profile_minimum_is_monotonic() -> None:
+    assert compute_effective_procedure_profile("standard", "minimal") == "standard"
+    assert compute_effective_procedure_profile("minimal", "enhanced") == "enhanced"
+    with pytest.raises(ValueError):
+        compute_effective_procedure_profile("standard", "unknown")
+
+
+@pytest.mark.asyncio
+async def test_personal_authority_cannot_downgrade_code_edit_procedure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStateStore()
+    registry = ProviderRegistry()
+    provider = FakeCodexProvider()
+    registry.register(provider)
+    runtime = Runtime(store=store, registry=registry)
+
+    async def resolve_version(repo: str) -> str:
+        return "abc123"
+
+    authority = PortableRuntimeAuthority(runtime, version_resolver=resolve_version)
+    work, run, resource, version_ref = await authority.prepare_code_edit(
+        repair_id="repair-profile-floor",
+        repo=str(tmp_path),
+        prompt="make the local repair",
+    )
+
+    observed_profiles: list[str] = []
+    from portable_runtime.workflows import procedure
+
+    original_check = procedure.check_procedure
+
+    def capture_profile(work_value, run_value, profile, **kwargs):
+        observed_profiles.append(str(profile))
+        return original_check(work_value, run_value, profile, **kwargs)
+
+    monkeypatch.setattr(procedure, "check_procedure", capture_profile)
+    request = CapabilityRequest(
+        id="req-profile-floor",
+        capability="code.edit",
+        work_id=work.id,
+        run_id=run.id,
+        instruction="make the local repair",
+        parameters={"repo": str(tmp_path)},
+        resource_ref=resource,
+        subject_version_refs=[version_ref],
+        actor_ref="personal-agent",
+        effect_class="write-local",
+        metadata={
+            "portable_authority": "personal-runtime",
+            "procedure_profile": "minimal",
+            "resource_ref": resource,
+            "subject_version_refs": [version_ref],
+            "actor_ref": "personal-agent",
+        },
+    )
+
+    result = await runtime.capabilities.invoke(request)
+
+    assert result.status == "succeeded", result.model_dump()
+    assert observed_profiles and observed_profiles[0] == "standard"
 
 
 def test_unknown_code_capability_is_not_read_by_default() -> None:

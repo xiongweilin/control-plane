@@ -16,6 +16,12 @@ is vendored from `ratiolin/portable-runtime`.
 | Portable Runtime pin | `6789a96` |
 | Personal profile | `P1.x` |
 
+`src/portable_runtime` follows the public pin as its base. This private profile
+also carries documented, tested hardening deltas for capability-scoped Codex
+sandbox selection and monotonic procedure-profile floors; do not treat the
+vendored tree as zero-drift until those semantics are upstreamed and a new pin
+is recorded.
+
 [![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 
 

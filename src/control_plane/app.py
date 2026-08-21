@@ -514,23 +514,18 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 accepted=False,
                 message="Candidate source repair is not closed and verified",
             )
-        store.add_approval(
-            f"ap-{uuid.uuid4().hex[:12]}",
-            "candidate",
-            candidate_id,
-            "promote",
-            body.decided_by,
-            body.note,
-        )
         # Mirror the human approval into the portable canonical records.  The
-        # legacy candidate table remains a compatibility projection, but an
-        # official promotion now has a typed Decision + AuthorizationGrant
-        # that is scoped to this candidate version and resource.
+        # legacy candidate table remains a compatibility projection. The
+        # portable knowledge projection becomes official first; the legacy
+        # playbook row is updated only after that canonical transition succeeds.
         if _PORTABLE_AVAILABLE and portable_runtime is not None:
             from portable_runtime.records.authorization import record_human_approval
+            from portable_runtime.records.knowledge import KnowledgeProjection, promote_to_official
+            from portable_runtime.records.models import BaseRecord
+            from portable_runtime.records.relations import RecordRelation
 
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
-            _, grant = record_human_approval(
+            decision, grant = record_human_approval(
                 portable_runtime.store,
                 principal_ref=f"human:{body.decided_by}",
                 grantee_ref=f"control-plane:candidate:{candidate_id}",
@@ -546,6 +541,93 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     accepted=False,
                     message="Portable authorization record was not persisted",
                 )
+            record_getter = getattr(portable_runtime.store, "get_record", None)
+            evidence_id = f"evidence_candidate_{candidate_id}"
+            verification_id = f"verification_candidate_{candidate_id}"
+            evidence = record_getter(evidence_id) if callable(record_getter) else None
+            if evidence is None:
+                evidence = BaseRecord(
+                    id=evidence_id,
+                    record_type="EvidenceArtifact",
+                    lifecycle_status="current",
+                    metadata={
+                        "qualification_kind": "evidence",
+                        "candidate_id": candidate_id,
+                        "source_repair_id": source_repair_id,
+                        "verifier_ids": str(candidate["verifier_ids"]),
+                    },
+                )
+                portable_runtime.store.save_record(evidence)
+            verification = record_getter(verification_id) if callable(record_getter) else None
+            if verification is None:
+                verification = BaseRecord(
+                    id=verification_id,
+                    record_type="Assertion",
+                    lifecycle_status="current",
+                    epistemic_status="supported",
+                    metadata={
+                        "qualification_kind": "verification",
+                        "result": "pass",
+                        "candidate_id": candidate_id,
+                        "source_repair_id": source_repair_id,
+                    },
+                )
+                portable_runtime.store.save_record(verification)
+            relation_id = f"relation_candidate_{candidate_id}"
+            relation_getter = getattr(portable_runtime.store, "get_relation", None)
+            relation = relation_getter(relation_id) if callable(relation_getter) else None
+            if relation is None:
+                relation = RecordRelation(
+                    id=relation_id,
+                    relation_type="validated-under",
+                    subject_ref=evidence.id,
+                    object_ref=verification.id,
+                    metadata={"candidate_id": candidate_id},
+                )
+                portable_runtime.store.save_relation(relation)
+            projection_id = f"knowledge_candidate_{candidate_id}"
+            projection_getter = getattr(portable_runtime.store, "get_knowledge_projection", None)
+            projection = projection_getter(projection_id) if callable(projection_getter) else None
+            if projection is None:
+                projection = KnowledgeProjection(
+                    id=projection_id,
+                    kind="repair-playbook",
+                    title=str(candidate["pattern"]),
+                    source_work_refs=[f"work_legacy_{source_repair_id}"],
+                    current_assertion_refs=[verification.id],
+                    evidence_summary_refs=[evidence.id, relation.id],
+                    validity_scope={
+                        "pattern": str(candidate["pattern"]),
+                        "scope": str(candidate["scope"]),
+                    },
+                    environment_bindings={"candidate_version": version_ref},
+                    reopen_conditions=[str(candidate["reopen_conditions"] or "")],
+                    epistemic_judgment_refs=[decision.id],
+                    authorization_refs=[grant.id],
+                    scope_version_refs=[version_ref],
+                    lifecycle_status="candidate",
+                    metadata={
+                        "legacy_candidate_id": candidate_id,
+                        "source_repair_id": source_repair_id,
+                        "tool_sequence": str(candidate["tool_sequence"]),
+                    },
+                )
+            try:
+                official = promote_to_official(projection)
+                portable_runtime.store.save_knowledge_projection(official)
+            except ValueError as exc:
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message=f"Portable knowledge promotion blocked: {exc}",
+                )
+        store.add_approval(
+            f"ap-{uuid.uuid4().hex[:12]}",
+            "candidate",
+            candidate_id,
+            "promote",
+            body.decided_by,
+            body.note,
+        )
         store.promote_candidate(candidate_id)
         await notifier.notify("info", "候选经验已晋升为 official playbook", f"candidate_id={candidate_id}")
         return ApprovalDecisionResponse(accepted=True, message="promoted")

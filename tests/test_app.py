@@ -146,6 +146,11 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
     portable_store = app.state.portable_runtime.store
     assert portable_store.list_authorizations()
     assert portable_store.export_state()["decision"]
+    projection = portable_store.get_knowledge_projection("knowledge_candidate_cand-1")
+    assert projection is not None
+    assert projection.lifecycle_status == "official"
+    assert projection.authorization_refs
+    assert projection.epistemic_judgment_refs
 
 
 def test_pause_resume(tmp_path) -> None:
