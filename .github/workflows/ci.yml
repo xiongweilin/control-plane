@@ -39,7 +39,7 @@ jobs:
         run: uv run python scripts/check_portable_core_imports.py
 
       - name: Pytest (portable suite)
-        run: uv run pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)"
+        run: uv run python -m pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)"
 
       - name: Coverage gate
         run: uv run python scripts/check_coverage.py --pytest-args "-k 'not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)'"
@@ -62,7 +62,7 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Pytest (Windows-only tests)
-        run: uv run pytest -k "test_env_scan_all_healthy or test_terminate_process_tree_kills_children"
+        run: uv run python -m pytest -k "test_env_scan_all_healthy or test_terminate_process_tree_kills_children"
 
   sonarcloud:
     runs-on: ubuntu-latest
@@ -80,7 +80,7 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --locked --extra dev
       - name: Generate coverage for SonarCloud
-        run: uv run pytest --cov=src --cov-report=xml --cov-report=term -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)" --junitxml=pytest-junit.xml
+        run: uv run python -m pytest --cov=src --cov-report=xml --cov-report=term -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)" --junitxml=pytest-junit.xml
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:

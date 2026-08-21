@@ -24,6 +24,33 @@ from portable_runtime.stores.filesystem import FilesystemArtifactStore
 logger = logging.getLogger(__name__)
 
 
+# The capability contract describes the requested effect; this map makes the
+# corresponding Codex process sandbox an independent, physical guard.  In
+# particular, ``reason.generate`` must never inherit the write-capable sandbox
+# merely because the same provider also supports ``code.edit``.
+CODEX_SANDBOX_BY_CAPABILITY: dict[str, str] = {
+    "reason.generate": "read-only",
+    "code.read": "read-only",
+    "git.diff": "read-only",
+    "code.edit": "workspace-write",
+    "code.test": "workspace-write",
+    "shell.exec": "workspace-write",
+}
+_ALLOWED_CODEX_SANDBOXES = frozenset({"read-only", "workspace-write"})
+
+
+def sandbox_for_capability(capability: str) -> str:
+    """Return the least-privilege Codex sandbox for a capability.
+
+    Unknown capabilities fail closed to ``read-only``.  ``danger-full-access``
+    is intentionally not an accepted profile value for the portable provider;
+    real remote/deployment effects belong to a separate Provider behind the
+    Runtime RealityBoundary.
+    """
+
+    return CODEX_SANDBOX_BY_CAPABILITY.get(capability, "read-only")
+
+
 def _resolve_cli(explicit: str | Path | None) -> Path:
     if explicit:
         return Path(explicit)
@@ -62,6 +89,7 @@ class CodexProvider:
         executor: ProcessExecutor | None = None,
         artifact_store: FilesystemArtifactStore | None = None,
         gateway_base_url: str | None = None,
+        sandbox_by_capability: dict[str, str] | None = None,
     ) -> None:
         self._cli = _resolve_cli(cli)
         self._model = model
@@ -70,6 +98,15 @@ class CodexProvider:
         self._executor: ProcessExecutor = executor or PortableSubprocessExecutor()
         self._artifact_store = artifact_store
         self._gateway_base_url = gateway_base_url
+        self._sandbox_by_capability = dict(CODEX_SANDBOX_BY_CAPABILITY)
+        if sandbox_by_capability:
+            for capability, sandbox in sandbox_by_capability.items():
+                if sandbox not in _ALLOWED_CODEX_SANDBOXES:
+                    raise ValueError(
+                        f"unsupported Codex sandbox {sandbox!r} for {capability!r}; "
+                        f"allowed={sorted(_ALLOWED_CODEX_SANDBOXES)}"
+                    )
+                self._sandbox_by_capability[capability] = sandbox
         self._descriptor = ProviderDescriptor(
             id=provider_id,
             name="Codex Provider",
@@ -148,7 +185,8 @@ class CodexProvider:
             session_dir.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: S110
             pass  # noqa: S110
-        argv = [str(self._cli), "exec", "--model", model, "--sandbox", "danger-full-access", "--skip-git-repo-check", "--json", prompt]  # noqa: E501
+        sandbox = self._sandbox_by_capability.get(request.capability, "read-only")
+        argv = [str(self._cli), "exec", "--model", model, "--sandbox", sandbox, "--skip-git-repo-check", "--json", prompt]  # noqa: E501
         # Normalize Windows path for cwd (same as control_plane.codex_runner.repo_path_to_windows)
         import os
 
@@ -167,7 +205,7 @@ class CodexProvider:
                 provider_id=self.descriptor.id,
                 status="failed",
                 error={"type": "timeout", "message": "codex session timed out", "stderr": result.stderr[-2000:]},
-                metadata={"duration_ms": result.duration_ms},
+                metadata={"duration_ms": result.duration_ms, "sandbox": sandbox, "capability": request.capability},
             )
         # Persist transcript as artifact if available
         artifact_refs: list[str] = []
@@ -201,7 +239,12 @@ class CodexProvider:
                 error={"type": "codex_exit", "exit_code": result.exit_code, "stderr": result.stderr[-2000:]},
                 output_artifact_refs=artifact_refs,
                 message=result.stdout[:20000] if result.stdout else result.stderr[:5000],
-                metadata={"duration_ms": result.duration_ms, "exit_code": result.exit_code},
+                metadata={
+                    "duration_ms": result.duration_ms,
+                    "exit_code": result.exit_code,
+                    "sandbox": sandbox,
+                    "capability": request.capability,
+                },
             )
         return CapabilityResult(
             request_id=request.id,
@@ -209,7 +252,12 @@ class CodexProvider:
             status="succeeded",
             output_artifact_refs=artifact_refs,
             message=result.stdout[:20000],
-            metadata={"duration_ms": result.duration_ms, "model": model},
+            metadata={
+                "duration_ms": result.duration_ms,
+                "model": model,
+                "sandbox": sandbox,
+                "capability": request.capability,
+            },
         )
 
     async def cancel(self, request_id: str) -> None:

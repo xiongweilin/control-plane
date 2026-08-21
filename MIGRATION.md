@@ -64,7 +64,7 @@ Comment in `pyproject.toml` tracks this; do not change packages until §64 passe
 - `ruff check` / `mypy` / `pytest` / coverage baseline must stay green during transition.
 - No push of private secrets to public lib; scan `control_plane.toml` and `data/` before publish.
 
-## 2026-08-21: vendored portable_runtime synced to upstream 4de0284
+## 2026-08-21: initial vendored portable_runtime sync to upstream 4de0284
 
 - `src/portable_runtime` replicated byte-for-byte from `ratiolin/portable-runtime` HEAD `4de0284` (strict-enforcement P1/P2 closure; 92 tracked files, zero local drift).
 - The legacy `control_plane` package stays the compatibility profile (additive seam per ADR-0013); no vendored portable file was locally patched.
@@ -72,3 +72,11 @@ Comment in `pyproject.toml` tracks this; do not change packages until §64 passe
 - `control_plane.tools` gained `check_container_status` / `check_logs` compat helpers for portable verifier providers' fallback imports.
 - Tool config aligned with upstream in `pyproject.toml` (ruff per-file-ignores + mypy overrides for the vendored tree).
 - Gates: `ruff check .`, `mypy src`, `scripts/check_portable_core_imports.py`, `pytest` 231 passed, coverage 75% (baseline 74.0). Service restarted 2026-08-21 11:41 local, run `run-1787283657-7281aae8`.
+
+## 2026-08-21: strict runtime sync and Codex sandbox hardening
+
+- `src/portable_runtime` was synchronized from `ratiolin/portable-runtime` HEAD `6789a96` (94 tracked files), including strict Boundary stages/fencing, canonical graph validation, authorization compatibility, reliability policy separation and version-axis cleanup.
+- The personal Codex adapter adds a physical sandbox ceiling: `reason.generate` / `code.read` / `git.diff` use `read-only`, candidate edit/test capabilities use `workspace-write`, and unknown capabilities fail closed. `danger-full-access` is rejected by the personal profile (ADR-0014).
+- Repair requests are labeled `code.edit` instead of `reason.generate`, preserving the distinction between read-only reasoning and candidate workspace changes.
+- Candidate promotion now requires a closed source repair and mirrors the Feishu decision as a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource before the legacy playbook row is promoted.
+- Gates: `ruff check .`, `mypy src`, `scripts/check_portable_core_imports.py`, `pytest` 480 passed. The remaining operational cutover is intentionally not claimed by this source sync.

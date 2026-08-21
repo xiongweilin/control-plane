@@ -44,7 +44,10 @@ def main() -> int:
     if baseline is None:
         baseline = float(args.baseline_file.read_text(encoding="ascii").strip())
 
-    command = ["uv", "run", "pytest", "--cov=control_plane", "--cov-report=term", "-q"]
+    # The gate is already launched through the project's environment (the CI
+    # workflow uses ``uv run python``). Reusing that interpreter avoids a
+    # nested uv trampoline, which is not reliable on Windows.
+    command = [sys.executable, "-m", "pytest", "--cov=control_plane", "--cov-report=term", "-q"]
     if args.pytest_args:
         command.extend(shlex.split(args.pytest_args))
     proc = subprocess.run(  # noqa: S603 - fixed command line; args come from the caller's CLI

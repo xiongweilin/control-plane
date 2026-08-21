@@ -1,6 +1,22 @@
 # control-plane
 
-[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=metratio_control-plane&metric=coverage)](https://sonarcloud.io/summary/new_code?id=metratio_control-plane) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
+Personal Platform Runtime Profile for `portable-runtime`. The repository
+keeps the Windows/Feishu/Prometheus integration and the legacy HTTP/CLI
+compatibility surface, while the portable Work/Run/Provider/Workflow runtime
+is vendored from `ratiolin/portable-runtime`.
+
+## Runtime identity
+
+| Axis | Value |
+| --- | --- |
+| Framework semantics | `1.0.0` |
+| Control Plane schema | `official-1.0.0` |
+| Portable Runtime milestone | `R2.0` |
+| Runtime protocol | `2.0` |
+| Portable Runtime pin | `6789a96` |
+| Personal profile | `P1.x` |
+
+[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 
 
 ## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)
@@ -43,11 +59,13 @@ See [docs/architecture.md](docs/architecture.md),
 ---
 
 > [!WARNING]
-> Legacy control_plane package is deprecated. Portable Runtime (`portable_runtime`) is now the primary runtime. This package will be archived after §64 replacement test passes. New code must use `portable_runtime`.
+> The `control_plane` package is a compatibility/deployment surface, not a second semantic runtime. Portable Runtime (`portable_runtime`) is the primary runtime for new Work/Run flows; the legacy package remains until the operational cutover gate is complete.
 
-## Personal Platform Profile (legacy control plane with Codex/Feishu/Prometheus/Docker on Windows)
+## Personal Platform Profile (Windows/Feishu/Prometheus/Docker integration)
 
-The existing `control_plane` package below remains the legacy personal-platform profile while parity tests are added incrementally. Only this section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
+The `control_plane` package below remains the compatibility profile while the
+portable runtime handles canonical Work/Run state. Only this section requires
+Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
 
 ## Architecture
 
@@ -55,7 +73,7 @@ The existing `control_plane` package below remains the legacy personal-platform 
 Prometheus → Alertmanager
               └─ webhook → control-plane :18083 (Windows resident)
                               ├─ fingerprint dedup / cooldown / budget
-                              ├─ codex agent session (full tool environment)
+                              ├─ codex agent session (capability-scoped sandbox)
                               ├─ independent verifier + auto rollback
                               ├─ SQLite + data/evidence/*.json
                               └─ Feishu notification / approval (feishu-dify-gateway extended commands)
@@ -74,9 +92,11 @@ uv run python -m control_plane
 
 ## Permission matrix
 
-- The Codex agent runs with the full tool environment inside the designated project repository, constrained by the task-prompt hard constraints, the Codex global AGENTS.md (`~/.codex/AGENTS.md`), and the control plane's independent verification.
+- Codex capability requests use a physical sandbox ceiling: `reason.generate`, `code.read` and `git.diff` run `read-only`; `code.edit`, `code.test` and `shell.exec` run `workspace-write`. Unknown capabilities fail closed to `read-only`; `danger-full-access` is not a personal-profile sandbox.
+- A repair session requests `code.edit` explicitly and is still constrained to the designated candidate workspace, the task-prompt hard constraints, the Codex global AGENTS.md (`~/.codex/AGENTS.md`), and the control plane's independent verification.
+- Remote/deployment effects are not delegated to the Codex session. They require a separate Provider behind Portable Runtime's RealityBoundary and its authorization/reliability checks.
 - Automatic operations (reversible): the agent may run `restart` / `up -d` on allowlisted compose projects, read-only diagnostics, cleanup, and health waits; the control plane independently verifies container state and git state afterward.
-- Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval merges to main and pushes. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
+- Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval merges to main and pushes. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
 - Denied by default: file writes (except candidate branches), dependency changes, database writes, cloud writes, credential access, data deletion, and modifying verifiers/alert rules/permissions.
 
 ## Agent trigger notes
@@ -84,11 +104,11 @@ uv run python -m control_plane
 The control plane starts the Codex CLI to run a full agent session. Executable resolution priority: explicit `[agent] codex_cli` config > `codex` on PATH (scoop shim) > bare `codex`. Before startup / each session it runs `codex --version` preflight: a missing CLI or failed probe is rejected with a clear error, and the last recorded version change is written to `codex:cli_version` and exposed through the `control_plane_codex_cli_info` metric.
 
 ```text
-codex exec --model <model> --sandbox danger-full-access --skip-git-repo-check --json <task prompt>
+codex exec --model <model> --sandbox <read-only|workspace-write> --skip-git-repo-check --json <task prompt>
   # cwd = project Windows path; transcript on stdout, exit code from codex
 ```
 
-The working directory uses native Windows paths (WSL was retired on 2026-08-07). The control plane is the authority boundary: it injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback; the `danger-full-access` sandbox only lets the session execute automatically inside the control plane, not bypass the control plane's own gates.
+The working directory uses native Windows paths (WSL was retired on 2026-08-07). The control plane injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback. The Codex sandbox is a separate physical ceiling, not a substitute for Portable Runtime authorization or RealityBoundary governance.
 
 ## Feishu commands
 

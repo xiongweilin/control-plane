@@ -1,7 +1,8 @@
-# Profile: personal-platform (legacy Windows)
+# Profile: personal-platform (Windows)
 
-This profile is the legacy personal-platform deployment that preserves the
-pre-portable behavior (Codex / Feishu / Prometheus / Alertmanager / Docker).
+This profile is the Windows personal-platform deployment that preserves the
+Codex / Feishu / Prometheus / Alertmanager / Docker integrations while using
+Portable Runtime for canonical Work/Run orchestration.
 
 It is the reference deployment that proves the portable Runtime can load the
 same Work/Run/Artifact/Evidence/Knowledge with a different provider set.
@@ -16,7 +17,12 @@ both refer to the same set:
 - FeishuTrigger + FeishuHumanProvider + FeishuNotificationProvider
 - SQLiteStateStore + FilesystemArtifactStore
 - DailyScanWorkflow + KnowledgeConsolidationWorkflow
-- legacy policies
+- personal policy adapters and legacy compatibility APIs
+
+Codex is capability-scoped: reasoning/read/diff capabilities use a
+`read-only` sandbox, candidate edits/tests use `workspace-write`, and unknown
+capabilities fail closed. Remote or deployment effects must use an independent
+Provider governed by Portable Runtime's RealityBoundary.
 
 For the cross-platform counterpart with no Windows/Docker dependency, see
 `deployments/portable-local/` and `docs/deployment-local.md`.
