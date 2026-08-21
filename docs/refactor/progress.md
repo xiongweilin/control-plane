@@ -136,3 +136,23 @@
 - The authority/canonical Work/Run migration from `31b6716` and its CI policy
   follow-ups remain in effect; this correction changes only executable
   ownership and documentation.
+
+## 2026-08-21: procedure minimum hardening
+
+- `RealityBoundary` now resolves procedure profiles monotonically: the
+  capability contract minimum is combined with Work/Run/request metadata by
+  maximum severity, so `minimal` cannot downgrade `code.edit`'s `standard`
+  floor and unknown values fail closed.
+- Personal authority now records the typed candidate/evidence/relation,
+  decision and checkpoint references required by the `standard` pre-execution
+  profile. The independent verifier remains the owner of post-edit closure.
+- Regression coverage proves both the profile floor and a direct request that
+  attempts to submit `procedure_profile=minimal` still executes with the
+  `standard` boundary assessment.
+- This is currently a private vendored-runtime hardening delta because the
+  public `D:\agent\portable-runtime` tree is read-only in this workflow; the
+  upstream patch and a new pin remain explicit follow-up work.
+- Candidate promotion now creates and validates the canonical portable
+  `KnowledgeProjection` (typed verification/evidence relation, human Decision,
+  AuthorizationGrant and scope/version) before updating the legacy candidate
+  and playbook projection to `official`.

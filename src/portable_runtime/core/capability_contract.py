@@ -11,6 +11,27 @@ AuthorizationRequirement = Literal["none", "optional", "required"]
 ProcedureProfileLiteral = Literal["minimal", "standard", "enhanced"]
 Reversibility = Literal["reversible", "compensatable", "irreversible", "unknown"]
 _IMPACT_ORDER = {"read": 0, "write-local": 1, "write-remote": 2, "deploy": 3, "admin": 4, "irreversible": 5}
+_PROCEDURE_ORDER = {"minimal": 0, "standard": 1, "enhanced": 2}
+
+
+def compute_effective_procedure_profile(
+    contract_minimum: str | None = None,
+    *requested_profiles: str | None,
+) -> ProcedureProfileLiteral:
+    """Resolve a procedure profile without allowing callers to downgrade it.
+
+    A contract's profile is a minimum. Work, Run, and request metadata may
+    require a stricter profile, but they can never replace ``standard`` or
+    ``enhanced`` with ``minimal``. Unknown values fail closed so malformed
+    governance metadata cannot silently lower a gate.
+    """
+
+    values = [contract_minimum or "minimal", *(value for value in requested_profiles if value is not None)]
+    try:
+        effective = max(values, key=lambda value: _PROCEDURE_ORDER[value])
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"unknown procedure profile in {values!r}; refusing to downgrade governance") from exc
+    return effective  # type: ignore[return-value]
 class EffectContractInvalid(Exception):  # noqa: N818
     def __init__(self, capability: str, message: str | None = None) -> None:
         self.capability = capability
