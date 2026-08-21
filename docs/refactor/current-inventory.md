@@ -5,7 +5,7 @@ package is `src/control_plane` and exposes a FastAPI app from `control_plane.app
 
 ## Entrypoints and loops
 
-- `control_plane.__main__`: uvicorn serving, candidate cleanup, session inspection.
+- `portable_runtime.deployment.personal_platform`: uvicorn serving, candidate cleanup, session inspection.
 - `control_plane.app`: liveness/readiness/metrics, Alertmanager webhook, approvals,
   task dispatch, digest/scan/model-recovery background loops.
 - `control_plane.service.RepairService`: alert ingestion, repair lifecycle,
@@ -35,5 +35,10 @@ legacy repair IDs. Alertmanager payloads are parsed by `control_plane.models`.
 HTTP routes are concentrated in `control_plane.app` and currently use the
 legacy `/healthz`, `/live`, `/ready`, `/status`, `/v1/...` surface.
 
-The new `portable_runtime` package is introduced as an additive seam. Legacy
-code remains the reference profile until parity tests exist.
+`portable_runtime` is now the canonical Work/Run and capability authority for
+the personal profile. `control_plane` remains the compatibility/deployment
+surface: its service admits alerts/tasks, projects legacy rows, and retains
+the Windows/Feishu/HTTP lifecycle until the separate launcher cutover is
+verified. Production repair execution must use the personal Runtime and its
+`RealityBoundary`; the legacy routing seam is only for explicitly constructed
+compatibility callers.

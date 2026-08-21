@@ -27,7 +27,7 @@ Agent/命令调用缺少可审计记录：谁执行了什么命令、退出码�
   CommandExecutor 与 CodexRunner 均写入；审计写入失败不影响修复（best-effort）。
 - agent 输出上限 `max_agent_output_bytes`（默认 200KB）：会话 JSONL 写入前先
   `redact_text` 再截断，截断时记录 truncated=true。
-- 只读检查命令 `python -m control_plane inspect-sessions`（以及
+- 只读检查命令 `python -m portable_runtime.deployment.personal_platform inspect-sessions`（以及
   `GET /v1/sessions/inspect`）：列出会话文件中“可能含敏感值的字段名”，
   绝不输出字段值。
 

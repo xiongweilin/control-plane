@@ -264,6 +264,11 @@ class CodexProvider:
         # Best-effort: Codex exec is not cancellable via explicit API; tree kill handled by executor timeout.
         return None
 
+    async def reconcile(self, request_id: str) -> CapabilityResult | None:
+        """Codex has no remote operation ledger to reconcile."""
+
+        return None
+
 def create_codex_provider_from_toml(path: Path, provider_id: str = "codex-primary") -> CodexProvider:
     """Factory reading [[providers]] with type=codex from a TOML file."""
     import tomllib
