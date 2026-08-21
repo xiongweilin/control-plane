@@ -12,5 +12,5 @@
     }
   ],
   "capabilities": ["reason.generate","code.read","code.edit","code.test","shell.exec","git.diff"],
-  "description": "Wraps codex exec as a portable CapabilityProvider; health checks codex --version."
+  "description": "Wraps codex exec with capability-scoped read-only/workspace-write sandboxes; health checks codex --version."
 }
