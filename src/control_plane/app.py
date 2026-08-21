@@ -19,7 +19,7 @@ from .approvals import ApprovalManager
 from .audit import inspect_session_fields
 from .budget import Budget
 from .codex_runner import CodexRunner
-from .config import ControlPlaneConfig
+from .config import ControlPlaneConfig, canonical_human_principal
 from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
     AlertmanagerPayload,
@@ -143,6 +143,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     from .personal_operations import PersonalOperationsProvider
     from .reconciliation import ReconciliationDescriptorStore
 
+    reconciliation_store = ReconciliationDescriptorStore(cfg.data_dir / "reconciliation.db")
+
     for contract in (
         CapabilityContract(
             capability="git.merge",
@@ -210,7 +212,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         PersonalOperationsProvider(
             cfg,
             service.executor,
-            reconciliation_store=ReconciliationDescriptorStore(cfg.data_dir / "reconciliation.db"),
+            reconciliation_store=reconciliation_store,
         )
     )
     with suppress(ValueError):
@@ -242,10 +244,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             logger.info("expired %s candidates", expired)
         now = int(time.time())
         keep_pending = {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
-        resumed: list[str] = []
         for row in store.list_repairs_with_fallback(limit=1_000):
             if row["status"] in keep_pending:
-                resumed.append(row["id"])
                 continue
             if row["status"] not in {"closed", "failed", "interrupted", "rolled_back"}:
                 store.set_repair_status(
@@ -255,6 +255,17 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     finished_at=now,
                 )
                 logger.info("reconciled stale repair %s -> interrupted", row["id"])
+        try:
+            recovery = await service.reconcile_startup_descriptors(reconciliation_store)
+            if recovery:
+                logger.info("durable reconciliation done for %s descriptor(s)", len(recovery))
+        except Exception:
+            logger.exception("durable reconciliation failed")
+        resumed = [
+            row["id"]
+            for row in store.list_repairs_with_fallback(limit=1_000)
+            if row["status"] == RepairState.NEEDS_APPROVAL.value
+        ]
         if not store.get_setting("usage_hint_sent"):
             await notifier.notify("info", "控制平面使用提示", USAGE_HINT)
             store.set_setting("usage_hint_sent", "1")
@@ -306,6 +317,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             for task in resume_tasks:
                 task.cancel()
             await service.close()
+            reconciliation_store.close()
             store.stop_run_record(run.run_id)
             graceful_shutdown(run.pid_file)
             store.close()
@@ -321,6 +333,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     app.state.service = service
     app.state.store = store
     app.state.portable_runtime = portable_runtime
+    app.state.reconciliation_store = reconciliation_store
 
     @app.middleware("http")
     async def record_current_path(request: Request, call_next):
@@ -643,7 +656,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
             decision, grant = record_human_approval(
                 portable_runtime.store,
-                principal_ref=f"human:{body.decided_by}",
+                # The API key authenticates the configured owner.  ``decided_by``
+                # is retained as display/audit metadata and must not widen the
+                # canonical authority principal.
+                principal_ref=canonical_human_principal(cfg.owner_principal),
                 grantee_ref=f"control-plane:candidate:{candidate_id}",
                 allowed_capabilities=["knowledge.promote"],
                 subject_version_refs=[version_ref],

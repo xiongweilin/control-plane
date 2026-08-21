@@ -4,6 +4,11 @@
 host = "127.0.0.1"
 port = 18083
 
+[auth]
+# The API key authenticates this configured personal owner.  Request-body
+# decided_by values remain display/audit labels, not canonical principals.
+owner_principal = "human:owner"
+
 [agent]
 # 本机模型网关（LiteLLM 4001）的模型清单诊断端点；OpenCodex 已退役（2026-08-11），
 # 旧字段名 opencodex_base_url 不再读取，10100 不再是活动入口。
