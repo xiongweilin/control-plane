@@ -14,15 +14,27 @@ completion.
 
 ## Decision
 
-The task path records provider success as an execution outcome first. A task
-may be finalized only after a task-specific postcondition verifier finds a
-readable result artifact whose control header is associated with the canonical
-`Work`/`Run`. The artifact proves that a result was produced and tied to the
-run; it does not assert the truth of arbitrary natural-language content.
+The task path records provider success as an execution outcome first. The
+default `generic-task` postcondition is deliberately scoped to **delivery**:
+it finds a readable result artifact whose control header is associated with the
+canonical `Work`/`Run`. This proves that a result was produced and tied to the
+run. It does not prove that the natural-language objective in
+`Work.description` was satisfied.
 
-If the artifact or a task-specific verifier is unavailable, the legacy row
-stays `RECOVERING` and the canonical Work/Run stay waiting for verification.
-No `verified=True`, passed verification record, or completed Work is written.
+Delivery evidence must therefore remain separate from objective verification:
+
+```text
+provider outcome (exit/status)
+    -> delivery evidence (run-associated artifact)
+    -> objective verifier (task-specific, when available)
+```
+
+The delivery check alone must not be promoted to `verified=True`, a passed
+objective-verification record, or a completed `Work`. When no objective
+verifier is registered, the legacy row stays `RECOVERING` and the canonical
+Work/Run stay waiting for objective verification, even when delivery evidence
+exists. A future task-specific verifier may close the Work only after it
+records the acceptance criteria, evidence, and verification scope it evaluated.
 
 Task projections use `Work.kind=generic-task` and
 `Run.workflow_id=personal-task`; incident payloads retain the
@@ -30,8 +42,11 @@ Task projections use `Work.kind=generic-task` and
 
 ## Consequences
 
-- Provider transport success and task satisfaction remain separate facts.
-- Future task types can add stronger postconditions without changing the
-  authority boundary.
+- Provider transport success, artifact delivery, and task satisfaction remain
+  separate facts with non-interchangeable scopes.
+- `generic-task` has a delivery-only default contract; it does not silently
+  claim objective completion.
+- Future task types can add stronger objective postconditions without changing
+  the authority boundary.
 - Restart recovery can safely distinguish an applied effect from a verified
   task result.

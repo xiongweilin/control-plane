@@ -134,7 +134,22 @@ The working directory uses native Windows paths (WSL was retired on 2026-08-07).
 /task <description> dispatch a task to the Agent for execution
 ```
 
-An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's Codex Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's Codex Agent (the model is fixed by `control_plane.toml [agent] model`), and the execution process is pushed too: task received → Agent started → completed/failed.
+An ordinary Feishu message (not a command) is equivalent to `/task <description>` and dispatches directly to the control plane's Codex Agent; the Dify Chatflow has been removed. `/task <description>` dispatches the task to the control plane's Codex Agent (the model is fixed by `control_plane.toml [agent] model`), and the execution process is pushed too: task received → Agent started → outcome recorded → delivery/objective verification status.
+
+### Task verification scope
+
+`/task` keeps the user's natural-language request as the `Work` objective.
+The default `generic-task` postcondition is delivery-scoped: it proves only
+that a readable result artifact was produced and bound to the canonical
+`Work`/`Run`. A provider `exit 0`, a transcript, or a run-associated artifact
+does not prove that the objective in `Work.description` was achieved.
+
+Delivery evidence is recorded separately from objective verification. Without
+a task-specific objective verifier, the canonical Work/Run remain waiting for
+verification and the control plane does not write `verified=True`, a passed
+objective-verification record, or a completed Work. A future task type may
+register a stronger verifier with explicit acceptance criteria and evidence
+scope; only that verifier may establish objective completion.
 
 Alert-level policy: each alert fingerprint can be set individually to `auto` (auto-fix, default), `manual` (wait for your decision after the alert; `/cp run` executes or `/cp ignore` ignores), or `ignore` (ignore directly). Alertmanager's `resolved` is only an observation: the control plane must complete deterministic recovery verification through the current PromQL, HTTP probe, or container state before it interrupts an in-progress repair and resets that fingerprint's auto-fix attempt count. Without a verifier, or when verification fails, the attempt count is kept.
 

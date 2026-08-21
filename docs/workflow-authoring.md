@@ -40,5 +40,13 @@ Rules:
 - Never `subprocess.run(["codex", ...])` and never `from providers.codex import ...`.
 - `accepts()` filters which `Work.kind` the workflow handles; new kinds do not require Core changes.
 - Workflows are restart-safe: they read `run.current_step` and are idempotent, or declare non-resumable.
+- Completion and verification are scope-specific. Provider success is an
+  execution outcome, and a run-associated result artifact is delivery evidence;
+  neither proves the `Work.description` objective by itself.
+- The built-in `generic-task` workflow is delivery-scoped. It must leave the
+  Work/Run waiting for objective verification when no task-specific verifier is
+  registered. A stronger task workflow must declare its acceptance criteria,
+  evidence inputs, and verifier scope before it can establish objective
+  completion.
 
 Built-ins: `incident-repair` (8 steps: observe/diagnose/edit/verify/approve/merge/outcome/knowledge), `generic-task`, `daily-scan`, `knowledge-consolidation`. Add a new workflow by dropping a file under `src/portable_runtime/workflows/` and exposing it in the trigger mapping; no Core modification.

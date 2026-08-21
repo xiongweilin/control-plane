@@ -21,6 +21,19 @@ Work / Run / Artifact / Evidence / Knowledge
 - All durable state (Work/Run/Artifact/Evidence/Decision/Action/Outcome/Knowledge/OpenIssue) belongs to Runtime, not Provider.
 - Prompt is not a persistence model; Work stores structured `title/description/kind/inputs/constraints/acceptance_criteria/requested_capabilities`.
 
+## Verification scope
+
+Verification is evidence-scoped. Provider status is an execution outcome, and
+an artifact bound to a canonical Run is delivery evidence; neither fact may be
+silently promoted to proof that the user's objective was achieved.
+
+For `Work.kind=generic-task`, the built-in postcondition is delivery-only. It
+may establish that a readable result artifact exists for the Run, but it does
+not establish objective completion for the natural-language `description`.
+When no task-specific objective verifier is available, the Work/Run remain
+waiting for verification. A task-specific workflow may add a stronger verifier
+only when it declares the acceptance criteria and evidence scope it evaluates.
+
 ## Packages
 
 ```

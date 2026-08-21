@@ -263,6 +263,113 @@ class PortableRuntimeAuthority:
         )
         self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata}))
 
+    def record_task_delivery_verification(
+        self,
+        repair_id: str,
+        *,
+        summary: str,
+        evidence_refs: list[str] | None = None,
+    ) -> list[str]:
+        """Record delivery of a task result without asserting its objective.
+
+        A readable, Run-bound transcript proves that the provider delivered a
+        result artifact.  It does not prove that an arbitrary natural-language
+        task objective was satisfied.  Keep that distinction durable: the
+        canonical Work/Run remain ``waiting`` and only delivery-scoped fields
+        are populated.  A future task-specific verifier may promote the Work
+        to objective verification independently.
+        """
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None or work.kind != "generic-task":
+            return []
+
+        message = summary[:4_000]
+        token = self._stable_token(f"task-delivery-verification:{repair_id}:{message}")
+        version_refs = list(work.metadata.get("subject_version_refs", []))
+        delivery = self._record(
+            BaseRecord(
+                id=f"record_{repair_id}_{token}_delivery_verification",
+                record_type="Assertion",
+                lifecycle_status="current",
+                epistemic_status="supported",
+                metadata={
+                    "qualification_kind": "task-delivery-verification",
+                    "result": "pass",
+                    "verification_scope": "delivery",
+                    "objective_status": "unverified",
+                    "target_refs": [work.id, run.id],
+                    "subject_version_refs": version_refs,
+                    "verifier_ref": "control-plane.task-result-postcondition",
+                    "evidence_refs": list(evidence_refs or []),
+                    "summary": message,
+                },
+            )
+        )
+        evidence = self._record(
+            BaseRecord(
+                id=f"record_{repair_id}_{token}_delivery_evidence",
+                record_type="EvidenceArtifact",
+                lifecycle_status="current",
+                metadata={
+                    "qualification_kind": "task-delivery-evidence",
+                    "verification_scope": "delivery",
+                    "objective_status": "unverified",
+                    "target_refs": [work.id, run.id],
+                    "subject_version_refs": version_refs,
+                    "verifier_ref": "control-plane.task-result-postcondition",
+                    "evidence_refs": list(evidence_refs or []),
+                    "summary": message,
+                },
+            )
+        )
+        relation_id = f"relation_{repair_id}_{token}_delivery_verification"
+        get_relation = getattr(self.runtime.store, "get_relation", None)
+        relation = get_relation(relation_id) if callable(get_relation) else None
+        if not isinstance(relation, RecordRelation):
+            relation = RecordRelation(
+                id=relation_id,
+                relation_type="validated-under",
+                subject_ref=evidence.id,
+                object_ref=delivery.id,
+                scope={
+                    "work_id": work.id,
+                    "run_id": run.id,
+                    "verification_scope": "delivery",
+                    "objective_status": "unverified",
+                },
+                created_by="control-plane.task-result-postcondition",
+                metadata={"qualification_kind": "task-delivery-verification"},
+            )
+            save_relation = getattr(self.runtime.store, "save_relation", None)
+            if not callable(save_relation):
+                raise RuntimeError("portable authority store cannot persist delivery verification relation")
+            save_relation(relation)
+
+        refs = [delivery.id, evidence.id, relation.id]
+        common_metadata = {
+            "delivery_verification_refs": refs,
+            "delivery_verification_status": "passed",
+            "delivery_verification_summary": message,
+            "delivery_verified": True,
+            "verification_scope": "delivery",
+            "objective_status": "unverified",
+            "objective_verification_status": "unavailable",
+            "verification_required": True,
+            "verification_status": "unavailable",
+            "verification_reason": "task objective verifier is unavailable",
+        }
+        work_metadata = dict(work.metadata)
+        work_metadata.update(common_metadata)
+        run_metadata = dict(run.metadata)
+        run_metadata.update(common_metadata)
+        self.runtime.store.save_work(
+            work.model_copy(update={"status": "waiting", "metadata": work_metadata, "updated_at": utcnow()})
+        )
+        self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata}))
+        return refs
+
     def record_reconciliation_result(
         self,
         repair_id: str,
