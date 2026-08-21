@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from portable_runtime.api.http import create_app
+from portable_runtime.core.models import Work
 from portable_runtime.core.process import PortableSubprocessExecutor, ProcessSpec
 from portable_runtime.core.runtime import Runtime
 from portable_runtime.deployment.local import create_local_runtime, create_personal_platform_runtime
@@ -125,7 +126,74 @@ async def test_generic_workflow_routes_via_router() -> None:
         work=work, run=run, store=runtime.store, capabilities=runtime.capabilities, registry=runtime.registry
     )
     status = await wf.run(ctx, work, run)
-    assert status == "succeeded"
+    # Provider execution success is not objective completion for a generic
+    # natural-language task.  The built-in workflow has no objective verifier,
+    # so it must remain recoverable/waiting after routing succeeds.
+    assert status == "waiting"
+
+
+def test_generic_workflow_accepts_only_generic_tasks() -> None:
+    wf = GenericTaskWorkflow()
+    assert wf.accepts(Work(id="generic", title="task", kind="generic-task")) is True
+    assert wf.accepts(Work(id="incident", title="incident", kind="incident")) is False
+
+
+async def test_generic_workflow_does_not_promote_delivery_to_objective() -> None:
+    """A successful result artifact does not prove the task objective."""
+
+    from portable_runtime.core.capabilities import (
+        CapabilityRequest,
+        CapabilityResult,
+        InvocationContext,
+        ProviderDescriptor,
+        ProviderHealth,
+    )
+    class AdversarialProvider:
+        @property
+        def descriptor(self) -> ProviderDescriptor:
+            return ProviderDescriptor(
+                id="adversarial-task-provider",
+                name="Adversarial task provider",
+                version="1.0.0",
+                capabilities=["text.echo"],
+            )
+
+        async def health(self) -> ProviderHealth:
+            return ProviderHealth(provider_id=self.descriptor.id, available=True)
+
+        async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
+            del context
+            return CapabilityResult(
+                request_id=request.id,
+                provider_id=self.descriptor.id,
+                status="succeeded",
+                output_artifact_refs=["artifact-result"],
+                message="I could not fix bug X; the requested tests were not run.",
+            )
+
+        async def cancel(self, request_id: str) -> None:
+            del request_id
+
+    runtime = Runtime(store=InMemoryStateStore())
+    runtime.registry.register(AdversarialProvider())
+    work = runtime.create_work(
+        title="Fix bug X",
+        description="Fix bug X and prove that the complete test suite passes.",
+        kind="generic-task",
+        requested_capabilities=["text.echo"],
+    )
+    run = runtime.start_run(work.id, workflow_id="generic-task")
+    ctx = WorkflowContext(
+        work=work,
+        run=run,
+        store=runtime.store,
+        capabilities=runtime.capabilities,
+        registry=runtime.registry,
+    )
+
+    status = await GenericTaskWorkflow().run(ctx, work, run)
+
+    assert status == "waiting"
 
 
 def test_trigger_alertmanager_creates_work() -> None:
