@@ -246,6 +246,7 @@ class RepairService:
         *,
         capability_service: CapabilityService | None = None,
         provider_registry: ProviderRegistry | None = None,
+        portable_runtime: Any | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -262,14 +263,29 @@ class RepairService:
         self._repair_tasks: dict[str, asyncio.Task[Any]] = {}
         self._fingerprint_locks: dict[str, asyncio.Lock] = {}
         self.run_id = config.run_id or current_run_id()
+        self.portable_runtime = portable_runtime
+        self.portable_authority = None
         if hasattr(self.executor, "attach_store"):
             self.executor.attach_store(store)
         if agent is not None and hasattr(agent, "attach_store"):
             agent.attach_store(store)
-        # Portable bridge: build CapabilityService if not supplied.
+        # Canonical path: the application supplies the personal Runtime. Its
+        # CapabilityService owns RealityBoundary; production repair execution
+        # must not use the legacy routing boundary.
+        if portable_runtime is not None:
+            from .portable_authority import PortableRuntimeAuthority
+
+            self.portable_authority = PortableRuntimeAuthority(
+                portable_runtime,
+                legacy_store=store,
+                version_resolver=self._resolve_git_version_for_authority,
+            )
+            self.capability_service = portable_runtime.capabilities
+            self._provider_registry = portable_runtime.registry
+        # Compatibility bridge: build CapabilityService if not supplied.
         # Prefer explicit capability_service; else wrap legacy agent; else try to
         # build a real CodexProvider from config (portable path).
-        if capability_service is not None:
+        elif capability_service is not None:
             self.capability_service = capability_service
             self._provider_registry = provider_registry or getattr(capability_service, "registry", None)
         elif agent is not None:
@@ -281,7 +297,7 @@ class RepairService:
                 from portable_runtime.providers.codex.provider import CodexProvider
                 reg = provider_registry or ProviderRegistry()
                 # Use model/cli from config; working_directory left None (service picks repo per request)
-                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))  # type: ignore[arg-type]
+                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))
                 self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
             except Exception:
@@ -290,7 +306,19 @@ class RepairService:
                 self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
 
-    async def _invoke_codex_via_capability(self, *, repair_id: str, repo: str, prompt: str) -> CodexSessionResult:
+    async def _resolve_git_version_for_authority(self, repo: str) -> str:
+        """Resolve the immutable source version used by the owner grant."""
+
+        return await self.executor.run(["git", "rev-parse", "HEAD"], cwd=repo, timeout=60)
+
+    async def _invoke_codex_via_capability(
+        self,
+        *,
+        repair_id: str,
+        repo: str,
+        prompt: str,
+        capability: str = "code.edit",
+    ) -> CodexSessionResult:
         """Route Codex execution via CapabilityService (S45).
 
         The portable path is: RepairService -> CapabilityService -> CodexProvider (or legacy adapter).
@@ -298,12 +326,27 @@ class RepairService:
         tree-kill and redaction. This method translates CapabilityResult back to
         CodexSessionResult for existing call sites so repair_flow semantics stay identical.
         """
+        if self.portable_authority is not None:
+            result = await self.portable_authority.invoke(
+                repair_id=repair_id,
+                repo=repo,
+                prompt=prompt,
+                capability=capability,
+                model=self.config.model,
+                timeout_seconds=float(
+                    self.config.exec_timeout_seconds
+                    or self.config.per_repair_timeout_seconds
+                    or 900
+                ),
+            )
+            return self._codex_session_result_from_capability(result)
+
         req = CapabilityRequest(
             id=f"req-{repair_id}-{uuid.uuid4().hex[:6]}",
             # A repair session is allowed to produce a candidate workspace
             # edit; pure reasoning remains a separate read-only capability in
             # the portable workflows.
-            capability="code.edit",
+            capability=capability,
             work_id=repair_id,
             run_id=self.run_id,
             instruction=prompt,
@@ -313,6 +356,10 @@ class RepairService:
             timeout_seconds=float(self.config.exec_timeout_seconds or self.config.per_repair_timeout_seconds or 900),
         )
         result = await self.capability_service.invoke(req)
+        return self._codex_session_result_from_capability(result)
+
+    @staticmethod
+    def _codex_session_result_from_capability(result: CapabilityResult) -> CodexSessionResult:
         # Translate capability result to CodexSessionResult
         if result.status == "succeeded":
             return CodexSessionResult(
@@ -585,6 +632,16 @@ class RepairService:
             # while a repair is active is deduplicated).
             if self.store.get_repair_state_for_fingerprint(fingerprint) == "in_progress":
                 return {"deduplicated": 1}
+            # Canonical Work/Run is the authority.  The legacy repair row is
+            # created only as a compatibility projection after the portable
+            # alert state has been materialised.
+            if self.portable_authority is not None:
+                self.portable_authority.ensure_repair_projection(
+                    repair_id=repair_id,
+                    fingerprint=fingerprint,
+                    payload_json=payload_json,
+                    attempt=attempt,
+                )
             self.store.create_repair(repair_id, fingerprint, payload_json, attempt)
             # Persistent lease: guards against a second control-plane instance
             # picking up the same fingerprint concurrently (batch2 item 10).
@@ -821,7 +878,10 @@ class RepairService:
 
         task_id = f"digest-{today}"
         result = await self._invoke_codex_via_capability(
-            repair_id=task_id, repo=repo, prompt="\n".join(lines)
+            repair_id=task_id,
+            repo=repo,
+            prompt="\n".join(lines),
+            capability="reason.generate",
         )
         self.budget.spend()
         if result.timed_out or result.exit_code != 0:

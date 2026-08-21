@@ -47,7 +47,18 @@ def main() -> int:
     # The gate is already launched through the project's environment (the CI
     # workflow uses ``uv run python``). Reusing that interpreter avoids a
     # nested uv trampoline, which is not reliable on Windows.
-    command = [sys.executable, "-m", "pytest", "--cov=control_plane", "--cov-report=term", "-q"]
+    # The migration gate covers both the compatibility profile and the
+    # canonical portable runtime.  Keeping both roots explicit avoids a
+    # misleading green gate that exercises only legacy control-plane code.
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--cov=control_plane",
+        "--cov=portable_runtime",
+        "--cov-report=term",
+        "-q",
+    ]
     if args.pytest_args:
         command.extend(shlex.split(args.pytest_args))
     proc = subprocess.run(  # noqa: S603 - fixed command line; args come from the caller's CLI

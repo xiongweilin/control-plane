@@ -1,3 +1,11 @@
+"""Private personal-platform entrypoint.
+
+The provider-neutral runtime remains importable on its own, while this private
+profile assembles the Windows/Feishu/Prometheus control-plane implementation.
+The production launcher enters here rather than through the removed
+``control_plane.__main__`` compatibility command.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -7,8 +15,8 @@ from typing import Any
 
 import uvicorn
 
-from .config import ControlPlaneConfig
-from .runtime import (
+from control_plane.config import ControlPlaneConfig
+from control_plane.runtime import (
     acquire_single_instance,
     bootstrap,
     graceful_shutdown,
@@ -17,12 +25,12 @@ from .runtime import (
 
 
 def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
-    from .approvals import ApprovalManager
-    from .budget import Budget
-    from .codex_runner import CodexRunner
-    from .notify import Notifier
-    from .service import RepairService
-    from .storage import Store
+    from control_plane.approvals import ApprovalManager
+    from control_plane.budget import Budget
+    from control_plane.codex_runner import CodexRunner
+    from control_plane.notify import Notifier
+    from control_plane.service import RepairService
+    from control_plane.storage import Store
 
     store = Store(config.state_db)
     service = RepairService(
@@ -53,7 +61,7 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
 
 
 def _run_cli_inspect(config: ControlPlaneConfig) -> int:
-    from .audit import inspect_session_fields
+    from control_plane.audit import inspect_session_fields
 
     fields = inspect_session_fields(config.agent_session_dir)
     for name in sorted(fields):
@@ -63,7 +71,7 @@ def _run_cli_inspect(config: ControlPlaneConfig) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="control-plane")
+    parser = argparse.ArgumentParser(prog="personal-platform")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--log-level", default="info")
@@ -99,12 +107,12 @@ def main() -> None:
         raise SystemExit(1)
     config = with_run_id(config)
     logging.getLogger(__name__).info(
-        "control plane run_id=%s pid=%s %s",
+        "personal platform run_id=%s pid=%s %s",
         run.run_id,
         run.pid,
         detail,
     )
-    from .app import create_app
+    from control_plane.app import create_app
 
     app = create_app(config)
     server = uvicorn.Server(

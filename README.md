@@ -59,7 +59,10 @@ See [docs/architecture.md](docs/architecture.md),
 ---
 
 > [!WARNING]
-> The `control_plane` package is a compatibility/deployment surface, not a second semantic runtime. Portable Runtime (`portable_runtime`) is the primary runtime for new Work/Run flows; the legacy package remains until the operational cutover gate is complete.
+> The private personal-platform profile is launched through
+> `portable_runtime.deployment.personal_platform`. Portable Runtime
+> (`portable_runtime`) is the canonical runtime; `control_plane` is retained
+> only as the profile implementation for Windows/Feishu/Prometheus behavior.
 
 ## Personal Platform Profile (Windows/Feishu/Prometheus/Docker integration)
 
@@ -87,7 +90,7 @@ uv run ruff check .
 uv run pytest
 Copy-Item control_plane.toml.example control_plane.toml
 [Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY', '<random key>', 'User')
-uv run python -m control_plane
+uv run python -m portable_runtime.deployment.personal_platform
 ```
 
 ## Permission matrix
@@ -242,7 +245,7 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 
 ### Candidate branch cleanup
 
-- Read-only dry-run: `uv run python -m control_plane cleanup-candidates` (dry-run by default; `--apply` actually deletes), or `POST /v1/candidates/cleanup` (`{"apply": false}` default; `apply: true` deletes explicitly).
+- Read-only dry-run: `uv run python -m portable_runtime.deployment.personal_platform cleanup-candidates` (dry-run by default; `--apply` actually deletes), or `POST /v1/candidates/cleanup` (`{"apply": false}` default; `apply: true` deletes explicitly).
 - Enumerates merged / rejected (repair is rejected/rolled_back) / expired (older than `[candidates].retention_days`, internal field `candidate_retention_days`) branches; with `[candidates].cleanup_policy = "auto"` (internal field `candidate_cleanup_policy`) startup auto-cleans, `manual` (default) does not auto-delete.
 
 ### Mutual exclusion, classification, and budget
@@ -255,7 +258,7 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 
 - Every command/agent call writes to `command_audit`: redacted args, exit code, duration, truncated, error_class; the redaction function filters token/password/secret/api_key/authorization and similar keys.
 - Agent output cap `max_agent_output_bytes` (default 200KB); session JSONL is redacted before truncation, with `truncated=true` recorded.
-- Read-only check: `uv run python -m control_plane inspect-sessions` or `GET /v1/sessions/inspect` — lists only the **field names** that may contain sensitive values in sessions, never the values.
+- Read-only check: `uv run python -m portable_runtime.deployment.personal_platform inspect-sessions` or `GET /v1/sessions/inspect` — lists only the **field names** that may contain sensitive values in sessions, never the values.
 
 ### Dependency security advisories
 

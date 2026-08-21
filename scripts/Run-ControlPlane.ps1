@@ -78,7 +78,7 @@ $consecutiveFailures = 0
 
 try {
     $child = Start-Process -FilePath $python `
-        -ArgumentList @('-m', 'control_plane', '--log-level', 'info') `
+        -ArgumentList @('-m', 'portable_runtime.deployment.personal_platform', '--log-level', 'info') `
         -WorkingDirectory $ProjectDir `
         -RedirectStandardOutput $stdoutLog `
         -RedirectStandardError $stderrLog `

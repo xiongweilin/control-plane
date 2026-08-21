@@ -142,10 +142,19 @@ def _is_side_effect_capability(contract, capability: str) -> bool:
     if contract is not None:
         return contract.minimum_impact_class != "read" or contract.effect_semantics != "pure"
     lower = capability.lower()
-    if lower.startswith(("test.read", "observe.", "code.", "verify.", "human.", "reason.")):
+    # Unknown action namespaces must fail closed.  Only explicit read-only
+    # compatibility prefixes are safe defaults; an unknown ``code.*`` action
+    # must not become a read merely because it shares the namespace.
+    if lower == "test.read" or lower.endswith(".read"):
         return False
-    if lower.endswith(".read"):
+    if lower.startswith(("observe.", "verify.", "human.", "reason.")):
         return False
+    # Preserve the historical extension point for unrelated plugin
+    # capabilities such as ``text.echo``.  The strict namespace rule is
+    # specifically for unknown code actions, where a read default would be a
+    # privilege downgrade.
+    if lower.startswith("code."):
+        return True
     if any(k in lower for k in ("deploy", "admin", "irreversible", "write", "side_effect")):
         return True
     return False
