@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
@@ -22,6 +22,26 @@ from portable_runtime.core.capabilities import (
 
 from .config import ControlPlaneConfig
 from .gitpush import push_with_ssh_fallback
+from .reconciliation import (
+    BaselineSnapshot,
+    DockerObservationCoordinates,
+    DockerOperation,
+    DockerPostcondition,
+    GitMergeObservationCoordinates,
+    GitMergeOperation,
+    GitMergePostcondition,
+    GitMergeReality,
+    GitPushObservationCoordinates,
+    GitPushOperation,
+    GitPushPostcondition,
+    ReconciliationDescriptor,
+    ReconciliationDescriptorStore,
+    ReconciliationObservation,
+    ReconciliationVerdict,
+    classify_docker_state,
+    classify_git_merge_ancestry,
+    classify_git_push_remote_ref,
+)
 from .tools import CommandExecutor, ToolError
 
 
@@ -43,9 +63,15 @@ class _OperationJournalEntry:
 class PersonalOperationsProvider:
     """Execute only explicitly named Git and Docker profile operations."""
 
-    def __init__(self, config: ControlPlaneConfig, executor: CommandExecutor) -> None:
+    def __init__(
+        self,
+        config: ControlPlaneConfig,
+        executor: CommandExecutor,
+        reconciliation_store: ReconciliationDescriptorStore | None = None,
+    ) -> None:
         self.config = config
         self.executor = executor
+        self.reconciliation_store = reconciliation_store
         self._journal: dict[str, _OperationJournalEntry] = {}
         self._descriptor = ProviderDescriptor(
             id="personal-operations",
@@ -73,6 +99,7 @@ class PersonalOperationsProvider:
     async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
         self._journal[request.id] = _OperationJournalEntry(request=request.model_copy(deep=True))
         try:
+            await self._prepare_reconciliation_descriptor(request)
             if request.capability == "git.merge":
                 output = await self._git_merge(request)
             elif request.capability == "git.push":
@@ -89,6 +116,9 @@ class PersonalOperationsProvider:
                     message=f"unsupported personal operation {request.capability}",
                     error={"code": "UnsupportedCapability"},
                 )
+            descriptor_result = await self._reconcile_descriptor(request.id)
+            if descriptor_result is not None and descriptor_result.status != "succeeded":
+                return descriptor_result
         except ToolError as exc:
             entry = self._journal[request.id]
             ambiguous = self._is_ambiguous_error(exc)
@@ -121,6 +151,222 @@ class PersonalOperationsProvider:
                 "resource_ref": request.resource_ref or "",
                 **entry.metadata,
             },
+        )
+
+    async def _prepare_reconciliation_descriptor(self, request: CapabilityRequest) -> None:
+        """Persist operation coordinates before a host or remote side effect."""
+
+        store = self.reconciliation_store
+        if store is None or request.capability == "git.rollback":
+            return
+        descriptor: ReconciliationDescriptor | None = None
+        if request.capability == "git.merge":
+            repo = self._required(request, "repo")
+            candidate_ref = self._required(request, "branch")
+            target_ref = str(request.parameters.get("target", "main"))
+            baseline_merge = (
+                await self.executor.run(["git", "-C", repo, "rev-parse", target_ref], timeout=60)
+            ).strip()
+            candidate = (await self.executor.run(["git", "-C", repo, "rev-parse", candidate_ref], timeout=60)).strip()
+            merge_operation = GitMergeOperation(
+                repo=repo,
+                target_ref=target_ref,
+                candidate_ref=candidate_ref,
+                candidate_commit=candidate,
+                target_baseline_commit=baseline_merge,
+            )
+            descriptor = ReconciliationDescriptor.from_request(
+                descriptor_id=f"recon_{request.id}",
+                request=request,
+                provider_id=self.descriptor.id,
+                provider_version=self.descriptor.version,
+                operation=merge_operation,
+                pre_effect_baseline=BaselineSnapshot(values={"target_tip": baseline_merge, "merge_head": None}),
+                expected_postcondition=GitMergePostcondition(
+                    target_ref=target_ref,
+                    candidate_commit=candidate,
+                    target_baseline_commit=baseline_merge,
+                ),
+                observation_coordinates=GitMergeObservationCoordinates(
+                    repo=repo,
+                    target_ref=target_ref,
+                    candidate_ref=candidate_ref,
+                    merge_head_path=f"{repo}\\.git\\MERGE_HEAD",
+                ),
+            )
+        elif request.capability == "git.push":
+            repo = self._required(request, "repo")
+            remote = str(request.parameters.get("remote", "origin"))
+            branch = str(request.parameters.get("branch", "main"))
+            expected = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
+            baseline_remote = await self._remote_ref(repo, remote, branch)
+            push_operation = GitPushOperation(repo=repo, remote=remote, branch=branch, expected_commit=expected)
+            descriptor = ReconciliationDescriptor.from_request(
+                descriptor_id=f"recon_{request.id}",
+                request=request,
+                provider_id=self.descriptor.id,
+                provider_version=self.descriptor.version,
+                operation=push_operation,
+                pre_effect_baseline=BaselineSnapshot(values={"remote_commit": baseline_remote}),
+                expected_postcondition=GitPushPostcondition(
+                    remote=remote, branch=branch, expected_commit=expected
+                ),
+                observation_coordinates=GitPushObservationCoordinates(
+                    repo=repo,
+                    remote=remote,
+                    branch=branch,
+                    remote_ref=f"refs/heads/{branch}",
+                ),
+            )
+        elif request.capability in {"docker.restart", "docker.compose.up"}:
+            project = str(request.parameters.get("project", ""))
+            if project not in self.config.allowed_auto_projects:
+                raise ToolError(f"docker project is not allowlisted: {project}")
+            project_dir = self.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
+            baseline = await self._docker_status(project)
+            docker_operation = DockerOperation(
+                kind=cast(Literal["docker.restart", "docker.compose.up"], request.capability),
+                project=project,
+                project_dir=str(project_dir),
+                desired_state="healthy",
+            )
+            descriptor = ReconciliationDescriptor.from_request(
+                descriptor_id=f"recon_{request.id}",
+                request=request,
+                provider_id=self.descriptor.id,
+                provider_version=self.descriptor.version,
+                operation=docker_operation,
+                pre_effect_baseline=BaselineSnapshot(values={"containers": baseline}),
+                expected_postcondition=DockerPostcondition(project=project, desired_state="healthy"),
+                observation_coordinates=DockerObservationCoordinates(
+                    project=project,
+                    project_dir=str(project_dir),
+                    compose_project_label=project,
+                ),
+            )
+        else:
+            return
+        if descriptor is None:
+            return
+        store.save(descriptor)
+        self._journal[request.id].metadata["reconciliation_descriptor_id"] = descriptor.id
+
+    async def _reconcile_descriptor(self, request_id: str) -> CapabilityResult | None:
+        """Re-observe reality from the durable descriptor, including after restart."""
+
+        store = self.reconciliation_store
+        if store is None:
+            return None
+        descriptor = store.get_by_request(request_id)
+        if descriptor is None:
+            return None
+        details: dict[str, Any] = {}
+        if isinstance(descriptor.operation, GitMergeOperation):
+            operation = descriptor.operation
+            status = await self._git_status(operation.repo)
+            merge_head = self._merge_in_progress(status)
+            target_tip: str | None
+            try:
+                target_tip = (
+                    await self.executor.run(
+                        ["git", "-C", operation.repo, "rev-parse", operation.target_ref], timeout=60
+                    )
+                ).strip()
+            except ToolError:
+                target_tip = None
+            candidate_is_ancestor: bool | None = None
+            if target_tip:
+                try:
+                    await self.executor.run(
+                        [
+                            "git",
+                            "-C",
+                            operation.repo,
+                            "merge-base",
+                            "--is-ancestor",
+                            operation.candidate_commit,
+                            operation.target_ref,
+                        ],
+                        timeout=60,
+                    )
+                    candidate_is_ancestor = True
+                except ToolError:
+                    candidate_is_ancestor = False
+            verdict = classify_git_merge_ancestry(
+                GitMergeReality(
+                    target_tip=target_tip,
+                    target_baseline_commit=operation.target_baseline_commit,
+                    candidate_commit=operation.candidate_commit,
+                    candidate_is_ancestor=candidate_is_ancestor,
+                    merge_head="MERGE_HEAD" if merge_head else None,
+                    conflicts=merge_head,
+                )
+            )
+            details.update(
+                {
+                    "target_tip": target_tip or "",
+                    "candidate_is_ancestor": candidate_is_ancestor,
+                    "merge_status": status,
+                }
+            )
+        elif isinstance(descriptor.operation, GitPushOperation):
+            push_operation = descriptor.operation
+            observed = await self._remote_ref(push_operation.repo, push_operation.remote, push_operation.branch)
+            verdict = classify_git_push_remote_ref(
+                expected_commit=push_operation.expected_commit,
+                observed_commit=observed,
+            )
+            details.update({"expected_commit": push_operation.expected_commit, "remote_commit": observed or ""})
+        elif isinstance(descriptor.operation, DockerOperation):
+            docker_operation = descriptor.operation
+            status = await self._docker_status(docker_operation.project)
+            healthy = self._containers_healthy(status)
+            verdict = classify_docker_state(healthy=healthy, desired_state=docker_operation.desired_state)
+            details.update(
+                {
+                    "project": docker_operation.project,
+                    "container_status": status,
+                    "desired_state": docker_operation.desired_state,
+                    "desired_state_verified": healthy,
+                    "event_attribution": "unknown"
+                    if docker_operation.kind == "docker.restart"
+                    else "not-applicable",
+                    "event_verified": False,
+                }
+            )
+        else:
+            return None
+
+        observation = ReconciliationObservation(
+            verdict=verdict,
+            message=f"{descriptor.capability} reconciliation: {verdict.value}",
+            details=details,
+        )
+        store.record_observation(descriptor.id, observation)
+        entry = self._journal.get(request_id)
+        if entry is not None:
+            entry.state = (
+                "succeeded"
+                if verdict is ReconciliationVerdict.APPLIED
+                else "failed"
+                if verdict in {ReconciliationVerdict.NOT_APPLIED, ReconciliationVerdict.MISMATCH}
+                else "unknown"
+            )
+            entry.metadata.update({"reconciliation_verdict": verdict.value, **details})
+        result_status = (
+            "succeeded"
+            if verdict is ReconciliationVerdict.APPLIED
+            else "failed"
+            if verdict in {ReconciliationVerdict.NOT_APPLIED, ReconciliationVerdict.MISMATCH}
+            else "unknown"
+        )
+        return CapabilityResult(
+            request_id=request_id,
+            provider_id=self.descriptor.id,
+            status=result_status,  # type: ignore[arg-type]
+            message=observation.message,
+            metadata={"operation": descriptor.capability, "reconciliation_descriptor_id": descriptor.id, **details},
+            reconciled=True,
         )
 
     async def _git_merge(self, request: CapabilityRequest) -> str:
@@ -200,15 +446,31 @@ class PersonalOperationsProvider:
         if project not in self.config.allowed_auto_projects:
             raise ToolError(f"docker project is not allowlisted: {project}")
         project_dir = self.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
+        # A successful post-command health probe proves the desired state, not
+        # that a particular restart event was observed.  Keep those facts
+        # separate in the operation journal so callers cannot accidentally use
+        # healthy containers as restart attribution evidence.
+        is_restart = request.capability == "docker.restart"
+        self._journal[request.id].metadata.update(
+            {
+                "project": project,
+                "project_dir": project_dir,
+                "desired_state": "running",
+                "desired_state_verified": False,
+                "event_attribution": "unknown" if is_restart else "not-applicable",
+                "event_verified": False,
+                "event_verification_basis": "not-observable" if is_restart else "desired-state-operation",
+            }
+        )
         command = (
             ["docker", "compose", "restart"]
-            if request.capability == "docker.restart"
+            if is_restart
             else ["docker", "compose", "up", "-d"]
         )
         output = await self.executor.run(command, cwd=project_dir, timeout=180)
         status = await self._docker_status(project)
         self._journal[request.id].metadata.update(
-            {"project": project, "project_dir": project_dir, "container_status": status}
+            {"container_status": status, "desired_state_verified": self._containers_healthy(status)}
         )
         if not self._containers_healthy(status):
             raise ToolError(f"docker operation completed but containers are not healthy: {status or '(none)'}")
@@ -225,6 +487,10 @@ class PersonalOperationsProvider:
         return None
 
     async def reconcile(self, request_id: str) -> CapabilityResult | None:
+        if self.reconciliation_store is not None:
+            durable = await self._reconcile_descriptor(request_id)
+            if durable is not None:
+                return durable
         entry = self._journal.get(request_id)
         if entry is None:
             return None
@@ -283,14 +549,31 @@ class PersonalOperationsProvider:
                 project = str(request.parameters.get("project", ""))
                 status = await self._docker_status(project)
                 entry.metadata["container_status"] = status
-                if self._containers_healthy(status):
+                desired_state_verified = self._containers_healthy(status)
+                entry.metadata["desired_state"] = "running"
+                entry.metadata["desired_state_verified"] = desired_state_verified
+                is_restart = request.capability == "docker.restart"
+                entry.metadata.setdefault(
+                    "event_attribution", "unknown" if is_restart else "not-applicable"
+                )
+                entry.metadata.setdefault("event_verified", False)
+                entry.metadata.setdefault(
+                    "event_verification_basis",
+                    "not-observable" if is_restart else "desired-state-operation",
+                )
+                if desired_state_verified:
                     entry.state = "succeeded"
-                    return self._reconciled(request, "succeeded", "Docker container health confirmed", entry.metadata)
+                    message = (
+                        "Docker desired state confirmed; restart event attribution remains unknown"
+                        if is_restart
+                        else "Docker desired state confirmed"
+                    )
+                    return self._reconciled(request, "succeeded", message, entry.metadata)
                 entry.state = "unknown"
                 return self._reconciled(
                     request,
                     "unknown",
-                    "Docker state is not healthy or not yet observable",
+                    "Docker desired state is not healthy or not yet observable",
                     entry.metadata,
                 )
 

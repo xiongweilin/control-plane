@@ -141,6 +141,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     from portable_runtime.core.capability_contract import CapabilityContract
 
     from .personal_operations import PersonalOperationsProvider
+    from .reconciliation import ReconciliationDescriptorStore
 
     for contract in (
         CapabilityContract(
@@ -205,7 +206,13 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         ),
     ):
         portable_runtime.contract_registry.register(contract)
-    portable_runtime.registry.register(PersonalOperationsProvider(cfg, service.executor))
+    portable_runtime.registry.register(
+        PersonalOperationsProvider(
+            cfg,
+            service.executor,
+            reconciliation_store=ReconciliationDescriptorStore(cfg.data_dir / "reconciliation.db"),
+        )
+    )
     with suppress(ValueError):
         # skip if already registered (e.g. test app created twice)
         REGISTRY.register(ControlPlaneCollector(store, budget.remaining))

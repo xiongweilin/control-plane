@@ -428,6 +428,8 @@ class RepairService:
         # failed / unavailable - map error
         err = result.error or {}
         msg = err.get("message", "") or result.message or ""
+        if result.status == "unknown":
+            msg = f"{msg or 'codex provider outcome is unknown'} [reconciliation-required]"
         stderr_tail = err.get("stderr", "") or msg[:2000]
         # Detect timeout marker
         timed_out = err.get("type") == "timeout" or "timed out" in msg.lower() or result.metadata.get("timed_out", False)  # noqa: E501
@@ -864,6 +866,24 @@ class RepairService:
                     f"任务 Agent 失败（exit {result.exit_code}）: {result.stderr_tail[-1_500:]}"
                 )
             summary = (result.last_message or "（无摘要）")[:4_000]
+            if self.portable_authority is not None:
+                # A task is complete only after a deterministic task-result
+                # check has recorded the successful process outcome.  This
+                # keeps legacy CLOSED and canonical completed/succeeded in
+                # lockstep instead of relying on the legacy row alone.
+                verification_refs = self.portable_authority.record_verification(
+                    task_id,
+                    passed=True,
+                    summary=summary,
+                    evidence_refs=[f"task-result:{task_id}:exit=0"],
+                    verifier_ref="control-plane.task-result-verifier",
+                )
+                self.portable_authority.finalize_repair(
+                    task_id,
+                    verified=True,
+                    verification_refs=verification_refs,
+                    summary=summary,
+                )
             self.store.set_repair_status(
                 task_id,
                 RepairState.CLOSED.value,
@@ -1340,24 +1360,31 @@ class RepairService:
         else:
             original_error = previous_original or error_text
             recovery_error = ""
+        verification_failure = error_text.startswith("Verification failed")
+        reconciliation_required = self._is_reconciliation_required(error_text)
         if self.portable_authority is not None:
-            if error_text.startswith("Verification failed"):
+            if verification_failure:
                 verification_refs = self.portable_authority.record_verification(
                     repair_id,
                     passed=False,
                     summary=error_text,
                 )
-            else:
-                verification_refs = None
-            self.portable_authority.finalize_repair(
-                repair_id,
-                verified=False,
-                verification_refs=verification_refs,
-                summary=error_text,
-            )
+                self.portable_authority.finalize_repair(
+                    repair_id,
+                    verified=False,
+                    verification_refs=verification_refs,
+                    summary=error_text,
+                )
+            elif reconciliation_required:
+                self.portable_authority.mark_reconciliation_required(repair_id, error_text)
+        outcome_state = (
+            RepairState.RECOVERING
+            if reconciliation_required
+            else self._failure_status_for(error_text)
+        )
         self.store.set_repair_status(
             repair_id,
-            self._failure_status_for(error_text).value,
+            outcome_state.value,
             error=error_text,
             error_class=error_class.value,
             timeout_kind=timeout_kind,
@@ -1396,8 +1423,13 @@ class RepairService:
                 repairs_skipped_dirty.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
             elif timeout_kind not in (TimeoutKind.EXEC.value, TimeoutKind.COMM.value):
                 recovery_retry_failed.labels(pattern=fingerprint_pattern(self._alert_from_payload(row))).inc()
-        outcome_state = self._failure_status_for(error_text)
-        outcome_title = "修复超时" if outcome_state is RepairState.TIMED_OUT else "修复失败"
+        outcome_title = (
+            "修复结果待确认"
+            if outcome_state is RepairState.RECOVERING
+            else "修复超时"
+            if outcome_state is RepairState.TIMED_OUT
+            else "修复失败"
+        )
         await self._notify(
             "critical",
             outcome_title,
@@ -1450,6 +1482,19 @@ class RepairService:
         ):
             return RepairState.TIMED_OUT
         return RepairState.FAILED
+
+    @staticmethod
+    def _is_reconciliation_required(error_text: str) -> bool:
+        """Identify outcomes that require observing reality again.
+
+        The marker is attached by the typed personal-operation and portable
+        Codex adapters when a provider returns ``unknown``.  It is kept
+        explicit so an ordinary command failure cannot accidentally become a
+        recoverable unknown outcome.
+        """
+
+        lowered = error_text.lower()
+        return "[reconciliation-required]" in lowered or "reconciliation required" in lowered
 
     async def _run_codex_agent(
         self,
@@ -1936,7 +1981,19 @@ class RepairService:
                 action="rollback",
                 note=note,
             )
-            await self._rollback(None, repair_id)
+            reconciliation_required = await self._rollback(None, repair_id)
+            if reconciliation_required:
+                message = "rollback outcome is unknown; reconciliation is required [reconciliation-required]"
+                if self.portable_authority is not None:
+                    self.portable_authority.mark_reconciliation_required(repair_id, message)
+                self.store.set_repair_status(
+                    repair_id,
+                    RepairState.RECOVERING.value,
+                    error=message,
+                    finished_at=int(time.time()),
+                )
+                await self._notify("warning", "回滚结果待确认", f"repair_id={repair_id}\n{message}")
+                raise RepairRejectedError()
             self.store.set_repair_status(repair_id, RepairState.ROLLED_BACK.value, finished_at=int(time.time()))
             await self._notify("warning", "修复已回滚", f"repair_id={repair_id}")
             raise RepairRejectedError()
@@ -2143,7 +2200,8 @@ class RepairService:
                 instruction=f"merge candidate {branch} into main",
             )
             if merge_result.status != "succeeded":
-                raise ToolError(merge_result.message or "portable git.merge failed")
+                marker = " [reconciliation-required]" if merge_result.status == "unknown" else ""
+                raise ToolError((merge_result.message or "portable git.merge failed") + marker)
             push_result = await self._invoke_personal_operation(
                 repair_id=repair_id,
                 capability="git.push",
@@ -2154,7 +2212,8 @@ class RepairService:
                 instruction="push the approved merge to origin/main",
             )
             if push_result.status != "succeeded":
-                raise ToolError(push_result.message or "portable git.push failed")
+                marker = " [reconciliation-required]" if push_result.status == "unknown" else ""
+                raise ToolError((push_result.message or "portable git.push failed") + marker)
             await self._notify(
                 "info",
                 "代码候选已合并到 main",
@@ -2705,7 +2764,8 @@ class RepairService:
             return True
         return int(time.time()) - last >= ttl
 
-    async def _rollback(self, ctx: ToolContext | None, repair_id: str) -> None:
+    async def _rollback(self, ctx: ToolContext | None, repair_id: str) -> bool:
+        reconciliation_required = False
         try:
             repair_row = self.store.get_repair(repair_id)
             payload = json.loads(str(repair_row["payload_json"]) if repair_row is not None else "{}")
@@ -2730,6 +2790,8 @@ class RepairService:
                         instruction=f"rollback candidate branch {branch}",
                     )
                     if result.status != "succeeded":
+                        if result.status == "unknown":
+                            reconciliation_required = True
                         logger.warning("portable candidate rollback failed for %s: %s", row["id"], result.message)
                 except ToolError:
                     logger.warning("candidate branch cleanup failed for %s", row["id"])
@@ -2749,9 +2811,12 @@ class RepairService:
                     instruction=f"restart allowlisted compose project {resolved_project}",
                 )
                 if result.status != "succeeded":
+                    if result.status == "unknown":
+                        reconciliation_required = True
                     logger.warning("portable rollback restart failed for project %s: %s", project, result.message)
             except (ToolError, RuntimeError):
                 logger.warning("rollback restart failed for project %s", project)
+        return reconciliation_required
 
     async def _create_candidate(
         self,
