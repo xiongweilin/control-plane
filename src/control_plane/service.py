@@ -302,7 +302,13 @@ class RepairService:
                 from portable_runtime.providers.codex.provider import CodexProvider
                 reg = provider_registry or ProviderRegistry()
                 # Use model/cli from config; working_directory left None (service picks repo per request)
-                reg.register(CodexProvider(model=config.model, cli=getattr(config, "codex_cli", None)))
+                reg.register(
+                    CodexProvider(
+                        model=config.model,
+                        cli=getattr(config, "codex_cli", None),
+                        execution_boundary_config=config,
+                    )
+                )
                 self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
             except Exception:
@@ -1916,8 +1922,20 @@ class RepairService:
                     self.run_id,
                     self.config.lease_ttl_seconds,
                 )
+            await self._record_canonical_human_approval(
+                repair_id,
+                decided_by=decided_by,
+                action="approve",
+                note=note,
+            )
             await self._apply_code_candidates(None, repair_id)
         elif decision == "rollback":
+            await self._record_canonical_human_approval(
+                repair_id,
+                decided_by=decided_by,
+                action="rollback",
+                note=note,
+            )
             await self._rollback(None, repair_id)
             self.store.set_repair_status(repair_id, RepairState.ROLLED_BACK.value, finished_at=int(time.time()))
             await self._notify("warning", "修复已回滚", f"repair_id={repair_id}")
@@ -1943,6 +1961,102 @@ class RepairService:
                 source_refs=[f"repair:{repair_id}"],
                 detail={"decision": decision, "decided_by": decided_by, "note": note},
             ),
+        )
+
+    async def _approval_operation_specs(
+        self,
+        repair_id: str,
+        action: str,
+    ) -> list[dict[str, Any]]:
+        """Resolve the exact side-effect scopes a human decision may authorize."""
+
+        specs: list[dict[str, Any]] = []
+        if action in {"approve", "rollback"}:
+            for row in self.store.list_actions(repair_id):
+                if row["tool"] != "codex_agent":
+                    continue
+                after = json.loads(row["after_json"]) if row["after_json"] else {}
+                repo = str(row["target"] or "")
+                branch = str(after.get("branch") or f"{self.config.candidate_branch_prefix}{repair_id}")
+                if not repo:
+                    continue
+                try:
+                    version = (
+                        await self.executor.run(
+                            ["git", "-C", repo, "rev-parse", branch],
+                            timeout=60,
+                        )
+                    ).strip()
+                except ToolError:
+                    continue
+                if not version:
+                    continue
+                capability = "git.merge" if action == "approve" else "git.rollback"
+                specs.append(
+                    {
+                        "capability": capability,
+                        "resource_ref": f"repo:{Path(repo).resolve()}",
+                        "subject_version_refs": [f"git:{version}"],
+                        "effect_class": "write-local",
+                    }
+                )
+                if action == "approve":
+                    specs.append(
+                        {
+                            "capability": "git.push",
+                            "resource_ref": f"repo:{Path(repo).resolve()}",
+                            "subject_version_refs": [f"git:{version}"],
+                            "effect_class": "write-remote",
+                        }
+                    )
+            if action == "rollback":
+                try:
+                    repair_row = self.store.get_repair(repair_id)
+                    payload = json.loads(str(repair_row["payload_json"]) if repair_row is not None else "{}")
+                    project = self._resolve_project(payload.get("labels", {}).get("project", ""))
+                except (json.JSONDecodeError, TypeError):
+                    project = ""
+                if project in self.config.allowed_auto_projects:
+                    specs.append(
+                        {
+                            "capability": "docker.restart",
+                            "resource_ref": f"compose:{project}",
+                            "subject_version_refs": [f"repair:{repair_id}"],
+                            "effect_class": "write-remote",
+                        }
+                    )
+        return specs
+
+    async def _record_canonical_human_approval(
+        self,
+        repair_id: str,
+        *,
+        decided_by: str,
+        action: str,
+        note: str,
+    ) -> None:
+        """Write canonical human provenance before any personal side effect."""
+
+        if self.portable_authority is None:
+            return
+        work_id = f"work_legacy_{repair_id}"
+        if self.portable_authority.runtime.store.get_work(work_id) is None:
+            repair_row = self.store.get_repair(repair_id)
+            if repair_row is None:
+                raise RuntimeError(f"cannot materialize canonical approval for unknown repair {repair_id}")
+            self.portable_authority.ensure_repair_projection(
+                repair_id=repair_id,
+                fingerprint=str(repair_row["fingerprint"]),
+                payload_json=str(repair_row["payload_json"]),
+                attempt=int(repair_row["attempt"]),
+            )
+        specs = await self._approval_operation_specs(repair_id, action)
+        self.portable_authority.record_human_approval(
+            repair_id,
+            decided_by=decided_by,
+            action=action,
+            note=note,
+            operation_specs=specs,
         )
 
     async def _pending_review_summary(self, repair_id: str) -> str:
@@ -2631,6 +2745,7 @@ class RepairService:
                     resource_ref=f"compose:{resolved_project}",
                     parameters={"project": resolved_project, "project_dir": str(project_dir)},
                     effect_class="write-remote",
+                    subject_version_refs=[f"repair:{repair_id}"],
                     instruction=f"restart allowlisted compose project {resolved_project}",
                 )
                 if result.status != "succeeded":

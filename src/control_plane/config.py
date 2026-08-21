@@ -78,6 +78,16 @@ class ControlPlaneConfig:
     codex_cli: Path = field(default_factory=lambda: resolve_codex_cli())
     model_preflight_enabled: bool = True
     codex_branch_prefix: str = "fix/control-plane-"
+    # ``workspace-write`` Codex sessions run from a detached candidate
+    # worktree by default.  The worktree is removed after the session while
+    # the candidate branch remains visible to the control plane for review.
+    codex_isolate_worktree: bool = True
+    # A Codex session must not inherit host Docker or Git/SSH control planes.
+    # These are environment-level guards in addition to the Codex sandbox and
+    # prompt constraints; the typed providers retain the real credentials.
+    codex_disable_docker: bool = True
+    codex_disable_ssh_credentials: bool = True
+    codex_worktree_root: Path = PROJECT_ROOT.parent / ".control-plane-codex-worktrees"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
     gateway_timeout_seconds: int = 120
     # 启动预检失败后，每隔该秒数重试一次模型来源探测，直至全部恢复（失败驱动，非周期探测）。
@@ -249,6 +259,20 @@ class ControlPlaneConfig:
             codex_cli=resolve_codex_cli(str(agent.get("codex_cli", ""))),
             codex_branch_prefix=str(
                 agent.get("codex_branch_prefix", base.codex_branch_prefix)
+            ),
+            codex_isolate_worktree=bool(
+                agent.get("isolate_worktree", base.codex_isolate_worktree)
+            ),
+            codex_disable_docker=bool(
+                agent.get("disable_docker", base.codex_disable_docker)
+            ),
+            codex_disable_ssh_credentials=bool(
+                agent.get(
+                    "disable_ssh_credentials", base.codex_disable_ssh_credentials
+                )
+            ),
+            codex_worktree_root=Path(
+                str(agent.get("worktree_root", base.codex_worktree_root))
             ),
             candidate_branch_prefix=str(
                 candidates.get(

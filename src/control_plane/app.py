@@ -112,6 +112,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     or cfg.per_repair_timeout_seconds
                     or 900
                 ),
+                execution_boundary_config=cfg,
             )
         )
     except Exception as exc:

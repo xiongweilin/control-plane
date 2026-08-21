@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Any, Literal, cast
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
@@ -90,6 +91,7 @@ class CodexProvider:
         artifact_store: FilesystemArtifactStore | None = None,
         gateway_base_url: str | None = None,
         sandbox_by_capability: dict[str, str] | None = None,
+        execution_boundary_config: Any | None = None,
     ) -> None:
         self._cli = _resolve_cli(cli)
         self._model = model
@@ -98,6 +100,11 @@ class CodexProvider:
         self._executor: ProcessExecutor = executor or PortableSubprocessExecutor()
         self._artifact_store = artifact_store
         self._gateway_base_url = gateway_base_url
+        # The public provider remains provider-neutral.  The private Windows
+        # profile may pass ControlPlaneConfig here so the actual production
+        # provider receives the same candidate-worktree and credential/Docker
+        # environment boundary as the compatibility CodexRunner.
+        self._execution_boundary_config = execution_boundary_config
         self._sandbox_by_capability = dict(CODEX_SANDBOX_BY_CAPABILITY)
         if sandbox_by_capability:
             for capability, sandbox in sandbox_by_capability.items():
@@ -177,15 +184,30 @@ class CodexProvider:
         repo = str(request.parameters.get("repo", "") or self._working_directory or "")
         # Use provider-level model unless overridden per-request
         model = str(request.parameters.get("model", self._model))
+        sandbox = cast(
+            Literal["read-only", "workspace-write"],
+            self._sandbox_by_capability.get(request.capability, "read-only"),
+        )
         cwd = Path(repo) if repo else (self._working_directory or Path.cwd())
-        # Ensure session dir for transcript
-        session_dir = cwd / "data" / "agent-sessions" if cwd else Path("data/agent-sessions")
+        boundary = None
+        if self._execution_boundary_config is not None:
+            from control_plane.codex_runner import CodexRunner
+
+            boundary = CodexRunner(self._execution_boundary_config)._prepare_execution_boundary(
+                str(cwd), sandbox
+            )
+            cwd = boundary.cwd
+        # Ensure session dir for transcript.  Keep transcripts outside the
+        # ephemeral worktree when the private profile supplied a config.
+        if self._execution_boundary_config is not None:
+            session_dir = Path(self._execution_boundary_config.agent_session_dir)
+        else:
+            session_dir = cwd / "data" / "agent-sessions" if cwd else Path("data/agent-sessions")
         # Fallback to portable artifact dir if repo not set
         try:  # noqa: SIM105,S110
             session_dir.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: S110
             pass  # noqa: S110
-        sandbox = self._sandbox_by_capability.get(request.capability, "read-only")
         argv = [str(self._cli), "exec", "--model", model, "--sandbox", sandbox, "--skip-git-repo-check", "--json", prompt]  # noqa: E501
         # Normalize Windows path for cwd (same as control_plane.codex_runner.repo_path_to_windows)
         import os
@@ -193,13 +215,27 @@ class CodexProvider:
         cwd_str = str(cwd)
         if os.name == "nt":
             cwd_str = cwd_str.replace("/", "\\")
-        spec = ProcessSpec(argv=argv, cwd=Path(cwd_str) if cwd_str else None, timeout_seconds=request.timeout_seconds or self._timeout or 900)  # noqa: E501
+        spec = ProcessSpec(
+            argv=argv,
+            cwd=Path(cwd_str) if cwd_str else None,
+            env=boundary.env if boundary is not None else None,
+            timeout_seconds=request.timeout_seconds or self._timeout or 900,
+        )
         # Optional preflight
-        health = await self.health()
-        if not health.available and ("not found" in health.detail.lower() or "probe failed" in health.detail.lower()):  # noqa: SIM102
-            pass
-        result = await self._executor.run(spec)
+        try:
+            health = await self.health()
+            if not health.available and (
+                "not found" in health.detail.lower() or "probe failed" in health.detail.lower()
+            ):  # noqa: SIM102
+                pass
+            result = await self._executor.run(spec)
+        except BaseException:
+            if boundary is not None:
+                boundary.cleanup()
+            raise
         if result.timed_out:
+            if boundary is not None:
+                boundary.cleanup()
             return CapabilityResult(
                 request_id=request.id,
                 provider_id=self.descriptor.id,
@@ -232,6 +268,8 @@ class CodexProvider:
             except Exception:
                 logger.debug("failed to write codex session jsonl", exc_info=True)
         if result.exit_code != 0:
+            if boundary is not None:
+                boundary.cleanup()
             return CapabilityResult(
                 request_id=request.id,
                 provider_id=self.descriptor.id,
@@ -246,6 +284,8 @@ class CodexProvider:
                     "capability": request.capability,
                 },
             )
+        if boundary is not None:
+            boundary.cleanup()
         return CapabilityResult(
             request_id=request.id,
             provider_id=self.descriptor.id,

@@ -175,3 +175,17 @@
 - Repair lifecycle projection is now canonical-first: when a portable store is
   attached, a failed Work/Run projection prevents the legacy SQLite status
   update from committing.
+
+## 2026-08-21: Codex process boundary
+
+- The shared private Codex boundary now reaches the actual vendored
+  `CodexProvider` registered by `app.py` as well as the compatibility
+  `CodexRunner`: every `workspace-write` session creates a detached candidate
+  Git worktree by default. The temporary worktree is removed in `finally`,
+  while the candidate branch remains available for review.
+- The Codex child environment removes Git/SSH credential inheritance and
+  points Git SSH/askpass to deny commands. Docker receives a disabled
+  profile-specific host/context instead of Docker Desktop's named pipe.
+- These controls are deployment-specific private-profile protections. The
+  public runtime remains responsible only for capability contracts and provider
+  semantics; its upstream follow-up list is recorded in `MIGRATION.md`.
