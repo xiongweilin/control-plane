@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import control_plane.service as service_module
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.codex_runner import CodexSessionResult
@@ -132,6 +133,41 @@ def test_service_exposes_capability_service(tmp_path) -> None:
         assert "from control_plane.codex_runner" not in txt
         assert "subprocess.run" not in txt
         assert "codex" not in txt.lower() or "FakeProvider" in txt or "reason.generate" in txt
+    store.close()
+
+
+def test_verifier_fallback_returns_the_fallback_service(tmp_path, monkeypatch) -> None:
+    """Provider bootstrap failures must return the empty fallback service."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        ),
+    )
+    real_capability_service = service_module.CapabilityService
+    calls = 0
+
+    def flaky_capability_service(registry):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("verifier provider bootstrap failed")
+        return real_capability_service(registry)
+
+    monkeypatch.setattr(service_module, "CapabilityService", flaky_capability_service)
+    fallback = service._get_verifier_capability_service()
+    assert fallback is service._verifier_capability_service
+    assert fallback.registry.list() == []
+    assert calls == 2
     store.close()
 
 

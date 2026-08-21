@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from control_plane.config import resolve_codex_cli
-from control_plane.config import ControlPlaneConfig
+from control_plane.config import ControlPlaneConfig, canonical_human_principal, resolve_codex_cli
 
 
 def test_resolve_explicit_config_wins(monkeypatch, tmp_path) -> None:
@@ -43,3 +42,19 @@ def test_load_codex_process_boundary_options(monkeypatch, tmp_path) -> None:
     assert config.codex_disable_docker is False
     assert config.codex_disable_ssh_credentials is False
     assert config.codex_worktree_root == tmp_path / "worktrees"
+
+
+def test_canonical_human_principal_never_preserves_another_namespace() -> None:
+    assert canonical_human_principal("owner") == "human:owner"
+    assert canonical_human_principal("human:configured-owner") == "human:configured-owner"
+    assert canonical_human_principal("service:configured-owner") == "human:service:configured-owner"
+    assert canonical_human_principal(" ") == "human:owner"
+
+
+def test_owner_principal_loads_from_auth_section_and_env_override(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "control_plane.toml"
+    config_path.write_text('[auth]\nowner_principal = "configured-owner"\n', encoding="utf-8")
+    monkeypatch.delenv("CONTROL_PLANE_OWNER_PRINCIPAL", raising=False)
+    assert ControlPlaneConfig.load(config_path).owner_principal == "human:configured-owner"
+    monkeypatch.setenv("CONTROL_PLANE_OWNER_PRINCIPAL", "env-owner")
+    assert ControlPlaneConfig.load(config_path).owner_principal == "human:env-owner"
