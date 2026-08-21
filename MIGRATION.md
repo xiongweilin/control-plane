@@ -63,3 +63,12 @@ Comment in `pyproject.toml` tracks this; do not change packages until §64 passe
 - `§64`: replacement tests prove portable store/work/run cover legacy repair flows.
 - `ruff check` / `mypy` / `pytest` / coverage baseline must stay green during transition.
 - No push of private secrets to public lib; scan `control_plane.toml` and `data/` before publish.
+
+## 2026-08-21: vendored portable_runtime synced to upstream 4de0284
+
+- `src/portable_runtime` replicated byte-for-byte from `ratiolin/portable-runtime` HEAD `4de0284` (strict-enforcement P1/P2 closure; 92 tracked files, zero local drift).
+- The legacy `control_plane` package stays the compatibility profile (additive seam per ADR-0013); no vendored portable file was locally patched.
+- Portable V2 `CapabilityService` routes every invocation through `RealityBoundary` governance. The deprecated legacy repair path keeps pre-V2 routing semantics via `control_plane.service._LegacyRoutingBoundary`; the portable Runtime path keeps the full boundary.
+- `control_plane.tools` gained `check_container_status` / `check_logs` compat helpers for portable verifier providers' fallback imports.
+- Tool config aligned with upstream in `pyproject.toml` (ruff per-file-ignores + mypy overrides for the vendored tree).
+- Gates: `ruff check .`, `mypy src`, `scripts/check_portable_core_imports.py`, `pytest` 231 passed, coverage 75% (baseline 74.0). Service restarted 2026-08-21 11:41 local, run `run-1787283657-7281aae8`.
