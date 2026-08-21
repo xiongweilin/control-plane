@@ -1068,7 +1068,6 @@ class RepairService:
                 "任务 Agent 启动",
                 f"task_id={task_id}\n目标: {repo}\n模型: {self.config.model}",
             )
-            branch = f"task/{task_id}"
             task_prompt = (
                 "你是个人平台的任务 Agent，运行在完整 Codex 工具环境中。\n"
                 f"task_id: {task_id}\n工作目录: {repo}\n"
@@ -1121,29 +1120,31 @@ class RepairService:
                 )
                 return
             if self.portable_authority is not None:
-                verification_refs = self.portable_authority.record_verification(
+                delivery_refs = self.portable_authority.record_task_delivery_verification(
                     task_id,
-                    passed=True,
                     summary=summary,
                     evidence_refs=artifact_refs,
-                    verifier_ref="control-plane.task-result-postcondition",
                 )
-                self.portable_authority.finalize_repair(
-                    task_id,
-                    verified=True,
-                    verification_refs=verification_refs,
-                    summary=summary,
-                )
+            else:
+                delivery_refs = []
+            # Artifact delivery is a successful execution outcome, not proof
+            # that the task's natural-language objective was achieved.  Keep
+            # the legacy projection recoverable until a task-specific
+            # objective verifier can make that stronger claim.
+            objective_reason = "task result delivered; objective verification is unavailable"
             self.store.set_repair_status(
                 task_id,
-                RepairState.CLOSED.value,
-                finished_at=int(time.time()),
+                RepairState.RECOVERING.value,
+                error=objective_reason,
+                recovery_error=objective_reason,
                 result=summary,
             )
             await self._notify(
-                "info",
-                "任务完成",
-                f"task_id={task_id}\n{summary}\n回滚：切回 main 并删除分支 {branch}（如已创建）",
+                "warning",
+                "任务结果已交付，等待目标验证",
+                f"task_id={task_id}\n"
+                f"delivery_refs={','.join(delivery_refs) if delivery_refs else 'none'}\n"
+                f"{objective_reason}\n{summary}",
             )
         except Exception as exc:
             logger.exception("task failed: %s", task_id)
@@ -2634,14 +2635,14 @@ class RepairService:
         )
 
     def _verify_task_postcondition(self, repair_id: str) -> tuple[bool, str, list[str]]:
-        """Verify a task result artifact independently of the provider exit code.
+        """Verify task-result delivery independently of provider exit code.
 
-        ``exit_code == 0`` proves only that Codex terminated successfully.  A
-        task can close here only when a transcript artifact is present, has a
-        provider-generated control header, and is associated with this
-        canonical Run.  The transcript is evidence that a result was produced;
-        it is intentionally not interpreted as proof that arbitrary task
-        content is correct.
+        ``exit_code == 0`` proves only that Codex terminated successfully.
+        This method proves only that a transcript artifact was delivered.  A
+        provider-generated control header and canonical Run association make
+        the artifact attributable; they do not prove that arbitrary task
+        content is correct.  Callers must not promote this result to Work
+        ``verified`` or ``completed`` without a task-specific verifier.
         """
 
         authority = self.portable_authority
