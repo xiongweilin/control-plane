@@ -45,6 +45,7 @@ from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
 from .personal_operations import PersonalOperationsProvider
+from .physical_boundary import GitPhysicalBoundary
 from .reconciliation import (
     ReconciliationDescriptor,
     ReconciliationDescriptorStore,
@@ -264,6 +265,7 @@ class RepairService:
         self.approvals = approvals if approvals is not None else ApprovalManager()
         self.notifier = notifier if notifier is not None else Notifier(config)
         self.executor = executor or CommandExecutor(config)
+        self.physical_boundary = GitPhysicalBoundary(config, self.executor)
         self.http = http or httpx.AsyncClient(timeout=30, limits=HTTP_LIMITS)
         self._owns_http = http is None
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
@@ -1874,28 +1876,30 @@ class RepairService:
                     ["git", "-C", state["repo"], "status", "--porcelain"],
                     timeout=30,
                 )
-            except ToolError:
-                logger.debug("dirty check failed for %s; treating as clean", state["repo"])
+            except ToolError as exc:
+                logger.warning("dirty check failed for %s; refusing to treat it as clean", state["repo"])
                 CONTROLLED_IGNORES.labels(site="dirty_check").inc()
-                continue
+                raise RuntimeError(
+                    f"workspace cleanliness is unknown; refusing to run agent: {state['repo']}: {exc}"
+                ) from exc
             if output.strip():
                 dirty.append(state["repo"])
         return dirty
 
     async def _create_isolated_worktree(self, repo: str, branch: str) -> tuple[str, Path]:
         worktree_dir = Path(tempfile.mkdtemp(prefix="cp-iso-"))
-        await self.executor.run(
-            ["git", "-C", repo, "worktree", "add", "--detach", str(worktree_dir), "main"],
-            timeout=120,
+        # The temporary directory is created only to reserve a unique name;
+        # the physical boundary requires the target not to exist before Git
+        # materialises the worktree.
+        worktree_dir.rmdir()
+        _, target = await self.physical_boundary.create_isolated_worktree(
+            repo, worktree_dir, "main"
         )
-        return str(worktree_dir), worktree_dir
+        return str(target), target
 
     async def _remove_isolated_worktree(self, repo: str, worktree_dir: Path) -> None:
         try:
-            await self.executor.run(
-                ["git", "-C", repo, "worktree", "remove", "--force", str(worktree_dir)],
-                timeout=120,
-            )
+            await self.physical_boundary.remove_isolated_worktree(repo, worktree_dir)
         except ToolError as exc:
             logger.warning("isolated worktree removal failed for %s: %s", worktree_dir, exc)
 
@@ -1992,8 +1996,11 @@ class RepairService:
             inside = await self.executor.run(
                 ["git", "-C", repo, "rev-parse", "--is-inside-work-tree"]
             )
-        except ToolError:
-            return {"repo": repo, "is_git": "0", "git_head": "no-git", "git_ref": ""}
+        except ToolError as exc:
+            detail = str(exc).lower()
+            if "not a git repository" in detail or "not a git work tree" in detail:
+                return {"repo": repo, "is_git": "0", "git_head": "no-git", "git_ref": ""}
+            raise RuntimeError(f"git repository probe is unknown for {repo}: {exc}") from exc
         if inside.strip().lower() != "true":
             return {"repo": repo, "is_git": "0", "git_head": "no-git", "git_ref": ""}
         head = await self.executor.run(["git", "-C", repo, "rev-parse", "HEAD"])
@@ -2052,29 +2059,15 @@ class RepairService:
                 # Never overwrite uncommitted user changes: abandon the restore
                 # and record the error instead (batch2 item 8).
                 try:
-                    dirty = await self.executor.run(
-                        ["git", "-C", repo, "status", "--porcelain"],
-                        timeout=30,
+                    await self.physical_boundary.restore_ref(
+                        repo, before["git_ref"], before["git_head"]
                     )
                 except ToolError as exc:
-                    errors.append(f"{repo}: cannot check worktree cleanliness: {exc}")
-                    continue
-                if dirty.strip():
                     errors.append(
-                        f"{repo}: workspace is dirty; restore abandoned to protect "
-                        f"uncommitted changes: {dirty.strip()[:200]}"
+                        f"{repo}: restore abandoned because physical boundary could not prove "
+                        f"a clean worktree: {exc}"
                     )
                     continue
-                if before["git_ref"]:
-                    await self.executor.run(
-                        ["git", "-C", repo, "switch", "--quiet", before["git_ref"]],
-                        timeout=120,
-                    )
-                else:
-                    await self.executor.run(
-                        ["git", "-C", repo, "switch", "--quiet", "--detach", before["git_head"]],
-                        timeout=120,
-                    )
                 restored = await self._capture_repo_state(repo)
                 if (
                     restored["git_head"] != before["git_head"]
@@ -2804,9 +2797,8 @@ class RepairService:
             return branches
         for entry in branches:
             try:
-                await self.executor.run(
-                    ["git", "-C", entry["repo"], "branch", "-D", entry["branch"]],
-                    timeout=60,
+                await self.physical_boundary.delete_candidate_branch(
+                    entry["repo"], entry["branch"], list(entry.get("reasons", []))
                 )
                 entry["deleted"] = True
             except ToolError as exc:

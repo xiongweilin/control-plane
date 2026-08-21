@@ -164,6 +164,26 @@ async def test_dirty_worktree_policy_reject_blocks_agent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dirty_check_unknown_fails_closed(tmp_path) -> None:
+    repo, _, config = await _git_init(tmp_path)
+    store = Store(config.state_db)
+
+    class FailingDirtyExecutor:
+        async def run(self, args, **kwargs):  # noqa: ANN001, ANN002
+            raise ToolError("git status unavailable")
+
+    service = _service(config, store, FailingDirtyExecutor())
+    async def fake_capture(_):  # noqa: ANN001
+        return [{"repo": repo, "is_git": "1", "git_head": "head", "git_ref": "main"}]
+
+    service._capture_workspace_states = fake_capture  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="cleanliness is unknown"):
+        await service._check_dirty_workspaces(repo)
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_isolated_worktree_runs_agent_and_keeps_candidate(tmp_path) -> None:
     repo, executor, config = await _git_init(tmp_path)
     config = replace(config, dirty_worktree_policy="isolate")
@@ -233,5 +253,18 @@ async def test_candidate_cleanup_dry_run_and_apply(tmp_path) -> None:
     for branch in ("fix/control-plane-repair-m1", "fix/control-plane-repair-r1", "fix/control-plane-repair-e1"):
         with pytest.raises(ToolError):
             await executor.run(["git", "-C", repo, "rev-parse", "--verify", branch], timeout=30)
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_candidate_cleanup_physical_boundary_rejects_checked_out_branch(tmp_path) -> None:
+    repo, executor, config = await _git_init(tmp_path)
+    store = Store(config.state_db)
+    service = _service(config, store, executor)
+    branch = "fix/control-plane-repair-live"
+    await executor.run(["git", "-C", repo, "checkout", "-q", "-b", branch], timeout=60)
+    with pytest.raises(ToolError, match="checked-out candidate"):
+        await service.physical_boundary.delete_candidate_branch(repo, branch, ["expired"])
     await service.close()
     store.close()

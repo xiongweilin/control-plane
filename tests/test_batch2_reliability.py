@@ -261,7 +261,7 @@ async def test_command_executor_audits_redacted_args(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_runner_audits_and_writes_run_header(tmp_path) -> None:
-    config = replace(_config(tmp_path), codex_cli=Path(sys.executable))
+    config = replace(_config(tmp_path), codex_cli=Path(sys.executable), codex_isolate_worktree=False)
     store = Store(config.state_db)
     runner = CodexRunner(config)
     runner.attach_store(store)
@@ -285,7 +285,7 @@ async def test_codex_runner_audits_and_writes_run_header(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_runner_redacts_session_before_write(tmp_path, monkeypatch) -> None:
-    config = replace(_config(tmp_path), codex_cli=Path(sys.executable))
+    config = replace(_config(tmp_path), codex_cli=Path(sys.executable), codex_isolate_worktree=False)
     store = Store(config.state_db)
     runner = CodexRunner(config)
     runner.attach_store(store)

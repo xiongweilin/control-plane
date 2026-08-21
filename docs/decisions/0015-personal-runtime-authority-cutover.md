@@ -66,7 +66,10 @@ allowlisted Compose project is currently running/healthy, while
 unless a separate observer proves that this restart event occurred.
 `docker.compose.up` is a desired-state operation and therefore reports
 `event_attribution=not-applicable`; a healthy postcondition must never be
-treated as restart-event evidence.
+treated as restart-event evidence. Accordingly, reconciliation keeps
+`docker.restart` non-terminal (`unknown`) while attribution is unobserved;
+only the desired-state `docker.compose.up` path may classify a healthy
+postcondition as `applied`.
 
 The legacy SQLite row remains writable only as a compatibility projection for
 the existing HTTP/Feishu/state-machine API.  Its status updates are mirrored

@@ -96,6 +96,16 @@ def test_codex_child_environment_denies_docker_and_git_credentials(tmp_path: Pat
     assert not Path(boundary.env["GIT_CONFIG_GLOBAL"]).exists()
 
 
+def test_workspace_write_refuses_non_git_source_directory(tmp_path: Path) -> None:
+    config = replace(
+        ControlPlaneConfig(),
+        codex_worktree_root=tmp_path / "worktrees",
+        codex_isolate_worktree=True,
+    )
+    with pytest.raises(RuntimeError, match="confirmed Git repository"):
+        CodexRunner(config)._prepare_execution_boundary(str(tmp_path), "workspace-write")
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("git") is None and shutil.which("git.exe") is None, reason="Git required")
 async def test_production_codex_provider_uses_private_boundary(tmp_path: Path) -> None:
