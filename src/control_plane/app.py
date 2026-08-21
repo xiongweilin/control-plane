@@ -506,6 +506,13 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             return ApprovalDecisionResponse(accepted=False, message="Candidate is not pending")
         if not candidate["verifier_ids"]:
             return ApprovalDecisionResponse(accepted=False, message="Candidate has no verifier")
+        source_repair_id = str(candidate["source_repair_id"] or "")
+        source_repair = store.get_repair(source_repair_id) if source_repair_id else None
+        if source_repair is None or source_repair["status"] != "closed":
+            return ApprovalDecisionResponse(
+                accepted=False,
+                message="Candidate source repair is not closed and verified",
+            )
         store.add_approval(
             f"ap-{uuid.uuid4().hex[:12]}",
             "candidate",
@@ -514,6 +521,30 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             body.decided_by,
             body.note,
         )
+        # Mirror the human approval into the portable canonical records.  The
+        # legacy candidate table remains a compatibility projection, but an
+        # official promotion now has a typed Decision + AuthorizationGrant
+        # that is scoped to this candidate version and resource.
+        if _PORTABLE_AVAILABLE and portable_runtime is not None:
+            from portable_runtime.records.authorization import record_human_approval
+
+            version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
+            _, grant = record_human_approval(
+                portable_runtime.store,
+                principal_ref=f"human:{body.decided_by}",
+                grantee_ref=f"control-plane:candidate:{candidate_id}",
+                allowed_capabilities=["knowledge.promote"],
+                subject_version_refs=[version_ref],
+                work_id=f"work_legacy_{source_repair_id}",
+                resource_scope=[f"candidate:{candidate_id}"],
+                ttl_seconds=3600,
+            )
+            get_authorization = getattr(portable_runtime.store, "get_authorization", None)
+            if not callable(get_authorization) or get_authorization(grant.id) is None:
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Portable authorization record was not persisted",
+                )
         store.promote_candidate(candidate_id)
         await notifier.notify("info", "候选经验已晋升为 official playbook", f"candidate_id={candidate_id}")
         return ApprovalDecisionResponse(accepted=True, message="promoted")

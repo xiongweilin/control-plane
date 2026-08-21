@@ -8,6 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .audit import redact_args, redact_text, truncate_bytes
 from .config import ControlPlaneConfig
@@ -42,12 +43,17 @@ class CodexSessionResult:
 
 
 class CodexRunner:
-    """Runs a full Codex headless agent session with the configured model.
+    """Runs a Codex headless agent session with an explicit sandbox ceiling.
+
+    The personal profile only permits the two least-privilege Codex sandboxes.
+    Remote/deployment effects must be handled by a separate provider and
+    RealityBoundary, never by silently upgrading this runner to a full-access
+    sandbox.
 
     The control plane is the authoritative boundary: it injects hard constraints,
     verifies outcomes independently, gates code merges behind approval, and rolls
     back on failure. The Codex CLI therefore runs non-interactively inside that
-    boundary (``codex exec`` with the danger-full-access sandbox).
+    boundary with the capability-derived least-privilege sandbox.
     """
 
     def __init__(self, config: ControlPlaneConfig) -> None:
@@ -121,7 +127,10 @@ class CodexRunner:
         repo: str,
         prompt: str,
         run_id: str = "",
+        sandbox: Literal["read-only", "workspace-write"] = "workspace-write",
     ) -> CodexSessionResult:
+        if sandbox not in {"read-only", "workspace-write"}:
+            raise ValueError(f"unsupported Codex sandbox: {sandbox!r}")
         self.cli_info()  # fail fast with a clear error instead of a raw spawn error
         session_dir = self.config.agent_session_dir
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +144,7 @@ class CodexRunner:
                 "--model",
                 self.config.model,
                 "--sandbox",
-                "danger-full-access",
+                sandbox,
                 "--skip-git-repo-check",
                 "--json",
                 prompt,

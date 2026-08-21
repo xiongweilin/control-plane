@@ -115,7 +115,21 @@ class _LegacyCodexRunnerAdapter:
         if not prompt:
             return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "invalid_request", "message": "missing prompt/instruction"})  # noqa: E501
         try:
-            result = await self._runner.run_task(repair_id=repair_id, repo=repo or ".", prompt=prompt, run_id=run_id)
+            # Keep legacy test doubles compatible while making the real runner
+            # obey the capability's physical sandbox ceiling.
+            from inspect import Parameter, signature
+
+            from portable_runtime.providers.codex.provider import sandbox_for_capability
+
+            run_task = self._runner.run_task
+            parameters = signature(run_task).parameters
+            supports_sandbox = "sandbox" in parameters or any(
+                p.kind is Parameter.VAR_KEYWORD for p in parameters.values()
+            )
+            kwargs = {"repair_id": repair_id, "repo": repo or ".", "prompt": prompt, "run_id": run_id}
+            if supports_sandbox:
+                kwargs["sandbox"] = sandbox_for_capability(request.capability)
+            result = await run_task(**kwargs)
         except CodexCliUnavailableError as exc:
             return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="failed", error={"type": "CodexCliUnavailableError", "message": str(exc)})  # noqa: E501
         except Exception as exc:
@@ -286,11 +300,16 @@ class RepairService:
         """
         req = CapabilityRequest(
             id=f"req-{repair_id}-{uuid.uuid4().hex[:6]}",
-            capability="reason.generate",
+            # A repair session is allowed to produce a candidate workspace
+            # edit; pure reasoning remains a separate read-only capability in
+            # the portable workflows.
+            capability="code.edit",
             work_id=repair_id,
             run_id=self.run_id,
             instruction=prompt,
             parameters={"prompt": prompt, "repo": repo, "model": self.config.model},
+            resource_ref=repo,
+            effect_class="write-local",
             timeout_seconds=float(self.config.exec_timeout_seconds or self.config.per_repair_timeout_seconds or 900),
         )
         result = await self.capability_service.invoke(req)

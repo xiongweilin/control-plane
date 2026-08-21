@@ -3,9 +3,19 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from portable_runtime.core.boundary_fencing import extract_lease_generation as _extract_lease_generation
+from portable_runtime.core.boundary_fencing import validate_fencing
+from portable_runtime.core.boundary_stages import (
+    BoundaryStagePlan,
+    InvocationStagePlan,
+    ReliabilityStageInput,
+    commit_execution_projection,
+    evaluate_reliability_stage,
+    precommit_execution_records,
+    select_provider_stage,
+)
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
@@ -27,6 +37,8 @@ from portable_runtime.core.qualification import (
 )
 from portable_runtime.core.reliability import CircuitBreaker, ReliabilityControls
 from portable_runtime.core.router import ConstraintRouter
+from portable_runtime.records.authorization import CanonicalAuthorizationRequest
+from portable_runtime.records.authorization import EffectClass as AuthorizationEffectClass
 
 CODE_FENCING_REJECTED = "FencingRejected"
 CODE_FENCING_UNAVAILABLE = "FencingUnavailable"
@@ -97,48 +109,6 @@ def _digest_request(request: CapabilityRequest) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(serialized.encode()).hexdigest()
 
-def _extract_lease_generation(request: CapabilityRequest) -> int | None:
-    lg = getattr(request, "lease_generation", None)
-    if lg is not None:
-        return lg  # type: ignore[no-redef]
-    if isinstance(request.metadata, dict):
-        v = request.metadata.get("lease_generation")
-        if isinstance(v, int):
-            return v
-        if isinstance(v, str) and v.isdigit():
-            return int(v)
-    return None
-
-def _extract_lease_owner(request: CapabilityRequest) -> str | None:
-    lo = getattr(request, "lease_owner", None)
-    if lo is not None:
-        return lo  # type: ignore[no-redef]
-    if isinstance(request.metadata, dict):
-        v = request.metadata.get("lease_owner")
-        if isinstance(v, str):
-            return v
-    return None
-
-def validate_fencing(request: CapabilityRequest, run: Any | None, *, now: datetime | None = None) -> tuple[bool, str]:
-    if run is None or request.run_id is None:
-        return True, "no run fencing required"
-    now = now or datetime.now(UTC)
-    if not run.lease_owner and (run.lease_generation == 0 or run.lease_generation is None):
-        return True, "unleased run"
-    req_gen = _extract_lease_generation(request)
-    req_owner = _extract_lease_owner(request)
-    if req_gen is None:
-        return False, f"fencing: missing lease_generation, expected {run.lease_generation}"
-    if req_gen != run.lease_generation:
-        return False, f"fencing: generation mismatch request {req_gen} != current {run.lease_generation}"
-    if run.lease_owner and req_owner is not None and req_owner != run.lease_owner:
-        return False, f"fencing: owner mismatch {req_owner} != {run.lease_owner}"
-    if run.lease_owner and req_owner is None:
-        return False, f"fencing: missing lease_owner, expected {run.lease_owner}"
-    if run.lease_expires_at is not None and run.lease_expires_at <= now:
-        return False, f"fencing: lease expired at {run.lease_expires_at.isoformat()}"
-    return True, "fencing ok"
-
 def _append_event(store: Any, event_type: str, subject_ref: str, payload: dict[str, Any]) -> bool:
     """Append a durable transition event and report journal availability.
 
@@ -195,6 +165,7 @@ class RealityBoundary:
         self.runtime_id = runtime_id
         self.contract_registry = contract_registry or CapabilityContractRegistry(effect_registry=effect_registry)
         self.effect_registry = effect_registry or getattr(self.contract_registry, "effect_registry", CapabilityEffectRegistry())
+        self.stage_plan = BoundaryStagePlan()
 
     def validate_fencing(self, request: CapabilityRequest) -> tuple[bool, str]:
         if self.store is None or request.run_id is None:
@@ -326,7 +297,14 @@ class RealityBoundary:
         from portable_runtime.records.authorization import is_authorized_for  # noqa: PLC0415
         resource = self._extract_resource(request)
         svr = self._extract_versions(request)
-        action = {"capability": request.capability, "resource": resource, "subject_version_refs": svr, "actor_ref": actor, "effect_class": effective}
+        action = CanonicalAuthorizationRequest(
+            capability=request.capability,
+            resource_ref=resource,
+            subject_version_refs=svr,
+            actor_ref=actor,
+            effect_class=cast(AuthorizationEffectClass, effective),
+            lease_generation=_extract_lease_generation(request),
+        )
         any_match = False
         for g in grants:
             try:
@@ -342,7 +320,7 @@ class RealityBoundary:
         return False, f"AuthorizationDenied: no valid grant authorizes {request.capability} with effective_impact {effective} for actor {actor}"
 
     @staticmethod
-    def _error_result(request: CapabilityRequest, code: str, reason: str, *, provider_id: str = "", status: str = "unavailable", **metadata: Any) -> CapabilityResult:
+    def _error_result(request: CapabilityRequest, code: str, reason: str, *, provider_id: str = "", status: Literal["succeeded", "failed", "unavailable", "needs-input", "cancelled", "unknown"] = "unavailable", **metadata: Any) -> CapabilityResult:
         error: dict[str, Any] = {"code": code, "reason": reason}
         if metadata:
             error.update(metadata)
@@ -531,7 +509,7 @@ class RealityBoundary:
         # non-pure descriptor without an authoritative capability rule is an
         # effect-contract gap, not permission to continue.
         has_non_pure = any(getattr(d, "side_effect_class", "pure") != "pure" for d in descriptors)
-        if has_non_pure and not self.effect_registry.has_rule(request.capability):
+        if has_non_pure and (self.effect_registry is None or not self.effect_registry.has_rule(request.capability)):
             reason = f"{CODE_EFFECT_CONTRACT_MISSING}: non-pure provider exposes unregistered capability {request.capability!r}"
             _append_event(store, CODE_EFFECT_CONTRACT_MISSING, request.id, {"capability": request.capability, "reason": reason})
             return self._error_result(request, CODE_EFFECT_CONTRACT_MISSING, reason)
@@ -721,47 +699,36 @@ class RealityBoundary:
         if not isinstance(recovery_timing, dict):
             recovery_timing = getattr(effect_rule, "recovery_timing", None) or getattr(contract, "recovery_timing", None)
         irreversible = effective in {"admin", "irreversible"}
-        reliability_kwargs = {
-            "side_effect": side_effect,
-            "action_blast_radius": requested_blast_radius,
-            "exposure": requested_exposure,
-            "irreversible": irreversible,
-            "procedure_profile": procedure_profile,
-            "timing": recovery_timing,
-        }
-        try:
-            if hasattr(self.reliability, "assess"):
-                allowed, reliability_reason = _call_supported(self.reliability.assess, **reliability_kwargs)
-            else:
-                allowed = _call_supported(self.reliability.can_execute, **reliability_kwargs)
-                reliability_reason = getattr(self.reliability, "last_block_reason", None) or "reliability budget exhausted"
-        except Exception as exc:
-            _append_event(store, CODE_RELIABILITY_UNAVAILABLE, request.id, {"reason": str(exc)})
-            return self._error_result(request, CODE_RELIABILITY_UNAVAILABLE, f"reliability evaluation failed: {exc}")
-        if not allowed:
-            reason = str(reliability_reason or "reliability budget exhausted")
+        reliability_input = ReliabilityStageInput(
+            side_effect=side_effect,
+            action_blast_radius=requested_blast_radius,
+            exposure=requested_exposure,
+            irreversible=irreversible,
+            procedure_profile=procedure_profile,
+            timing=recovery_timing,
+        )
+        reliability_decision = evaluate_reliability_stage(self.reliability, reliability_input, _call_supported)
+        if reliability_decision.error is not None:
+            reliability_error = reliability_decision.error
+            _append_event(store, CODE_RELIABILITY_UNAVAILABLE, request.id, {"reason": str(reliability_error)})
+            return self._error_result(request, CODE_RELIABILITY_UNAVAILABLE, f"reliability evaluation failed: {reliability_error}")
+        if not reliability_decision.allowed:
+            reason = reliability_decision.reason or "reliability budget exhausted"
             _append_event(store, CODE_RELIABILITY_BLOCKED, request.id, {"side_effect": side_effect, "reason": reason})
             _append_event(store, "InvocationBlocked", request.id, {"code": CODE_RELIABILITY_BLOCKED, "reason": reason})
             return self._error_result(request, CODE_RELIABILITY_BLOCKED, reason)
 
         # Provider health, circuit state, independence and hard constraints all
         # run before selection.  Any evaluator exception is RoutingUnavailable.
-        healthy: list[ProviderDescriptor] = []
-        for descriptor in descriptors:
-            try:
-                health = await registry.health(descriptor.id)
-                if not health.available:
-                    continue
-                if not _circuit_for(descriptor.id).allow():
-                    continue
-                healthy.append(descriptor)
-            except Exception as exc:
-                return self._error_result(request, CODE_ROUTING_UNAVAILABLE, f"provider eligibility evaluation failed: {exc}")
-        try:
-            selected = await routing.select(request, healthy) if healthy else None
-        except Exception as exc:
-            _append_event(store, CODE_ROUTING_UNAVAILABLE, request.id, {"reason": str(exc)})
-            return self._error_result(request, CODE_ROUTING_UNAVAILABLE, f"routing evaluation failed: {exc}")
+        selection = await select_provider_stage(registry, routing, request, descriptors, _circuit_for)
+        if selection.error is not None:
+            selection_error = selection.error
+            if selection.error_phase == "eligibility":
+                return self._error_result(request, CODE_ROUTING_UNAVAILABLE, f"provider eligibility evaluation failed: {selection_error}")
+            _append_event(store, CODE_ROUTING_UNAVAILABLE, request.id, {"reason": str(selection_error)})
+            return self._error_result(request, CODE_ROUTING_UNAVAILABLE, f"routing evaluation failed: {selection_error}")
+        healthy = list(selection.healthy)
+        selected = selection.selected
         if selected is None:
             if healthy and isinstance(request.constraints, dict):
                 if request.constraints.get("required_failure_domains") or request.constraints.get("independence_constraints"):
@@ -781,8 +748,9 @@ class RealityBoundary:
 
         provider_id = selected.id
         _append_event(store, "ProviderSelected", request.id, {"provider_id": provider_id, "capability": request.capability})
-        side_effect_class: _EffectClass = getattr(selected, "side_effect_class", "pure")  # type: ignore[assignment]
-        effect_semantics = getattr(selected, "effect_semantics", side_effect_class)
+        invocation_plan = InvocationStagePlan.from_descriptor(selected)
+        side_effect_class: _EffectClass = invocation_plan.side_effect_class
+        effect_semantics = invocation_plan.effect_semantics
         if _IMPACT_ORDER.get(effective, 0) > _IMPACT_ORDER["read"]:
             side_effect = True
 
@@ -813,80 +781,33 @@ class RealityBoundary:
         execution_request = permit.materialize_request()
         request = execution_request
 
-        # Precommit is mandatory for all action-critical effects.  A missing
-        # durable store or identity is itself a STOP, never a bypass.
-        step_id: str | None = None
-        attempt_id: str | None = None
-        action_id: str | None = None
+        # Precommit is a persistence-only stage.  Action-critical requests
+        # fail closed; pure observations retain best-effort records.
+        precommit = precommit_execution_records(
+            store,
+            request,
+            provider_id=provider_id,
+            permit_digest=permit.request_digest,
+            lease_generation=_extract_lease_generation(request) or 0,
+            side_effect=side_effect,
+            side_effect_class=side_effect_class,
+            effect_semantics=effect_semantics,
+            reversibility=invocation_plan.reversibility,
+        )
+        records = precommit.records
+        step_id = records.step_id
+        attempt_id = records.attempt_id
+        if precommit.error is not None:
+            reason = str(precommit.error)
+            _append_event(store, CODE_PRECOMMIT_FAILED, request.id, {"reason": reason})
+            return self._error_result(request, CODE_PRECOMMIT_FAILED, f"precommit failed: {reason}", provider_id=provider_id)
         if side_effect:
-            if store is None or not request.work_id or not request.run_id:
-                reason = "side-effect invocation requires durable work/run precommit"
-                _append_event(store, CODE_PRECOMMIT_FAILED, request.id, {"reason": reason})
-                return self._error_result(request, CODE_PRECOMMIT_FAILED, reason, provider_id=provider_id)
-            try:
-                if not all(hasattr(store, method) for method in ("save_step", "save_attempt", "save_action")):
-                    raise RuntimeError("store lacks precommit methods")
-                existing_steps = store.list_steps(request.run_id) if hasattr(store, "list_steps") else []
-                step_key = request.step_key or f"{request.capability}:{request.idempotency_key or request.id}"
-                step = next((candidate for candidate in existing_steps if candidate.step_key == step_key), None)
-                lease_gen = _extract_lease_generation(request) or 0
-                if step is None:
-                    step = Step(id=new_id("step"), run_id=request.run_id, step_key=step_key, kind=request.capability.split(".")[0] if "." in request.capability else "generic", status="running", effect_semantics=effect_semantics, side_effect_class=side_effect_class, reversibility=getattr(selected, "reversibility", "unknown"), input_digest=permit.request_digest, lease_generation=lease_gen)
-                else:
-                    step = step.model_copy(update={"status": "running", "updated_at": utcnow(), "input_digest": permit.request_digest, "effect_semantics": effect_semantics, "side_effect_class": side_effect_class, "lease_generation": lease_gen, "version": (step.version or 0) + 1})
-                step_id = step.id
-                attempts = store.list_attempts(step_id) if hasattr(store, "list_attempts") else []
-                attempt_no = max((a.attempt_no for a in attempts), default=0) + 1
-                attempt = StepAttempt(id=new_id("attempt"), step_id=step_id, attempt_no=attempt_no, provider_id=provider_id, request_ref=request.id, idempotency_key=request.idempotency_key or request.id, status="running", lease_generation=lease_gen)
-                attempt_id = attempt.id
-                action_id = new_id("action")
-                action = Action(id=action_id, work_id=request.work_id, run_id=request.run_id, capability=request.capability, provider_id=provider_id, request_ref=request.id, status="running")
-                if hasattr(store, "transaction"):
-                    with store.transaction():
-                        store.save_step(step)
-                        step.current_attempt = attempt_no
-                        store.save_step(step)
-                        store.save_attempt(attempt)
-                        store.save_action(action)
-                else:
-                    store.save_step(step)
-                    step.current_attempt = attempt_no
-                    store.save_step(step)
-                    store.save_attempt(attempt)
-                    store.save_action(action)
-                _append_event(
-                    store,
-                    "StepPrecommitted",
-                    request.id,
-                    {"step_id": step_id, "attempt_id": attempt_id, "action_id": action_id, "provider_id": provider_id},
-                )
-            except Exception as exc:
-                _append_event(store, CODE_PRECOMMIT_FAILED, request.id, {"reason": str(exc)})
-                return self._error_result(request, CODE_PRECOMMIT_FAILED, f"precommit failed: {exc}", provider_id=provider_id)
-        else:
-            # Pure invocations may still retain execution records where the
-            # store supports them, but persistence failures must not create a
-            # false authorization path before provider execution.
-            if store is not None and request.work_id and request.run_id and hasattr(store, "save_step"):
-                try:
-                    existing_steps = store.list_steps(request.run_id) if hasattr(store, "list_steps") else []
-                    step_key = request.step_key or f"{request.capability}:{request.idempotency_key or request.id}"
-                    step = next((candidate for candidate in existing_steps if candidate.step_key == step_key), None)
-                    if step is None:
-                        step = Step(id=new_id("step"), run_id=request.run_id, step_key=step_key, kind=request.capability.split(".")[0] if "." in request.capability else "generic", status="running", effect_semantics=effect_semantics, side_effect_class=side_effect_class, reversibility=getattr(selected, "reversibility", "unknown"), input_digest=permit.request_digest, lease_generation=_extract_lease_generation(request) or 0)
-                    else:
-                        step = step.model_copy(update={"status": "running", "updated_at": utcnow(), "input_digest": permit.request_digest})
-                    step_id = step.id
-                    store.save_step(step)
-                    if hasattr(store, "save_attempt"):
-                        attempt = StepAttempt(id=new_id("attempt"), step_id=step_id, attempt_no=1, provider_id=provider_id, request_ref=request.id, idempotency_key=request.idempotency_key or request.id, status="running", lease_generation=_extract_lease_generation(request) or 0)
-                        attempt_id = attempt.id
-                        store.save_attempt(attempt)
-                except Exception:
-                    # Pure observation does not get an action-critical
-                    # precommit, so preserve historical best-effort records.
-                    step_id = None
-                    attempt_id = None
+            _append_event(
+                store,
+                "StepPrecommitted",
+                request.id,
+                {"step_id": step_id, "attempt_id": attempt_id, "action_id": records.action_id, "provider_id": provider_id},
+            )
 
         reliability_started = False
         try:
@@ -952,9 +873,9 @@ class RealityBoundary:
                         step = store.get_step(step_id) if hasattr(store, "get_step") else None
                         if step is not None:
                             store.save_step(step.model_copy(update={"status": "unknown", "updated_at": utcnow()}))
-                        attempt = store.get_attempt(attempt_id) if attempt_id and hasattr(store, "get_attempt") else None
-                        if attempt is not None:
-                            store.save_attempt(attempt.model_copy(update={"status": "unknown", "ended_at": utcnow(), "error": result.error}))
+                        attempt_record = store.get_attempt(attempt_id) if attempt_id and hasattr(store, "get_attempt") else None
+                        if attempt_record is not None:
+                            store.save_attempt(attempt_record.model_copy(update={"status": "unknown", "ended_at": utcnow(), "error": result.error}))
                     except Exception:
                         pass
                 _append_event(store, CODE_POST_FENCING_REJECTED, request.id, {"reason": post_reason, "provider_id": provider_id})
@@ -962,37 +883,30 @@ class RealityBoundary:
 
         # Durable projection is part of the authoritative outcome.  A commit
         # failure after provider success is recoverable/unknown, never success.
-        if store is not None and step_id is not None:
-            try:
-                step = store.get_step(step_id) if hasattr(store, "get_step") else None
-                attempt = store.get_attempt(attempt_id) if attempt_id and hasattr(store, "get_attempt") else None
-                projected_status = result.status if result.status in ("succeeded", "failed", "cancelled", "unknown") else "failed"
-                if step is None or attempt is None:
-                    raise RuntimeError("execution projection missing precommitted records")
-                step_update = step.model_copy(update={"status": projected_status, "updated_at": utcnow()})
-                attempt_update = attempt.model_copy(update={"status": projected_status, "ended_at": utcnow(), "result_ref": result.request_id, "error": result.error})
-                action = Action(id=action_id or new_id("action"), work_id=request.work_id or "", run_id=request.run_id or "", capability=request.capability, provider_id=provider_id, request_ref=request.id, status=projected_status)
-                outcome = Outcome(id=new_id("outcome"), action_id=action.id, artifact_refs=result.output_artifact_refs, evidence_refs=result.evidence_refs, status=projected_status)
-                if hasattr(store, "transaction"):
-                    with store.transaction():
-                        store.save_step(step_update)
-                        store.save_attempt(attempt_update)
-                        store.save_action(action)
-                        store.save_outcome(outcome)
-                else:
-                    store.save_step(step_update)
-                    store.save_attempt(attempt_update)
-                    store.save_action(action)
-                    store.save_outcome(outcome)
-                _append_event(store, "CapabilitySucceeded" if projected_status == "succeeded" else "CapabilityCompleted", request.id, {"provider_id": provider_id, "status": projected_status, "capability": request.capability})
-                _append_event(store, "OutcomeRecorded", request.id, {"outcome_id": outcome.id, "status": projected_status, "provider_id": provider_id})
-            except Exception as exc:
-                # The provider may have changed the world even though the
-                # runtime could not persist the projection.  Preserve the
-                # uncertainty explicitly.
-                reason = f"result commit failed: {exc}"
-                _append_event(store, CODE_RESULT_COMMIT_FAILED, request.id, {"reason": reason, "provider_id": provider_id})
-                return result.model_copy(update={"status": "unknown", "error": {"code": CODE_RESULT_COMMIT_FAILED, "reason": reason}})
+        projection = commit_execution_projection(
+            store,
+            request,
+            result,
+            provider_id=provider_id,
+            records=records,
+        )
+        if projection.error is not None:
+            reason = f"result commit failed: {projection.error}"
+            _append_event(store, CODE_RESULT_COMMIT_FAILED, request.id, {"reason": reason, "provider_id": provider_id})
+            return result.model_copy(update={"status": "unknown", "error": {"code": CODE_RESULT_COMMIT_FAILED, "reason": reason}})
+        if projection.projected_status is not None:
+            _append_event(
+                store,
+                "CapabilitySucceeded" if projection.projected_status == "succeeded" else "CapabilityCompleted",
+                request.id,
+                {"provider_id": provider_id, "status": projection.projected_status, "capability": request.capability},
+            )
+            _append_event(
+                store,
+                "OutcomeRecorded",
+                request.id,
+                {"outcome_id": projection.outcome_id, "status": projection.projected_status, "provider_id": provider_id},
+            )
         return result
 
     async def reconcile(
@@ -1046,7 +960,7 @@ class RealityBoundary:
         return await self.execute(request, capability_service=capability_service)
 
         # CapabilityContract resolve + effective impact (never downgrade)
-        _contract: any = None
+        _contract: Any = None
         try:
             _contract = self.contract_registry.resolve(request.capability)
         except EffectContractInvalid as exc:

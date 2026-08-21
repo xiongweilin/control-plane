@@ -76,10 +76,18 @@
 - **待收口**：`new_coverage 77.1 → 80` 的 2.9 点缺口；`sonar.coverage.exclusions` 当前已较激进，不建议再扩大，建议以新增 `test_portable_runtime` 单测覆盖 `CodexProvider`/`Verifier` 提升。
 
 
-## 2026-08-21: portable_runtime sync to 4de0284 (strict enforcement P1/P2)
+## 2026-08-21: initial portable_runtime sync to 4de0284 (strict enforcement P1/P2)
 
 - 从 `ratiolin/portable-runtime` HEAD `4de0284` 全量同步 vendored `src/portable_runtime`（92 tracked 文件零偏差）；仅工具配置对齐（ruff per-file-ignores / mypy overrides）。
 - legacy 修复路径新增 `_LegacyRoutingBoundary` compat seam（保持 V2 前路由语义）；portable Runtime 路径保留完整 RealityBoundary。
 - `control_plane.tools` 补 `check_container_status` / `check_logs` 兼容函数（portable verifier fallback 导入契约）。
 - 门禁：ruff / mypy src / check_portable_core_imports 全绿；pytest 231 passed；coverage 75%（baseline 74.0）。
 - 运行时切换：ControlPlane 计划任务 2026-08-21 11:41 重启，新 run_id `run-1787283657-7281aae8`，/ready ok，无活跃告警。
+
+## 2026-08-21: strict runtime sync and capability sandbox closure
+
+- `src/portable_runtime` now follows `ratiolin/portable-runtime@6789a96`, adding the current Boundary stages/fencing, graph validation, authorization compatibility, reliability policy separation and version-axis cleanup.
+- Added upstream conformance coverage to the private profile: the full suite is now 480 passed.
+- Codex execution is physically capability-scoped: read/reason/diff capabilities use `read-only`; candidate edit/test capabilities use `workspace-write`; unknown capabilities fail closed. The legacy repair bridge now requests `code.edit` and passes the same ceiling to `CodexRunner` when supported.
+- Candidate promotion now requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource before changing the legacy playbook status.
+- This closes the capability contract leak but does not claim the separate §64B operational cutover; Windows launcher/service replacement remains a follow-up gate.

@@ -1,4 +1,6 @@
-"""Circuit breaker & fault containment — V1.6 + V1.8.
+"""Circuit breaker and fault containment — R1.6/R1.8 implementation milestones.
+
+Implements Framework V1 / Control Plane schema official-1.0.0.
 
 ``ReliabilityControls`` is deliberately a small, deterministic gate.  It
 tracks both the durable budget (how much side effect has already been spent)
@@ -11,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -66,22 +68,300 @@ class CircuitBreaker:
         return self._state
 
 
-@dataclass
-class ReliabilityControls:
-    """V1.8 reliability controls: rate, blast radius, budgets."""
+@dataclass(frozen=True)
+class ReliabilityObservation:
+    """Observed runtime facts; this object owns no governance thresholds."""
 
-    max_action_rate: int = 100  # per minute
+    action_rate: int
+    active_side_effects: int
+    side_effect_count: int
+    exposure_used: int
+    requested_blast_radius: int
+    requested_exposure: int
+    cooldown_remaining: float
+    t_detect: float | None = None
+    t_judge: float | None = None
+    t_correct: float | None = None
+    t_irreversible: float | None = None
+
+
+@dataclass(frozen=True)
+class ReliabilityRiskAssessment:
+    """Structural risk interpretation, kept separate from disposition."""
+
+    severity: Literal["none", "low", "high", "critical"]
+    reason_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReliabilityDisposition:
+    """Policy action for one reliability observation."""
+
+    action: Literal["allow", "require", "defer", "deny"]
+    policy_ref: str
+    reason: str = "allowed"
+
+
+@dataclass(frozen=True)
+class ReliabilityLimits:
+    """Single owner for local reliability threshold values."""
+
+    max_action_rate: int = 100
     max_parallel_side_effects: int = 10
     blast_radius: int = 5
-    cooldown_seconds: float = 5.0
     exposure_budget: int = 1000
     side_effect_budget: int = 100
+
+
+@dataclass(frozen=True)
+class ReliabilityRiskEvaluator:
+    """Interpret an observation into structural risk reasons.
+
+    This component is policy-neutral: it reports structurally invalid timing
+    and request facts, while local rate/budget/limit thresholds belong to the
+    policy profile that consumes the assessment.
+    """
+
+    def evaluate(
+        self,
+        observation: ReliabilityObservation,
+        *,
+        side_effect: bool,
+        irreversible: bool,
+        procedure_profile: str | None,
+        timing: dict[str, Any] | None,
+    ) -> ReliabilityRiskAssessment:
+        reasons: list[str] = []
+        if side_effect and observation.requested_blast_radius < 1:
+            reasons.append("blast_radius_positive")
+        elif side_effect and observation.requested_exposure < 1:
+            reasons.append("exposure_positive")
+
+        enhanced = procedure_profile == "enhanced" or irreversible
+        if not reasons and enhanced:
+            if not isinstance(timing, dict):
+                reasons.append("recovery_timing_required")
+            else:
+                try:
+                    values = tuple(float(timing[key]) for key in ("t_detect", "t_judge", "t_correct", "t_irreversible"))
+                except (KeyError, TypeError, ValueError):
+                    values = ()
+                    reasons.append("recovery_timing_incomplete")
+                if values:
+                    t_detect, t_judge, t_correct, t_irreversible = values
+                    if min(values) < 0:
+                        reasons.append("recovery_timing_non_negative")
+                    elif t_detect + t_judge + t_correct >= t_irreversible:
+                        reasons.append("recovery_window")
+
+        severity: Literal["none", "low", "high", "critical"] = "none" if not reasons else "high"
+        return ReliabilityRiskAssessment(severity=severity, reason_refs=tuple(reasons))
+
+
+@dataclass(frozen=True, init=False)
+class DefaultLocalReliabilityPolicy:
+    """Versioned local policy profile for default governance thresholds.
+
+    The values are policy configuration, not framework invariants.  A caller
+    can provide another profile without changing the observation or risk
+    structures used by ``ReliabilityControls``.
+    """
+
+    profile_id: str = "personal-local-v1"
+    version: str = "1"
+    limits: ReliabilityLimits = field(default_factory=ReliabilityLimits)
+    cooldown_seconds: float = 5.0
+
+    def __init__(
+        self,
+        profile_id: str = "personal-local-v1",
+        version: str = "1",
+        limits: ReliabilityLimits | None = None,
+        cooldown_seconds: float = 5.0,
+        *,
+        max_action_rate: int = 100,
+        max_parallel_side_effects: int = 10,
+        blast_radius: int = 5,
+        exposure_budget: int = 1000,
+        side_effect_budget: int = 100,
+    ) -> None:
+        object.__setattr__(self, "profile_id", profile_id)
+        object.__setattr__(self, "version", version)
+        object.__setattr__(
+            self,
+            "limits",
+            limits
+            or ReliabilityLimits(
+                max_action_rate=max_action_rate,
+                max_parallel_side_effects=max_parallel_side_effects,
+                blast_radius=blast_radius,
+                exposure_budget=exposure_budget,
+                side_effect_budget=side_effect_budget,
+            ),
+        )
+        object.__setattr__(self, "cooldown_seconds", cooldown_seconds)
+
+    @property
+    def max_action_rate(self) -> int:
+        return self.limits.max_action_rate
+
+    @property
+    def max_parallel_side_effects(self) -> int:
+        return self.limits.max_parallel_side_effects
+
+    @property
+    def blast_radius(self) -> int:
+        return self.limits.blast_radius
+
+    @property
+    def exposure_budget(self) -> int:
+        return self.limits.exposure_budget
+
+    @property
+    def side_effect_budget(self) -> int:
+        return self.limits.side_effect_budget
+
+    @property
+    def policy_ref(self) -> str:
+        return f"{self.profile_id}@{self.version}"
+
+    def decide(
+        self,
+        observation: ReliabilityObservation,
+        risk: ReliabilityRiskAssessment,
+        limits: ReliabilityLimits | None = None,
+    ) -> ReliabilityDisposition:
+        limits = limits or self.limits
+        reason_text = "allowed"
+        reason = risk.reason_refs[0] if risk.reason_refs else None
+        if reason is None:
+            if observation.action_rate >= limits.max_action_rate:
+                reason = "max_action_rate"
+            elif observation.requested_blast_radius > limits.blast_radius:
+                reason = "blast_radius_limit"
+            elif observation.active_side_effects >= limits.max_parallel_side_effects:
+                reason = "parallel_side_effect_limit"
+            elif observation.side_effect_count >= limits.side_effect_budget:
+                reason = "side_effect_budget"
+            elif observation.exposure_used + observation.requested_exposure > limits.exposure_budget:
+                reason = "exposure_budget"
+            elif observation.cooldown_remaining > 0:
+                reason = "cooldown"
+        if reason == "max_action_rate":
+            reason_text = "max_action_rate exceeded"
+        elif reason == "blast_radius_positive":
+            reason_text = "blast_radius must be positive"
+        elif reason == "blast_radius_limit":
+            reason_text = f"blast_radius {observation.requested_blast_radius} exceeds limit {self.limits.blast_radius}"
+        elif reason == "exposure_positive":
+            reason_text = "exposure must be positive"
+        elif reason == "parallel_side_effect_limit":
+            reason_text = "max_parallel_side_effects exceeded"
+        elif reason == "side_effect_budget":
+            reason_text = "side_effect_budget exhausted"
+        elif reason == "exposure_budget":
+            reason_text = "exposure_budget exhausted"
+        elif reason == "cooldown":
+            reason_text = "cooldown active"
+        elif reason == "recovery_timing_required":
+            reason_text = "enhanced side effect requires recovery timing"
+        elif reason == "recovery_timing_incomplete":
+            reason_text = "recovery timing is incomplete"
+        elif reason == "recovery_timing_non_negative":
+            reason_text = "recovery timing must be non-negative"
+        elif reason == "recovery_window":
+            reason_text = "recovery loop exceeds irreversible window"
+        return ReliabilityDisposition(
+            action="allow" if reason is None else "deny",
+            policy_ref=self.policy_ref,
+            reason=reason_text,
+        )
+
+    def evaluate(
+        self,
+        observation: ReliabilityObservation,
+        *,
+        side_effect: bool,
+        irreversible: bool,
+        procedure_profile: str | None,
+        timing: dict[str, Any] | None,
+    ) -> tuple[ReliabilityRiskAssessment, ReliabilityDisposition]:
+        evaluator = ReliabilityRiskEvaluator()
+        risk = evaluator.evaluate(
+            observation,
+            side_effect=side_effect,
+            irreversible=irreversible,
+            procedure_profile=procedure_profile,
+            timing=timing,
+        )
+        return risk, self.decide(observation, risk, self.limits)
+
+
+@dataclass(init=False)
+class ReliabilityControls:
+    """R1.8 reliability controls: rate, blast radius, budgets."""
+
+    cooldown_seconds: float
     _action_timestamps: list[float] = field(default_factory=list)
     _side_effect_count: int = 0
     _active_side_effects: int = 0
     _exposure_used: int = 0
     _last_side_effect_at: float | None = None
     _last_block_reason: str | None = field(default=None, init=False, repr=False)
+    policy: DefaultLocalReliabilityPolicy | None = None
+    risk_evaluator: ReliabilityRiskEvaluator | None = None
+    _last_risk_assessment: ReliabilityRiskAssessment | None = field(default=None, init=False, repr=False)
+    _last_disposition: ReliabilityDisposition | None = field(default=None, init=False, repr=False)
+
+    def __init__(
+        self,
+        max_action_rate: int = 100,
+        max_parallel_side_effects: int = 10,
+        blast_radius: int = 5,
+        cooldown_seconds: float = 5.0,
+        exposure_budget: int = 1000,
+        side_effect_budget: int = 100,
+        policy: DefaultLocalReliabilityPolicy | None = None,
+        risk_evaluator: ReliabilityRiskEvaluator | None = None,
+    ) -> None:
+        self.policy = policy or DefaultLocalReliabilityPolicy(
+            cooldown_seconds=cooldown_seconds,
+            max_action_rate=max_action_rate,
+            max_parallel_side_effects=max_parallel_side_effects,
+            blast_radius=blast_radius,
+            exposure_budget=exposure_budget,
+            side_effect_budget=side_effect_budget,
+        )
+        self.cooldown_seconds = self.policy.cooldown_seconds
+        self.risk_evaluator = risk_evaluator or ReliabilityRiskEvaluator()
+        self._action_timestamps = []
+        self._side_effect_count = 0
+        self._active_side_effects = 0
+        self._exposure_used = 0
+        self._last_side_effect_at = None
+        self._last_block_reason = None
+        self._last_risk_assessment = None
+        self._last_disposition = None
+
+    @property
+    def max_action_rate(self) -> int:
+        return self.policy.limits.max_action_rate if self.policy is not None else 100
+
+    @property
+    def max_parallel_side_effects(self) -> int:
+        return self.policy.limits.max_parallel_side_effects if self.policy is not None else 10
+
+    @property
+    def blast_radius(self) -> int:
+        return self.policy.limits.blast_radius if self.policy is not None else 5
+
+    @property
+    def exposure_budget(self) -> int:
+        return self.policy.limits.exposure_budget if self.policy is not None else 1000
+
+    @property
+    def side_effect_budget(self) -> int:
+        return self.policy.limits.side_effect_budget if self.policy is not None else 100
 
     def assess(
         self,
@@ -102,58 +382,48 @@ class ReliabilityControls:
         """
 
         now = time.monotonic()
-        # sliding window 60s
         self._action_timestamps = [t for t in self._action_timestamps if now - t < 60]
-        if len(self._action_timestamps) >= self.max_action_rate:
-            return self._block("max_action_rate exceeded")
-        if not side_effect:
+        requested_exposure = exposure if exposure is not None else action_blast_radius
+        cooldown_remaining = 0.0
+        if self._last_side_effect_at is not None:
+            cooldown_remaining = max(0.0, self.cooldown_seconds - (now - self._last_side_effect_at))
+        timing_values: dict[str, float] = {}
+        if isinstance(timing, dict):
+            for key in ("t_detect", "t_judge", "t_correct", "t_irreversible"):
+                value = timing.get(key)
+                if isinstance(value, (int, float)):
+                    timing_values[key] = float(value)
+        observation = ReliabilityObservation(
+            action_rate=len(self._action_timestamps),
+            active_side_effects=self._active_side_effects,
+            side_effect_count=self._side_effect_count,
+            exposure_used=self._exposure_used,
+            requested_blast_radius=action_blast_radius,
+            requested_exposure=requested_exposure,
+            cooldown_remaining=cooldown_remaining,
+            t_detect=timing_values.get("t_detect"),
+            t_judge=timing_values.get("t_judge"),
+            t_correct=timing_values.get("t_correct"),
+            t_irreversible=timing_values.get("t_irreversible"),
+        )
+        if self.policy is None:  # defensive guard for non-standard dataclass construction
+            raise RuntimeError("reliability policy profile is unavailable")
+        if self.risk_evaluator is None:
+            raise RuntimeError("reliability risk evaluator is unavailable")
+        risk = self.risk_evaluator.evaluate(
+            observation,
+            side_effect=side_effect,
+            irreversible=irreversible,
+            procedure_profile=procedure_profile,
+            timing=timing,
+        )
+        disposition = self.policy.decide(observation, risk, self.policy.limits)
+        self._last_risk_assessment = risk
+        self._last_disposition = disposition
+        if disposition.action == "allow":
             self._last_block_reason = None
             return True, "allowed"
-
-        if action_blast_radius < 1:
-            return self._block("blast_radius must be positive")
-        if action_blast_radius > self.blast_radius:
-            return self._block(
-                f"blast_radius {action_blast_radius} exceeds limit {self.blast_radius}"
-            )
-        if self._active_side_effects >= self.max_parallel_side_effects:
-            return self._block("max_parallel_side_effects exceeded")
-        if self._side_effect_count >= self.side_effect_budget:
-            return self._block("side_effect_budget exhausted")
-
-        requested_exposure = exposure if exposure is not None else action_blast_radius
-        if requested_exposure < 1:
-            return self._block("exposure must be positive")
-        if self._exposure_used + requested_exposure > self.exposure_budget:
-            return self._block("exposure_budget exhausted")
-
-        if (
-            self.cooldown_seconds > 0
-            and self._last_side_effect_at is not None
-            and now - self._last_side_effect_at < self.cooldown_seconds
-        ):
-            return self._block("cooldown active")
-
-        enhanced = procedure_profile == "enhanced" or irreversible
-        if enhanced:
-            if not isinstance(timing, dict):
-                return self._block("enhanced side effect requires recovery timing")
-            try:
-                t_detect = float(timing["t_detect"])
-                t_judge = float(timing["t_judge"])
-                t_correct = float(timing["t_correct"])
-                t_irreversible = float(timing["t_irreversible"])
-            except (KeyError, TypeError, ValueError):
-                return self._block("recovery timing is incomplete")
-            if min(t_detect, t_judge, t_correct, t_irreversible) < 0:
-                return self._block("recovery timing must be non-negative")
-            if not self.check_rate_compatibility(
-                t_detect, t_judge, t_correct, t_irreversible
-            ):
-                return self._block("recovery loop exceeds irreversible window")
-
-        self._last_block_reason = None
-        return True, "allowed"
+        return self._block(disposition.reason)
 
     def _block(self, reason: str) -> tuple[bool, str]:
         self._last_block_reason = reason
@@ -210,6 +480,14 @@ class ReliabilityControls:
     @property
     def last_block_reason(self) -> str | None:
         return self._last_block_reason
+
+    @property
+    def last_risk_assessment(self) -> ReliabilityRiskAssessment | None:
+        return self._last_risk_assessment
+
+    @property
+    def last_disposition(self) -> ReliabilityDisposition | None:
+        return self._last_disposition
 
     def check_rate_compatibility(  # noqa: E501
         self, t_detect: float, t_judge: float, t_correct: float, t_irreversible: float
