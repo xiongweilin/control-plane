@@ -9,6 +9,12 @@ def test_validate_url_origin() -> None:
     assert validate_url("https://metratio.com/feedback", ("https://metratio.com",)) == "https://metratio.com/feedback"
     with pytest.raises(ToolError):
         validate_url("https://evil.example.com/x", ("https://metratio.com",))
+    with pytest.raises(ToolError):
+        validate_url("https://metratio.com.evil.example/x", ("https://metratio.com",))
+    with pytest.raises(ToolError):
+        validate_url("https://user:secret@metratio.com/x", ("https://metratio.com",))
+    with pytest.raises(ToolError):
+        validate_url("https://metratio.com:444/x", ("https://metratio.com",))
 
 
 def test_resolve_repo_allowed_and_denied() -> None:
@@ -50,3 +56,21 @@ def test_resolve_repo_blocked_paths() -> None:
         resolve_repo("D:\\infrastructure\\compose\\app", allowed, blocked=(".env",))
         == "D:/infrastructure/compose/app"
     )
+
+
+def test_resolve_repo_uses_canonical_containment(tmp_path) -> None:
+    root = tmp_path / "repos"
+    inside = root / "app"
+    outside = tmp_path / "outside"
+    inside.mkdir(parents=True)
+    outside.mkdir()
+    assert resolve_repo(str(root / "app" / ".." / "app"), (str(root),)) == str(inside).replace("\\", "/")
+    with pytest.raises(ToolError):
+        resolve_repo(str(root / ".." / "outside"), (str(root),))
+    link = root / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    with pytest.raises(ToolError):
+        resolve_repo(str(link), (str(root),))

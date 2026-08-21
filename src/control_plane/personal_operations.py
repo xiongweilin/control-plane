@@ -119,6 +119,34 @@ class PersonalOperationsProvider:
             descriptor_result = await self._reconcile_descriptor(request.id)
             if descriptor_result is not None and descriptor_result.status != "succeeded":
                 return descriptor_result
+            # A restart command plus a healthy postcondition does not prove
+            # that this particular restart event occurred.  Keep this
+            # capability non-terminal even when no durable reconciliation
+            # store is configured (for example, in an isolated provider
+            # harness).  Callers must not promote desired-state evidence to
+            # event attribution.
+            if request.capability == "docker.restart" and self.reconciliation_store is None:
+                entry = self._journal[request.id]
+                entry.state = "unknown"
+                entry.metadata.update(
+                    {
+                        "event_attribution": "unknown",
+                        "event_verified": False,
+                        "event_verification_basis": "not-observable",
+                    }
+                )
+                return CapabilityResult(
+                    request_id=request.id,
+                    provider_id=self.descriptor.id,
+                    status="unknown",
+                    message="Docker desired state confirmed; restart event attribution remains unknown",
+                    metadata={
+                        "operation": request.capability,
+                        "resource_ref": request.resource_ref or "",
+                        **entry.metadata,
+                    },
+                    reconciled=False,
+                )
         except ToolError as exc:
             entry = self._journal[request.id]
             ambiguous = self._is_ambiguous_error(exc)
@@ -321,7 +349,21 @@ class PersonalOperationsProvider:
             docker_operation = descriptor.operation
             status = await self._docker_status(docker_operation.project)
             healthy = self._containers_healthy(status)
-            verdict = classify_docker_state(healthy=healthy, desired_state=docker_operation.desired_state)
+            desired_state_verdict = classify_docker_state(
+                healthy=healthy, desired_state=docker_operation.desired_state
+            )
+            # ``classify_docker_state`` intentionally answers only whether
+            # the desired state is true.  A restart additionally requires
+            # attribution to this request; container health alone cannot
+            # distinguish our restart from a pre-existing/recovered state.
+            # Until a restart identity (generation/start-time/restart-count)
+            # is observed, keep the reconciliation UNKNOWN and therefore
+            # non-terminal.
+            verdict = (
+                ReconciliationVerdict.UNKNOWN
+                if docker_operation.kind == "docker.restart"
+                else desired_state_verdict
+            )
             details.update(
                 {
                     "project": docker_operation.project,
@@ -332,6 +374,9 @@ class PersonalOperationsProvider:
                     if docker_operation.kind == "docker.restart"
                     else "not-applicable",
                     "event_verified": False,
+                    "event_verification_basis": "not-observable"
+                    if docker_operation.kind == "docker.restart"
+                    else "desired-state-operation",
                 }
             )
         else:
@@ -562,13 +607,20 @@ class PersonalOperationsProvider:
                     "not-observable" if is_restart else "desired-state-operation",
                 )
                 if desired_state_verified:
+                    # Healthy containers prove only the desired state.  A
+                    # restart event is not attributable without an observed
+                    # restart identity, so preserve UNKNOWN and require a
+                    # later, effect-specific observation.
+                    if is_restart:
+                        entry.state = "unknown"
+                        return self._reconciled(
+                            request,
+                            "unknown",
+                            "Docker desired state confirmed; restart event attribution remains unknown",
+                            entry.metadata,
+                        )
                     entry.state = "succeeded"
-                    message = (
-                        "Docker desired state confirmed; restart event attribution remains unknown"
-                        if is_restart
-                        else "Docker desired state confirmed"
-                    )
-                    return self._reconciled(request, "succeeded", message, entry.metadata)
+                    return self._reconciled(request, "succeeded", "Docker desired state confirmed", entry.metadata)
                 entry.state = "unknown"
                 return self._reconciled(
                     request,

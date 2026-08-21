@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ntpath
+import os
 import re
 import time
 import urllib.parse
@@ -156,13 +158,39 @@ def validate_identifier(value: str, label: str) -> str:
 
 
 def validate_url(value: str, allowed_origins: tuple[str, ...]) -> str:
-    parsed = urllib.parse.urlparse(value)
-    if parsed.scheme not in {"http", "https"}:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"}:
         raise ToolError(f"Unsupported URL scheme: {parsed.scheme}")
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    if not any(origin.startswith(prefix) for prefix in allowed_origins):
-        raise ToolError(f"URL origin not allowed: {origin}")
-    return value
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ToolError("URL must contain a host without embedded credentials")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ToolError("URL contains an invalid port") from exc
+    hostname = parsed.hostname.rstrip(".").lower()
+    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+    for allowed in allowed_origins:
+        allowed_parsed = urllib.parse.urlsplit(allowed)
+        if (
+            allowed_parsed.scheme.lower() not in {"http", "https"}
+            or not allowed_parsed.hostname
+            or allowed_parsed.username is not None
+            or allowed_parsed.password is not None
+        ):
+            continue
+        try:
+            allowed_port = allowed_parsed.port
+        except ValueError:
+            continue
+        allowed_host = allowed_parsed.hostname.rstrip(".").lower()
+        allowed_effective_port = allowed_port or (443 if allowed_parsed.scheme.lower() == "https" else 80)
+        if (
+            parsed.scheme.lower() == allowed_parsed.scheme.lower()
+            and hostname == allowed_host
+            and effective_port == allowed_effective_port
+        ):
+            return value
+    raise ToolError(f"URL origin not allowed: {parsed.scheme.lower()}://{hostname}:{effective_port}")
 
 
 def resolve_repo(
@@ -170,9 +198,41 @@ def resolve_repo(
     allowed_roots: tuple[str, ...],
     blocked: tuple[str, ...] = (),
 ) -> str:
-    normalized = value.replace("\\", "/").rstrip("/")
-    allowed = tuple(root.replace("\\", "/").rstrip("/") for root in allowed_roots)
-    if not any(normalized == root or normalized.startswith(root + "/") for root in allowed):
+    def _canonical(raw: str) -> tuple[str, str]:
+        # Windows paths are common in the private profile even when the
+        # portable test suite runs on Linux.  Keep their lexical identity
+        # there, while using the host filesystem's resolve() when available so
+        # junctions/symlinks cannot escape an allowlisted root.
+        looks_windows = bool(re.match(r"^[A-Za-z]:[\\/]", raw)) or raw.startswith("\\\\")
+        if looks_windows and os.name != "nt":
+            normalized_windows = ntpath.normpath(raw.replace("/", "\\"))
+            return normalized_windows.replace("\\", "/").rstrip("/"), "windows"
+        try:
+            resolved = Path(raw).expanduser().resolve(strict=False)
+        except OSError as exc:
+            raise ToolError(f"Repository path cannot be canonicalized: {raw}") from exc
+        return str(resolved).replace("\\", "/").rstrip("/"), "native"
+
+    normalized, flavor = _canonical(value)
+    allowed = tuple(_canonical(root)[0] for root in allowed_roots)
+    if flavor == "windows":
+        candidate_key = normalized.lower()
+        allowed_keys = tuple(root.lower() for root in allowed)
+        contained = any(
+            candidate_key == root or candidate_key.startswith(root + "/")
+            for root in allowed_keys
+        )
+    else:
+        try:
+            candidate_path = Path(normalized)
+            contained = any(
+                candidate_path == Path(root)
+                or Path(root) in candidate_path.parents
+                for root in allowed
+            )
+        except (OSError, ValueError):
+            contained = False
+    if not contained:
         raise ToolError(f"Repository path not allowed: {value}")
     segments = [s.lower() for s in normalized.split("/") if s]
     for pattern in blocked:

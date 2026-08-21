@@ -43,7 +43,10 @@ class PortableRuntimeAuthority:
         legacy_store: Any | None = None,
         version_resolver: VersionResolver | None = None,
         actor_ref: str = "personal-agent",
-        principal_ref: str = "personal-owner",
+        # Principal references participate in the portable semantic graph;
+        # keep the default namespaced so graph validation treats it as an
+        # external human principal rather than a dangling local id.
+        principal_ref: str = "human:personal-owner",
     ) -> None:
         self.runtime = runtime
         self.legacy_store = legacy_store
