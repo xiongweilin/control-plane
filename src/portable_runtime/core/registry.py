@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Iterable
+from contextlib import suppress
 
 from portable_runtime.core.capabilities import ProviderDescriptor, ProviderHealth
 from portable_runtime.interfaces.provider import CapabilityProvider
@@ -14,10 +15,22 @@ class ProviderRegistry:
         self._providers: dict[str, CapabilityProvider] = {}
         self._enabled: dict[str, bool] = {}
 
-    def register(self, provider: CapabilityProvider) -> ProviderDescriptor:
+    def register(self, provider: CapabilityProvider, _maybe_provider: CapabilityProvider | None = None) -> ProviderDescriptor:
+        # Back-compat: test harness calls register(descriptor, provider); support both forms
+        if _maybe_provider is not None:
+            provider = _maybe_provider
         descriptor = provider.descriptor
         if descriptor.id in self._providers:
             raise ValueError(f"provider already registered: {descriptor.id}")
+        # Circuit state belongs to a live provider registration, not merely to
+        # a string id.  Test/runtime registries may intentionally replace a
+        # provider with the same id after a prior failure; carrying an open
+        # breaker across that replacement would make an unrelated provider
+        # permanently ineligible.
+        with suppress(Exception):
+            from portable_runtime.core.boundary import _CIRCUITS
+
+            _CIRCUITS.pop(descriptor.id, None)
         self._providers[descriptor.id] = provider
         self._enabled[descriptor.id] = descriptor.enabled
         return self._descriptor(descriptor.id)
