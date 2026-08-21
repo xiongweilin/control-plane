@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import logging
 import re
@@ -47,7 +48,9 @@ from .personal_operations import PersonalOperationsProvider
 from .reconciliation import (
     ReconciliationDescriptor,
     ReconciliationDescriptorStore,
+    ReconciliationObservation,
     ReconciliationState,
+    ReconciliationVerdict,
 )
 from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES, RepairState, require_transition
@@ -356,6 +359,35 @@ class RepairService:
                         descriptor.provider_id,
                     )
                 refreshed = descriptor_store.get(descriptor.id) or descriptor
+                if capabilities is None:
+                    refreshed = self._record_reconciliation_observation(
+                        descriptor_store,
+                        refreshed,
+                        message="provider reconciliation unavailable: capability service missing",
+                        failure_code="provider-unavailable",
+                    )
+                elif result is None:
+                    refreshed = self._record_reconciliation_observation(
+                        descriptor_store,
+                        refreshed,
+                        message="provider reconciliation returned no observation",
+                        failure_code="provider-observation-missing",
+                    )
+                elif refreshed.last_observation == descriptor.last_observation:
+                    # A provider result without a descriptor observation is
+                    # not durable evidence about the external effect.  Keep
+                    # the repair recoverable and persist an explicit unknown
+                    # observation rather than projecting provider status into
+                    # the reconciliation state.
+                    status = str(result.status)
+                    result_message = result.message or "provider returned no durable reconciliation observation"
+                    refreshed = self._record_reconciliation_observation(
+                        descriptor_store,
+                        refreshed,
+                        message=f"{result_message} (status={status}; observation unavailable)",
+                        failure_code="provider-observation-missing",
+                        details={"provider_status": status},
+                    )
                 state = refreshed.state
                 message = (
                     refreshed.last_observation.message
@@ -402,13 +434,20 @@ class RepairService:
                 raise
             except Exception as exc:
                 logger.exception("startup reconciliation failed: %s", descriptor.id)
+                refreshed = self._record_reconciliation_observation(
+                    descriptor_store,
+                    descriptor,
+                    message=f"startup reconciliation unavailable: {exc}",
+                    failure_code="reconciliation-exception",
+                    details={"exception_type": type(exc).__name__},
+                )
                 if repair_id is not None:
                     # Keep the repair in RECOVERING and preserve the
                     # descriptor for a later bounded observation.  A provider
                     # transport error is not evidence that the effect failed.
                     self._record_startup_reconciliation(
                         repair_id,
-                        descriptor,
+                        refreshed,
                         action="observe-or-escalate",
                         message=f"startup reconciliation unavailable: {exc}",
                     )
@@ -423,6 +462,32 @@ class RepairService:
                     }
                 )
         return outcomes
+
+    @staticmethod
+    def _record_reconciliation_observation(
+        descriptor_store: ReconciliationDescriptorStore,
+        descriptor: ReconciliationDescriptor,
+        *,
+        message: str,
+        failure_code: str,
+        details: dict[str, Any] | None = None,
+    ) -> ReconciliationDescriptor:
+        """Persist a fail-closed observation when no provider fact was durable.
+
+        Provider transport failures and providers without a reconciliation
+        implementation are epistemic outcomes, not evidence that an effect
+        failed.  Recording ``unknown`` on the descriptor makes that fact
+        restart-safe while the legacy repair projection remains RECOVERING.
+        ``details`` contains only bounded classification metadata; the
+        provider message is retained as the human-readable recovery reason.
+        """
+
+        observation = ReconciliationObservation(
+            verdict=ReconciliationVerdict.UNKNOWN,
+            message=message[:2_000],
+            details={"failure_code": failure_code, **(details or {})},
+        )
+        return descriptor_store.record_observation(descriptor.id, observation)
 
     @staticmethod
     def _reconciliation_repair_id(descriptor: ReconciliationDescriptor) -> str | None:
@@ -1033,17 +1098,35 @@ class RepairService:
                     f"任务 Agent 失败（exit {result.exit_code}）: {result.stderr_tail[-1_500:]}"
                 )
             summary = (result.last_message or "（无摘要）")[:4_000]
+            verified, verification_reason, artifact_refs = self._verify_task_postcondition(task_id)
+            if not verified:
+                # Process success is an execution outcome only.  A generic
+                # natural-language task stays recoverable until a
+                # task-specific postcondition can independently associate a
+                # readable result artifact with the canonical Run.
+                reason = verification_reason or "task-result verification is unavailable"
+                if self.portable_authority is not None:
+                    self.portable_authority.mark_verification_required(task_id, reason)
+                self.store.set_repair_status(
+                    task_id,
+                    RepairState.RECOVERING.value,
+                    error=reason,
+                    recovery_error=reason,
+                    result=summary,
+                )
+                await self._notify(
+                    "warning",
+                    "任务执行完成，等待结果验证",
+                    f"task_id={task_id}\n{reason}\n{summary}",
+                )
+                return
             if self.portable_authority is not None:
-                # A task is complete only after a deterministic task-result
-                # check has recorded the successful process outcome.  This
-                # keeps legacy CLOSED and canonical completed/succeeded in
-                # lockstep instead of relying on the legacy row alone.
                 verification_refs = self.portable_authority.record_verification(
                     task_id,
                     passed=True,
                     summary=summary,
-                    evidence_refs=[f"task-result:{task_id}:exit=0"],
-                    verifier_ref="control-plane.task-result-verifier",
+                    evidence_refs=artifact_refs,
+                    verifier_ref="control-plane.task-result-postcondition",
                 )
                 self.portable_authority.finalize_repair(
                     task_id,
@@ -2549,6 +2632,72 @@ class RepairService:
             and refs
             and refs == run_metadata.get("verification_refs")
         )
+
+    def _verify_task_postcondition(self, repair_id: str) -> tuple[bool, str, list[str]]:
+        """Verify a task result artifact independently of the provider exit code.
+
+        ``exit_code == 0`` proves only that Codex terminated successfully.  A
+        task can close here only when a transcript artifact is present, has a
+        provider-generated control header, and is associated with this
+        canonical Run.  The transcript is evidence that a result was produced;
+        it is intentionally not interpreted as proof that arbitrary task
+        content is correct.
+        """
+
+        authority = self.portable_authority
+        if authority is None:
+            return False, "task-result verifier has no portable authority", []
+        runtime = getattr(authority, "runtime", None)
+        portable_store = getattr(runtime, "store", None)
+        get_work = getattr(portable_store, "get_work", None)
+        get_run = getattr(portable_store, "get_run", None)
+        if not callable(get_work) or not callable(get_run):
+            return False, "task-result verifier has no canonical Work/Run store", []
+        work = get_work(f"work_legacy_{repair_id}")
+        run = get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return False, "task-result verifier cannot find canonical Work/Run", []
+        if work.kind != "generic-task" or run.workflow_id != "personal-task":
+            return False, "canonical task workflow identity is missing", []
+
+        session_dir = self.config.agent_session_dir
+        candidates = sorted(
+            [
+                *session_dir.glob(f"req-{repair_id}-*.jsonl"),
+                session_dir / f"{repair_id}.jsonl",
+            ],
+            key=lambda item: item.stat().st_mtime_ns if item.exists() else 0,
+            reverse=True,
+        )
+        for path in candidates:
+            try:
+                raw = path.read_bytes()
+                if not raw:
+                    continue
+                first_line, separator, body = raw.partition(b"\n")
+                if not separator or not body.strip():
+                    continue
+                header = json.loads(first_line.decode("utf-8"))
+                if not isinstance(header, dict) or header.get("type") != "control_plane_meta":
+                    continue
+                request_id = str(header.get("request_id", "") or "")
+                if request_id not in {repair_id} and not request_id.startswith(f"req-{repair_id}-"):
+                    continue
+                header_run_id = str(header.get("run_id", "") or "")
+                if header_run_id != run.id:
+                    continue
+                checksum = hashlib.sha256(raw).hexdigest()
+                artifact_ref = authority.record_task_result_artifact(
+                    repair_id,
+                    path=path,
+                    run_id=run.id,
+                    checksum=checksum,
+                )
+                if artifact_ref:
+                    return True, "task result artifact is readable and run-associated", [artifact_ref]
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                continue
+        return False, "task-result artifact is missing, unreadable, or not associated with the canonical Run", []
 
     def _canonical_verification_summary(self, repair_id: str) -> str:
         authority = self.portable_authority

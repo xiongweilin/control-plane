@@ -518,7 +518,7 @@ async def test_resolution_without_recovery_evidence_does_not_reset_attempts(tmp_
 
 
 @pytest.mark.asyncio
-async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
+async def test_dispatch_task_exit_zero_without_result_artifact_stays_recovering(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -549,7 +549,10 @@ async def test_dispatch_task_runs_and_closes(tmp_path) -> None:
         await asyncio.sleep(0.05)
     row = store.get_repair(task_id)
     assert row is not None
-    assert row["status"] == "closed"
+    # A successful Codex process is only an execution outcome.  Without a
+    # readable, run-associated result artifact the generic task cannot claim
+    # independent verification or close.
+    assert row["status"] == "recovering"
     assert row["result"]
     await service.close()
     store.close()
