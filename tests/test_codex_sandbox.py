@@ -65,6 +65,19 @@ def test_codex_sandbox_mapping_fails_closed() -> None:
         CodexProvider(sandbox_by_capability={"reason.generate": "danger-full-access"})
 
 
+@pytest.mark.parametrize("capability", ["reason.generate", "code.read", "unknown.capability"])
+def test_codex_sandbox_rejects_widening_read_capabilities(capability: str) -> None:
+    with pytest.raises(ValueError, match="would widen"):
+        CodexProvider(sandbox_by_capability={capability: "workspace-write"})
+
+
+def test_codex_sandbox_allows_only_tightening_write_capabilities() -> None:
+    provider = CodexProvider(sandbox_by_capability={"code.test": "read-only"})
+
+    assert provider.descriptor.metadata["sandbox_override"] == "tighten-only"
+    assert provider.descriptor.metadata["sandbox_overrides"] == {"code.test": "read-only"}
+
+
 def test_codex_capabilities_have_effect_contracts() -> None:
     registry = CapabilityContractRegistry()
     assert registry.resolve("code.read").minimum_impact_class == "read"

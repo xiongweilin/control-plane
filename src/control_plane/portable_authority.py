@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult
-from portable_runtime.core.models import Checkpoint, Decision, Run, Work, utcnow
+from portable_runtime.core.models import Artifact, Checkpoint, Decision, Run, Work, utcnow
 from portable_runtime.core.runtime import Runtime
 from portable_runtime.records.authorization import AuthorizationGrant
 from portable_runtime.records.models import BaseRecord
@@ -178,6 +178,90 @@ class PortableRuntimeAuthority:
         )
         self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata})
         )
+
+    def record_task_result_artifact(
+        self,
+        repair_id: str,
+        *,
+        path: Path,
+        run_id: str,
+        checksum: str,
+    ) -> str | None:
+        """Register a task transcript only when it is tied to its canonical run.
+
+        A readable transcript is an execution artifact, not proof that an
+        arbitrary natural-language task was substantively satisfied.  This
+        helper therefore records only the independently observable artifact
+        and leaves final verification to the task postcondition verifier.
+        """
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None or run.id != run_id or work.kind != "generic-task":
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file() or not resolved.stat().st_size:
+                return None
+        except OSError:
+            return None
+        token = self._stable_token(f"task-artifact:{repair_id}:{resolved}:{checksum}")
+        artifact_id = f"artifact_{repair_id}_{token}_task_result"
+        artifact = Artifact(
+            id=artifact_id,
+            kind="agent-session",
+            media_type="application/jsonl",
+            uri=resolved.as_uri(),
+            created_by_run_id=run.id,
+            created_by_provider_id="codex-primary",
+            checksum=checksum,
+            metadata={
+                "qualification_kind": "task-result-artifact",
+                "repair_id": repair_id,
+                "run_id": run.id,
+                "source": "control-plane.task-result-verifier",
+            },
+        )
+        existing = self.runtime.store.get_artifact(artifact_id)
+        if existing is None:
+            self.runtime.store.save_artifact(artifact)
+        refs = list(work.artifact_refs)
+        if artifact_id not in refs:
+            refs.append(artifact_id)
+        work_metadata = dict(work.metadata)
+        run_metadata = dict(run.metadata)
+        work_metadata.update({"task_result_artifact_ref": artifact_id, "task_result_artifact_checksum": checksum})
+        run_metadata.update({"task_result_artifact_ref": artifact_id, "task_result_artifact_checksum": checksum})
+        self.runtime.store.save_work(
+            work.model_copy(
+                update={"artifact_refs": refs, "metadata": work_metadata, "updated_at": utcnow()}
+            )
+        )
+        self.runtime.store.save_run(run.model_copy(update={"metadata": run_metadata}))
+        return artifact_id
+
+    def mark_verification_required(self, repair_id: str, summary: str) -> None:
+        """Keep a task waiting when execution completed without a verifier proof."""
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return
+        message = summary[:4_000]
+        work_metadata = dict(work.metadata)
+        run_metadata = dict(run.metadata)
+        for metadata in (work_metadata, run_metadata):
+            metadata.update(
+                {
+                    "verification_required": True,
+                    "verification_status": "unavailable",
+                    "verification_reason": message,
+                }
+            )
+        self.runtime.store.save_work(
+            work.model_copy(update={"status": "waiting", "metadata": work_metadata, "updated_at": utcnow()})
+        )
+        self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata}))
 
     def record_reconciliation_result(
         self,
