@@ -49,7 +49,10 @@ fresh remote ref equals that commit; an unobservable ref is `unknown`.
 `DockerOperation` and `DockerPostcondition` express desired-state semantics:
 `classify_docker_state()` can confirm current health, but it does not claim
 that a particular restart event occurred. A healthy current state therefore
-must not be used as restart-event attribution.
+must not be used as restart-event attribution. The private provider preserves
+this distinction in its result: `docker.restart` stays `unknown` (and leaves
+the descriptor open) until an effect-specific restart identity is observed;
+`docker.compose.up` may be `applied` because it is a desired-state operation.
 
 ## Integration boundary
 

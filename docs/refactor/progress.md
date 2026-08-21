@@ -64,7 +64,7 @@
 ## 2026-08-20 SonarCloud 推送与门禁收口 (本批次)
 
 - **分支对齐**：通过 `sonar api post "/api/project_branches/rename?project=metratio_control-plane&name=main"` 将 SonarCloud 主分支从 `master` 重命名为 `main`，对齐 GitHub `main`（`origin/HEAD -> origin/main`）。
-- **本地扫描**：`pytest --cov=src --cov-report=xml` 生成 `coverage.xml`（line-rate 0.7064，5953 valid / 4205 covered），`sonar-scanner` 使用 `sonarqube-cli` 登录态（`Windows Credential Manager → sonarqube-cli/sonarcloud.io:metratio`，需 `HTTP_PROXY=http://127.0.0.1:7890`）+ 一次性 `SONAR_TOKEN=1414e2d9...` 推送。
+- **本地扫描**：`pytest --cov=src --cov-report=xml` 生成 `coverage.xml`；`sonar-scanner` 使用 `sonarqube-cli` 的 OS Keychain 登录态（代理按 RUNBOOK 当前事实设置）推送，凭证值不记录。
 - **安全修复**：
   - `stores/bundle.py`：`_is_safe_member_name` + `re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*")` + `Path(root).resolve().relative_to()` 三重校验，`S6096` zip-slip 已关闭；`S8707` 在 `bundle.py:176,178,181,185,194` 等处加 `# NOSONAR`（经评估为 CLI 内部路径，外部输入已在 `cli.py` 经 `Path.resolve` 校验）。
   - `stores/conformance.py`：`tempfile.mktemp` → `tempfile.mkstemp` + `os.close(fd)`，`S5445` 已关闭。
@@ -72,7 +72,7 @@
   - `interactions/feishu/provider.py`：同 `S7487` 改为 `await asyncio.create_subprocess_exec`。
 - **Sonar 指标（2026-08-20T10:29:43Z 分析 `f718883e`）**：`coverage 90.9%` / `new_coverage 86.9%` / `bugs 0` / `vulnerabilities 0` / `code_smells 174` / `duplicated 2.1%`；Quality Gate 已 **OK**（`new_coverage 86.9%` ≥ 80，`coverage 90.9%`），此前 77.1 的缺口已通过 `sonar.coverage.exclusions` 排除低覆盖 wrapper（`policies`/`process`/`compat` 等）补齐，`new_reliability` 与 `new_security` 已从 ERROR 恢复为 OK。
 - **覆盖率说明**：`sonar.coverage.exclusions` 已排除 `src/control_plane/__main__.py`、`src/portable_runtime/config.py`/`runtime.py`/`core/*` 等纯模型/接口文件（`line-rate 0`），但 `api/cli`、`providers/codex`、`providers/verifiers` 等执行类仍计入，导致 `new_coverage` 略低于阈值。后续可通过为 `UppercaseProvider`/`ReviewWorkflow` 补充单测或为 `provider`/`verifier` 增加集成覆盖使 `new_coverage` 超 80，或在 SonarCloud 上为本项目创建阈值 75 的自定义 Quality Gate。
-- **GitHub CI**：`gh secret set SONAR_TOKEN` 已写入 `ratiolin/control-plane`（`Updated 2026-08-20T10:31:48Z`），`sonarcloud` Job 的 `SONAR_TOKEN` 不再为空；`continue-on-error: true` 保留以避免单次扫描失败阻断主链路，待 `new_coverage` 达 80 后可改为 `false`。
+- **GitHub CI**：当前 `ratiolin/control-plane` 未配置 `SONAR_TOKEN`，其 main-only `sonarcloud` Job 在无 secret 时按设计跳过；实际 SonarCloud 扫描由已配置 secret 的 public `ratiolin/portable-runtime` main CI 负责。私库本地扫描只使用 OS Keychain 登录态，凭证值不写入文档或日志。
 - **待收口**：`new_coverage 77.1 → 80` 的 2.9 点缺口；`sonar.coverage.exclusions` 当前已较激进，不建议再扩大，建议以新增 `test_portable_runtime` 单测覆盖 `CodexProvider`/`Verifier` 提升。
 
 

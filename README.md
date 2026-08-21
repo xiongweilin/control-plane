@@ -13,12 +13,12 @@ is vendored from `ratiolin/portable-runtime`.
 | Control Plane schema | `official-1.0.0` |
 | Portable Runtime milestone | `R2.0` |
 | Runtime protocol | `2.0` |
-| Portable Runtime pin | `66ce354` |
+| Portable Runtime pin | `804ac7a` |
 | Personal profile | `P1.x` |
 
 `src/portable_runtime` follows the public pin as its base. The provider-neutral
 capability, procedure-profile, qualification, store, and Codex sandbox
-semantics are synchronized to public pin `66ce354`; the remaining private
+semantics are synchronized to public pin `804ac7a`; the remaining private
 provider difference is the Windows execution boundary adapter.
 
 [![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
@@ -104,7 +104,7 @@ uv run python -m control_plane
 - Codex capability requests use a physical sandbox ceiling: `reason.generate`, `code.read` and `git.diff` run `read-only`; `code.edit`, `code.test` and `shell.exec` run `workspace-write`. Unknown capabilities fail closed to `read-only`; `danger-full-access` is not a personal-profile sandbox.
 - A repair session requests `code.edit` explicitly and runs from a detached candidate Git worktree by default (`[agent] isolate_worktree = true`); the source checkout is never the Codex cwd. The candidate branch remains in the source repository for review after the ephemeral worktree is removed.
 - Remote/deployment effects are not delegated to the Codex session. They require a separate Provider behind Portable Runtime's RealityBoundary and its authorization/reliability checks.
-- Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are private typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly. Docker results keep desired-state evidence separate from event attribution: a successful `docker.restart` proves the command returned and the allowlisted project is healthy, but does not claim that this particular restart event was observed; `docker.compose.up` is explicitly a desired-state operation.
+- Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are private typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly. Docker results keep desired-state evidence separate from event attribution: `docker.restart` remains non-terminal (`unknown`) when the command returned and the allowlisted project is healthy but no independent restart identity was observed; `docker.compose.up` is explicitly a desired-state operation.
 - Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval invokes the separately authorized Git provider. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
 - Denied by default: file writes (except candidate branches), dependency changes, database writes, cloud writes, credential access, data deletion, and modifying verifiers/alert rules/permissions.
 
@@ -261,6 +261,7 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 ### Git branch safety
 
 - Before restoring the original branch, the worktree is checked; when dirty, restoration is **abandoned** and the error is recorded — user's uncommitted changes are never overwritten.
+- Local Git scaffolding (candidate worktree add/remove, branch restoration, and stale-candidate deletion) runs through the private `GitPhysicalBoundary`. Repository containment, branch identity, worktree occupancy, and cleanliness are rechecked at the mutation point; an unknown check fails closed and never becomes "clean".
 - `dirty_worktree_policy`: `reject` (default, refuse execution on a dirty worktree) | `isolate` (legacy preflight mode; candidate `workspace-write` sessions are isolated by `[agent] isolate_worktree` regardless).
 - `[candidates].branch_prefix` unifies candidate branch naming (internal field `candidate_branch_prefix`, default `fix/control-plane-`).
 

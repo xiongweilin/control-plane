@@ -7,6 +7,7 @@ import pytest
 from control_plane.config import ControlPlaneConfig
 from control_plane.personal_operations import PersonalOperationsProvider
 from control_plane.portable_authority import PortableRuntimeAuthority
+from control_plane.reconciliation import ReconciliationDescriptorStore
 from control_plane.tools import ToolError
 from portable_runtime.core.capabilities import CapabilityRequest, InvocationContext
 from portable_runtime.core.capability_contract import CapabilityContract
@@ -229,7 +230,7 @@ async def test_docker_reconcile_rereads_container_health(tmp_path: Path) -> None
     result = await provider.invoke(request, InvocationContext(runtime_id="test"))
     reconciled = await provider.reconcile(request.id)
 
-    assert result.status == "succeeded"
+    assert result.status == "unknown"
     assert result.metadata["container_status"].startswith("cp-api")
     assert result.metadata["desired_state"] == "running"
     assert result.metadata["desired_state_verified"] is True
@@ -254,10 +255,48 @@ async def test_docker_desired_state_does_not_claim_restart_event(tmp_path: Path)
 
     result = await provider.invoke(request, InvocationContext(runtime_id="test"))
 
-    assert result.status == "succeeded"
+    assert result.status == "unknown"
     assert result.metadata["desired_state_verified"] is True
     assert result.metadata["event_attribution"] == "unknown"
     assert result.metadata["event_verification_basis"] == "not-observable"
+
+
+@pytest.mark.asyncio
+async def test_docker_restart_reconciliation_keeps_healthy_state_non_terminal(tmp_path: Path) -> None:
+    # A healthy postcondition is deliberately insufficient to attribute the
+    # restart event.  The durable reconciliation path must remain UNKNOWN
+    # until an effect-specific restart identity is observed.
+    executor = QueueExecutor(
+        [
+            "cp-api\tUp 2 minutes (healthy)",  # pre-effect baseline
+            "restart output",
+            "cp-api\tUp 2 minutes (healthy)",  # immediate post-effect probe
+            "cp-api\tUp 2 minutes (healthy)",  # reconciliation probe
+        ]
+    )
+    config = ControlPlaneConfig(project_dirs={"dify": str(tmp_path)})
+    store = ReconciliationDescriptorStore(tmp_path / "reconciliation.db")
+    provider = PersonalOperationsProvider(config, executor, store)  # type: ignore[arg-type]
+    request = CapabilityRequest(
+        id="req-docker-restart-healthy-reconcile",
+        capability="docker.restart",
+        parameters={"project": "dify"},
+        effect_class="write-remote",
+    )
+
+    result = await provider.invoke(request, InvocationContext(runtime_id="test"))
+
+    assert result.status == "unknown"
+    assert result.reconciled is True
+    assert result.metadata["desired_state_verified"] is True
+    assert result.metadata["event_attribution"] == "unknown"
+    assert result.metadata["event_verified"] is False
+    assert result.metadata["event_verification_basis"] == "not-observable"
+    descriptor = store.get_by_request(request.id)
+    assert descriptor is not None
+    assert descriptor.state.value == "unknown"
+    assert descriptor.last_observation is not None
+    assert descriptor.last_observation.verdict.value == "unknown"
 
 
 @pytest.mark.asyncio

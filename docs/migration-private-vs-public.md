@@ -23,4 +23,6 @@ private-only adapters stay outside the public package.
 
 - Core changes happen in `portable_runtime` and are cherry-picked or pulled between repos.
 - Private-only files are never committed to public: `control_plane.toml`, `data/`, keys.
-- CI is same (ruff/mypy/pytest) but SonarCloud runs only for public library.
+- CI runs the same ruff/mypy/pytest checks. SonarCloud is a main-branch-only
+  gate in the public repository; the private workflow keeps an optional
+  main-only job that skips cleanly when `SONAR_TOKEN` is not configured.

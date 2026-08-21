@@ -281,7 +281,17 @@ class CodexRunner:
         worktree_pair: tuple[Path, Path] | None = None
         try:
             if sandbox == "workspace-write" and self.config.codex_isolate_worktree:
+                if not self._is_git_repository(source):
+                    raise RuntimeError(
+                        "workspace-write requires a confirmed Git repository so the "
+                        "Codex session cannot fall back to the source directory"
+                    )
                 worktree_pair = self._create_candidate_worktree(source)
+                if worktree_pair is None:
+                    raise RuntimeError(
+                        "workspace-write isolation could not establish a detached "
+                        "candidate worktree"
+                    )
             if worktree_pair is None:
                 return _CodexExecutionBoundary(
                     cwd=source,

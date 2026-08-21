@@ -93,6 +93,6 @@ Runtime 保存长期状态和任务；Workflow 描述怎么做；Capability 描�
   - `coverage 77.8%`（本地 `coverage.xml` 70.6% 行覆盖，Sonar 因 `coverage.exclusions` 计为 77.8%）
   - `new_coverage 77.1%`（阈值 80，ERROR，差距 2.9）
   - `new_reliability OK`（`S7487` 已修复）、`new_security OK`（`S6096`/`S5445`/`S8707` 已修复或 `# NOSONAR` 抑制）、`bugs 0`、`vulnerabilities 0`
-- `SONAR_TOKEN` 已写入 GitHub Secrets，CI `sonarcloud` Job 不再 `Not authorized`。
+- 当前 `control-plane` 未配置 `SONAR_TOKEN`；其 main-only `sonarcloud` Job 在无 secret 时按设计跳过。实际 SonarCloud 扫描由已配置 secret 的 public `portable-runtime` main CI 负责。
 - 剩余 `new_coverage 77.1→80` 需补充 `CodexProvider`/`Verifier` 单测或在 SonarCloud 创建阈值 75 的自定义 Gate；当前 `continue-on-error: true` 保留。
 

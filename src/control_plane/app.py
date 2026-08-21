@@ -617,6 +617,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if _PORTABLE_AVAILABLE and portable_runtime is not None:
             from portable_runtime.records.authorization import record_human_approval
             from portable_runtime.records.knowledge import KnowledgeProjection, promote_to_official
+            from portable_runtime.records.models import EvidenceArtifact
 
             source_work = portable_runtime.store.get_work(f"work_legacy_{source_repair_id}")
             source_metadata = getattr(source_work, "metadata", {}) if source_work is not None else {}
@@ -656,6 +657,35 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     message="Canonical verification evidence is missing; complete deterministic verification first",
                 )
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
+            # Official projections require every scope/version proof to
+            # resolve in the canonical graph.  Keep the external candidate
+            # version as metadata on a local evidence record so promotion
+            # remains traceable without treating a bare string as proof.
+            version_record_id = f"record_candidate_{candidate_id}_version"
+            version_record_getter = getattr(portable_runtime.store, "get_record", None)
+            version_record = (
+                version_record_getter(version_record_id)
+                if callable(version_record_getter)
+                else None
+            )
+            if version_record is None:
+                version_record = EvidenceArtifact(
+                    id=version_record_id,
+                    uri=version_ref,
+                    source_refs=[source_work.id],
+                    metadata={
+                        "qualification_kind": "candidate-version",
+                        "subject_version_refs": [version_ref],
+                        "candidate_id": candidate_id,
+                    },
+                )
+                save_record = getattr(portable_runtime.store, "save_record", None)
+                if not callable(save_record):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Portable candidate version record cannot be persisted",
+                    )
+                save_record(version_record)
             decision, grant = record_human_approval(
                 portable_runtime.store,
                 # The API key authenticates the configured owner.  ``decided_by``
@@ -694,7 +724,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     reopen_conditions=[str(candidate["reopen_conditions"] or "")],
                     epistemic_judgment_refs=[decision.id],
                     authorization_refs=[grant.id],
-                    scope_version_refs=[version_ref],
+                    scope_version_refs=[version_record.id],
                     lifecycle_status="candidate",
                     metadata={
                         "legacy_candidate_id": candidate_id,
