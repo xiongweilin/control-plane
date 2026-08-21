@@ -103,6 +103,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         # runtime's RealityBoundary.
         from portable_runtime.providers.codex.provider import CodexProvider
 
+        from .codex_boundary import CodexExecutionBoundaryAdapter
+
         portable_runtime.registry.register(
             CodexProvider(
                 model=cfg.model,
@@ -112,7 +114,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     or cfg.per_repair_timeout_seconds
                     or 900
                 ),
-                execution_boundary_config=cfg,
+                execution_boundary=CodexExecutionBoundaryAdapter(cfg),
             )
         )
     except Exception as exc:

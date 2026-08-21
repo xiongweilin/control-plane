@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import json
 
 import httpx
 import pytest
@@ -199,4 +200,87 @@ async def test_startup_reconciliation_not_applied_requires_policy_not_approval(t
     assert descriptors.list_open() == []
     await service.close()
     descriptors.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_resumed_alert_uses_incident_verifier(tmp_path: Path) -> None:
+    """An Alert payload still follows the deterministic incident verifier."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "repair-alert-verifier"
+    payload = {
+        "status": "firing",
+        "labels": {"alertname": "HighCPU", "instance": "node1"},
+        "annotations": {"summary": "cpu high"},
+        "startsAt": "2026-08-06T00:00:00Z",
+        "endsAt": None,
+        "fingerprint": "fp-alert",
+    }
+    store.create_repair(repair_id, "fp-alert", json.dumps(payload), 1)
+    store.set_repair_status(repair_id, "recovering")
+    service = _service(config, store)
+    completed: list[tuple[str, str]] = []
+
+    async def complete(
+        resumed_repair_id: str,
+        fingerprint: str,
+        alert: object,
+        proposal: dict[str, object],
+    ) -> None:
+        assert alert is not None
+        assert proposal == {"code_changed": True}
+        completed.append((resumed_repair_id, fingerprint))
+
+    service._complete_repair = complete  # type: ignore[method-assign]
+    await service._finish_resumed_repair(repair_id)
+
+    assert completed == [(repair_id, "fp-alert")]
+    assert store.get_repair(repair_id)["status"] == "recovering"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_resumed_task_without_verifier_stays_recovering(tmp_path: Path) -> None:
+    """APPLIED must not turn a task effect into an implicitly closed Work."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "task-resume-no-verifier"
+    payload = {"kind": "task", "prompt": "run checks", "repo": "D:/agent/control-plane"}
+    store.create_repair(repair_id, f"task:{repair_id}", json.dumps(payload), 1)
+    store.set_repair_status(repair_id, "recovering")
+    service = _service(config, store)
+
+    await service._finish_resumed_repair(repair_id)
+
+    row = store.get_repair(repair_id)
+    assert row["status"] == "recovering"
+    assert "task-result verification is unavailable" in row["recovery_error"]
+    assert row["finished_at"] is None
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_resumed_unknown_workflow_stays_recovering(tmp_path: Path) -> None:
+    """Unknown recovery kinds fail closed instead of inheriting Alert closure."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "repair-unknown-workflow"
+    payload = {"kind": "future-workflow", "request": "opaque"}
+    store.create_repair(repair_id, "fp-unknown-workflow", json.dumps(payload), 1)
+    store.set_repair_status(repair_id, "recovering")
+    service = _service(config, store)
+
+    await service._finish_resumed_repair(repair_id)
+
+    row = store.get_repair(repair_id)
+    assert row["status"] == "recovering"
+    assert "workflow kind is unknown" in row["recovery_error"]
+    assert row["finished_at"] is None
+    await service.close()
     store.close()
