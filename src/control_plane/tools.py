@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -252,6 +253,92 @@ async def _read_logs_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolRe
         ],
     )
     return ToolResult(output=output[:10_000] or "(no logs)", target_kind="inspection")
+
+
+async def check_container_status(targets: list[str]) -> tuple[bool, str, str]:
+    """Legacy compat helper for the portable ContainerVerifierProvider fallback.
+
+    Mirrors RepairService._check_containers semantics without requiring a
+    service instance; used only when no check_fn was injected.
+    """
+    failures: list[str] = []
+    for project in targets:
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--format",
+            CONTAINER_STATUS_FORMAT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                proc.kill()
+            failures.append(f"{project}: docker ps timed out")
+            continue
+        if proc.returncode != 0:
+            failures.append(f"{project}: {(stderr or b"").decode(errors="replace").strip()[:200]}")
+            continue
+        lines = [line for line in (stdout or b"").decode(errors="replace").splitlines() if line.strip()]
+        if not lines:
+            failures.append(f"{project}: no running containers")
+            continue
+        for line in lines:
+            status = line.split("\\t")[-1]
+            if not status.startswith("Up"):
+                failures.append(f"{project}: container not up ({status})")
+            elif "unhealthy" in status or "restarting" in status:
+                failures.append(f"{project}: container unhealthy/restarting ({status})")
+    if failures:
+        return False, "; ".join(failures), "container_status"
+    return True, "all target containers running", "container_status"
+
+
+async def check_logs(
+    target: str,
+    since_minutes: int = 30,
+    patterns: list[str] | tuple[str, ...] = ("Traceback", "panic:", "FATAL"),
+) -> tuple[bool, str, str]:
+    """Legacy compat helper for the portable LogsVerifierProvider fallback.
+
+    ``target`` uses ``project:service`` syntax (same as RepairService._check_logs).
+    """
+    if ":" not in target:
+        return True, "no log target", "logs"
+    project, service = target.split(":", 1)
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "logs",
+        "--since",
+        f"{since_minutes}m",
+        "--tail",
+        "200",
+        "--format",
+        "{{.Name}}\\t{{.Message}}",
+        "--filter",
+        f"label=com.docker.compose.project={project}",
+        "--filter",
+        f"label=com.docker.compose.service={service}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            proc.kill()
+        return False, f"log fetch timed out for {target}", "logs"
+    if proc.returncode != 0:
+        return False, f"log fetch failed for {target} (exit {proc.returncode})", "logs"
+    output = (stdout or b"").decode(errors="replace")
+    for pattern in patterns:
+        if pattern in output:
+            return False, f"log contains {pattern}", "logs"
+    return True, "no fatal patterns in recent logs", "logs"
 
 
 async def _probe_tool(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
