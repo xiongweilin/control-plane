@@ -130,10 +130,12 @@
 - The personal HTTP/Feishu/Prometheus implementation remains under
   `control_plane` as an internal profile module, while its public executable
   ownership belongs to Portable Runtime deployment.
-- Pushed as `31b6716` to `origin/main`; GitHub Actions run
-  [32457237271](https://github.com/ratiolin/control-plane/actions/runs/32457237271)
-  passed `lint-and-test` and `windows-native`. SonarCloud remains a
-  non-blocking job and failed only at the external scan step.
+- Authority/entrypoint code was pushed as `31b6716`; the follow-up CI policy
+  commit is `074d187`. GitHub Actions run
+  [32457912555](https://github.com/ratiolin/control-plane/actions/runs/32457912555)
+  is fully green: `lint-and-test`, `windows-native`, coverage and the
+  SonarCloud job (the external scan is explicitly skipped when no token is
+  configured).
 - Machine switch evidence: `ControlPlane` Task Scheduler was stopped and
   restarted; fresh run `run-1787296287-7d58acd4` serves `/live` and `/ready`
   with database, Prometheus and Alertmanager checks all true. No running
