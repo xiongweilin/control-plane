@@ -305,13 +305,15 @@ class RepairService:
             # No agent supplied: try to create a real CodexProvider from config
             try:
                 from portable_runtime.providers.codex.provider import CodexProvider
+
+                from .codex_boundary import CodexExecutionBoundaryAdapter
                 reg = provider_registry or ProviderRegistry()
                 # Use model/cli from config; working_directory left None (service picks repo per request)
                 reg.register(
                     CodexProvider(
                         model=config.model,
                         cli=getattr(config, "codex_cli", None),
-                        execution_boundary_config=config,
+                        execution_boundary=CodexExecutionBoundaryAdapter(config),
                     )
                 )
                 self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
@@ -2402,10 +2404,11 @@ class RepairService:
         keeps working across restarts (batch2 item 7).
         """
         row = self.store.get_repair(repair_id)
-        if row is None or row["status"] not in {
-            RepairState.NEEDS_APPROVAL.value,
-            RepairState.RECOVERING.value,
-        }:
+        # Recovery is an epistemic state, not an approval state.  Only rows
+        # that are explicitly awaiting approval may be re-registered here;
+        # allowing RECOVERING would silently reopen an operation that startup
+        # reconciliation has already classified as requiring recovery.
+        if row is None or row["status"] != RepairState.NEEDS_APPROVAL.value:
             return
         try:
             self._transition(repair_id, RepairState.RECOVERING)
@@ -2440,21 +2443,123 @@ class RepairService:
             )
 
     async def _finish_resumed_repair(self, repair_id: str) -> None:
+        """Finish a recovered effect only through its workflow verifier.
+
+        Reconciliation proves that a provider-side effect was observed.  It
+        does not prove that the surrounding Work completed.  Alert repairs
+        have the existing deterministic incident verifier; task and unknown
+        payloads must remain ``RECOVERING`` until a workflow-specific verifier
+        can provide an independent result.
+        """
+
         row = self.store.get_repair(repair_id)
         if row is None:
             return
+
         try:
-            alert = Alert.model_validate(json.loads(row["payload_json"]))
-        except (json.JSONDecodeError, ValueError):
-            self.store.set_repair_status(
+            payload = json.loads(str(row["payload_json"] or ""))
+        except (json.JSONDecodeError, TypeError):
+            self._keep_resumed_repair_recovering(
                 repair_id,
-                RepairState.CLOSED.value,
-                finished_at=int(time.time()),
-                result="approved and applied",
+                "effect applied but recovery payload is not valid JSON; verification unavailable",
+            )
+            return
+
+        if not isinstance(payload, dict):
+            self._keep_resumed_repair_recovering(
+                repair_id,
+                "effect applied but recovery payload is not an object; verification unavailable",
+            )
+            return
+
+        # ``/task`` payloads use a task workflow rather than the incident
+        # Alert workflow.  A task may close here only when its canonical
+        # task-result verifier already recorded a passing result before the
+        # process stopped.  We never infer success from APPLIED alone.
+        if payload.get("kind") == "task":
+            if self._task_result_already_verified(repair_id):
+                task_result = self._canonical_verification_summary(repair_id)
+                self.store.set_repair_status(
+                    repair_id,
+                    RepairState.CLOSED.value,
+                    finished_at=int(time.time()),
+                    result=task_result or "task result verified",
+                )
+            else:
+                self._keep_resumed_repair_recovering(
+                    repair_id,
+                    "effect applied but task-result verification is unavailable",
+                )
+            return
+
+        try:
+            # Alert payloads are the only legacy repair kind with a
+            # deterministic verifier in this service.  An unrecognised kind
+            # must fail closed instead of inheriting Alert's close semantics.
+            if payload.get("kind") not in (None, "alert", "incident", "repair"):
+                raise ValueError(f"unsupported recovery workflow kind: {payload.get('kind')!r}")
+            alert = Alert.model_validate(payload)
+        except (ValueError, TypeError):
+            self._keep_resumed_repair_recovering(
+                repair_id,
+                "effect applied but recovery workflow kind is unknown; verification unavailable",
             )
             return
         fingerprint = row["fingerprint"]
         await self._complete_repair(repair_id, fingerprint, alert, {"code_changed": True})
+
+    def _keep_resumed_repair_recovering(self, repair_id: str, reason: str) -> None:
+        """Persist a fail-closed recovery reason without changing authority."""
+
+        message = reason[:2_000]
+        self.store.set_repair_status(
+            repair_id,
+            RepairState.RECOVERING.value,
+            error=message,
+            recovery_error=message,
+        )
+
+    def _task_result_already_verified(self, repair_id: str) -> bool:
+        """Return true only for a canonical, passing task-result proof."""
+
+        authority = self.portable_authority
+        runtime = getattr(authority, "runtime", None)
+        portable_store = getattr(runtime, "store", None)
+        if portable_store is None:
+            return False
+        get_work = getattr(portable_store, "get_work", None)
+        get_run = getattr(portable_store, "get_run", None)
+        if not callable(get_work) or not callable(get_run):
+            return False
+        work = get_work(f"work_legacy_{repair_id}")
+        run = get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return False
+        work_metadata = getattr(work, "metadata", {}) or {}
+        run_metadata = getattr(run, "metadata", {}) or {}
+        refs = work_metadata.get("verification_refs")
+        return bool(
+            work.status == "completed"
+            and run.status == "succeeded"
+            and work_metadata.get("verified") is True
+            and run_metadata.get("verified") is True
+            and work_metadata.get("verification_status") == "passed"
+            and run_metadata.get("verification_status") == "passed"
+            and isinstance(refs, list)
+            and refs
+            and refs == run_metadata.get("verification_refs")
+        )
+
+    def _canonical_verification_summary(self, repair_id: str) -> str:
+        authority = self.portable_authority
+        runtime = getattr(authority, "runtime", None)
+        portable_store = getattr(runtime, "store", None)
+        get_work = getattr(portable_store, "get_work", None)
+        if not callable(get_work):
+            return ""
+        work = get_work(f"work_legacy_{repair_id}")
+        metadata = getattr(work, "metadata", {}) if work is not None else {}
+        return str(metadata.get("verification_summary") or "")[:4_000]
 
     async def _git_repo_roots(self) -> list[str]:
         roots: list[str] = []

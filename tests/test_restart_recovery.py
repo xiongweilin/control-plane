@@ -183,6 +183,26 @@ async def test_resume_pending_approval_reject_after_restart(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_pending_approval_does_not_reopen_recovering(tmp_path) -> None:
+    """A recovery row must not be converted back into an approval waiter."""
+    config = _config(tmp_path)
+    (tmp_path / "repos").mkdir(parents=True, exist_ok=True)
+    store = Store(config.state_db)
+    repair_id = "repair-recovering-0001"
+    _seed_pending_repair(store, repair_id)
+    store.set_repair_status(repair_id, "recovering")
+
+    service = _make_service(config, store, FakeExecutor(branch_exists=True))
+    await service.resume_pending_approval(repair_id)
+
+    row = store.get_repair(repair_id)
+    assert row["status"] == "recovering"
+    assert repair_id not in service.approvals._pending
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_pending_approval_approve_finishes_repair(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "repos").mkdir(parents=True, exist_ok=True)

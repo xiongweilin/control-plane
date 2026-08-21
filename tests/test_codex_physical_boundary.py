@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import shutil
 import subprocess
 from dataclasses import replace
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from control_plane.codex_runner import CodexRunner
+from control_plane.codex_boundary import CodexExecutionBoundaryAdapter
 from control_plane.config import ControlPlaneConfig
 from portable_runtime.core.capabilities import CapabilityRequest, InvocationContext
 from portable_runtime.core.process import ProcessResult, ProcessSpec
@@ -129,7 +131,7 @@ async def test_production_codex_provider_uses_private_boundary(tmp_path: Path) -
         cli="codex-not-installed",
         executor=capture,
         working_directory=repo,
-        execution_boundary_config=config,
+        execution_boundary=CodexExecutionBoundaryAdapter(config),
     )
     result = await provider.invoke(
         CapabilityRequest(id="req-private-boundary", capability="code.edit", instruction="edit"),
@@ -143,3 +145,21 @@ async def test_production_codex_provider_uses_private_boundary(tmp_path: Path) -
     assert "disabled" in capture.spec.env["DOCKER_HOST"]
     assert capture.spec.env["SSH_AUTH_SOCK"] == ""
     assert capture.spec.env["CONTROL_PLANE_CODEX_PHYSICAL_BOUNDARY"] == "1"
+
+
+def test_portable_codex_provider_has_no_control_plane_imports() -> None:
+    provider_path = Path(__file__).parents[1] / "src" / "portable_runtime" / "providers" / "codex" / "provider.py"
+    tree = ast.parse(provider_path.read_text(encoding="utf-8"), filename=str(provider_path))
+    imported_modules = [
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    ]
+    imported_names = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ]
+    assert all(not module.startswith("control_plane") for module in imported_modules)
+    assert all(not name.startswith("control_plane") for name in imported_names)
