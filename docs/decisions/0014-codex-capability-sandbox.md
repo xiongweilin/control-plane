@@ -42,6 +42,17 @@ their local resource. `CodexRunner` accepts only `read-only` or
 `workspace-write`; the compatibility adapter passes the capability-derived
 ceiling when the wrapped runner supports the parameter.
 
+For `workspace-write`, the private Windows profile adds an independent process
+boundary: the runner creates a detached candidate worktree, starts Codex with
+that worktree as its cwd, and removes the worktree after the process exits while
+leaving the candidate branch for review. The child environment does not inherit
+Git credential helpers, SSH agent variables, GitHub token variables, or the
+Docker Desktop named pipe. Git authentication is replaced by deny-by-default
+`GIT_SSH_COMMAND`/`GIT_ASKPASS` commands, and Docker points at a nonexistent
+profile-specific host/context. The merge/push and Docker providers receive
+their own Runtime-authorized environments and are not children of the Codex
+session.
+
 ## Alternatives Considered
 
 ### Keep `danger-full-access` and rely on prompts
@@ -65,10 +76,12 @@ critical capabilities.
 
 - Read-only Codex sessions cannot modify the workspace through the Codex
   sandbox.
-- Candidate edits remain local to the requested workspace and continue through
+- Candidate edits remain local to the detached worktree and continue through
   the existing independent verifier, approval, merge, and rollback flow.
 - Existing injected legacy test doubles without a `sandbox` parameter remain
   compatible; production `CodexRunner` instances receive the ceiling.
 - The vendored provider has a small private-profile hardening delta relative to
-  upstream. If upstream adds an equivalent capability-scoped sandbox hook, the
-  local delta should be removed in the next sync.
+  upstream (capability sandbox selection plus the injected Windows process
+  boundary). If upstream adds equivalent hooks, the local semantic delta
+  should be removed in the next sync; deployment-specific credential/worktree
+  configuration remains private.

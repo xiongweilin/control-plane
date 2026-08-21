@@ -103,7 +103,7 @@ uv run python -m control_plane
 ## Permission matrix
 
 - Codex capability requests use a physical sandbox ceiling: `reason.generate`, `code.read` and `git.diff` run `read-only`; `code.edit`, `code.test` and `shell.exec` run `workspace-write`. Unknown capabilities fail closed to `read-only`; `danger-full-access` is not a personal-profile sandbox.
-- A repair session requests `code.edit` explicitly and is still constrained to the designated candidate workspace, the task-prompt hard constraints, the Codex global AGENTS.md (`~/.codex/AGENTS.md`), and the control plane's independent verification.
+- A repair session requests `code.edit` explicitly and runs from a detached candidate Git worktree by default (`[agent] isolate_worktree = true`); the source checkout is never the Codex cwd. The candidate branch remains in the source repository for review after the ephemeral worktree is removed.
 - Remote/deployment effects are not delegated to the Codex session. They require a separate Provider behind Portable Runtime's RealityBoundary and its authorization/reliability checks.
 - Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are private typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly.
 - Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval invokes the separately authorized Git provider. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
@@ -115,10 +115,10 @@ The control plane starts the Codex CLI to run a full agent session. Executable r
 
 ```text
 codex exec --model <model> --sandbox <read-only|workspace-write> --skip-git-repo-check --json <task prompt>
-  # cwd = project Windows path; transcript on stdout, exit code from codex
+  # cwd = detached candidate worktree for workspace-write; transcript on stdout
 ```
 
-The working directory uses native Windows paths (WSL was retired on 2026-08-07). The control plane injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback. The Codex sandbox is a separate physical ceiling, not a substitute for Portable Runtime authorization or RealityBoundary governance.
+The working directory uses native Windows paths (WSL was retired on 2026-08-07). The private app passes this boundary configuration into the actual vendored `CodexProvider` used by alert-driven repairs; the compatibility `CodexRunner` uses the same helper. Each child environment removes GitHub/SSH token variables, disables Git credential helpers and SSH-agent inheritance, and sets `GIT_SSH_COMMAND`/`GIT_ASKPASS` to non-interactive deny commands. Docker variables point to a deliberately nonexistent named pipe/context (`control-plane-codex-disabled`), so the Codex process does not inherit Docker Desktop's host control plane. These guards are independent of the prompt and the Codex sandbox; typed Git/Docker providers use their own authority-scoped process environment. The control plane injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback. The Codex sandbox is a separate physical ceiling, not a substitute for Portable Runtime authorization or RealityBoundary governance.
 
 ## Feishu commands
 
@@ -247,7 +247,7 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 ### Git branch safety
 
 - Before restoring the original branch, the worktree is checked; when dirty, restoration is **abandoned** and the error is recorded — user's uncommitted changes are never overwritten.
-- `dirty_worktree_policy`: `reject` (default, refuse execution on a dirty worktree) | `isolate` (execute in an isolated worktree, forcibly removed at the end; candidate branches kept).
+- `dirty_worktree_policy`: `reject` (default, refuse execution on a dirty worktree) | `isolate` (legacy preflight mode; candidate `workspace-write` sessions are isolated by `[agent] isolate_worktree` regardless).
 - `[candidates].branch_prefix` unifies candidate branch naming (internal field `candidate_branch_prefix`, default `fix/control-plane-`).
 
 ### Candidate branch cleanup

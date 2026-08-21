@@ -10,7 +10,7 @@ read only as migration input and remains a compatibility projection.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -130,6 +130,177 @@ class PortableRuntimeAuthority:
             raise RuntimeError("portable authority store cannot persist AuthorizationGrant")
         save_authorization(grant)
         return grant
+
+    def record_human_approval(
+        self,
+        repair_id: str,
+        *,
+        decided_by: str,
+        action: str = "approve",
+        note: str = "",
+        operation_specs: Sequence[Mapping[str, Any]] | None = None,
+    ) -> tuple[Decision, list[AuthorizationGrant]]:
+        """Persist the canonical provenance for a human repair decision.
+
+        The legacy approval row is only a compatibility projection.  A real
+        approval is represented by one stable ``Decision`` and one or more
+        grants whose capability, resource, and immutable subject version are
+        copied from the operation that is about to run.  Grants are therefore
+        never minted by :meth:`invoke_operation`; an operation can execute
+        only after this method has established the human decision and its
+        scoped grants.
+
+        The identifiers are deterministic per repair/decision/spec so API
+        retries and post-restart recovery are idempotent.  A conflicting
+        second decision for the same repair is rejected rather than silently
+        widening or replacing the original approval.
+        """
+
+        if action not in {"approve", "reject", "rollback"}:
+            raise ValueError(f"unsupported human approval action: {action}")
+        work_id = f"work_legacy_{repair_id}"
+        run_id = f"run_legacy_{repair_id}"
+        work = self.runtime.store.get_work(work_id)
+        run = self.runtime.store.get_run(run_id)
+        if work is None or run is None:
+            raise RuntimeError(f"human approval requires canonical Work/Run for {repair_id}")
+        actor = f"human:{decided_by.strip()}" if decided_by.strip() else "human:unknown"
+        decision_id = f"decision_{repair_id}_human_approval"
+        get_decision = getattr(self.runtime.store, "get_decision", None)
+        existing_decision = get_decision(decision_id) if callable(get_decision) else None
+        if existing_decision is not None:
+            if (
+                getattr(existing_decision, "selected_option", None) != action
+                or actor not in list(getattr(existing_decision, "authorized_by", []))
+            ):
+                raise RuntimeError(f"conflicting human approval already recorded for {repair_id}")
+            decision = existing_decision
+        else:
+            decision = Decision(
+                id=decision_id,
+                work_id=work.id,
+                decision_type="human-approval",
+                selected_option=action,
+                authorized_by=[actor],
+                metadata={
+                    "repair_id": repair_id,
+                    "decided_by": decided_by,
+                    "note": note[:4_000],
+                    "source": "control-plane.approval",
+                },
+            )
+            save_decision = getattr(self.runtime.store, "save_decision", None)
+            if not callable(save_decision):
+                raise RuntimeError("portable approval store cannot persist Decision")
+            save_decision(decision)
+
+        grants: list[AuthorizationGrant] = []
+        specs = list(operation_specs or []) if action == "approve" else []
+        if action == "approve" and not specs:
+            resource = str(work.metadata.get("resource_ref") or work.metadata.get("resource_scope") or "")
+            versions = [str(value) for value in work.metadata.get("subject_version_refs", [])]
+            if resource and versions:
+                specs = [
+                    {
+                        "capability": "git.merge",
+                        "resource_ref": resource,
+                        "subject_version_refs": versions,
+                        "effect_class": "write-local",
+                    },
+                    {
+                        "capability": "git.push",
+                        "resource_ref": resource,
+                        "subject_version_refs": versions,
+                        "effect_class": "write-remote",
+                    },
+                ]
+        if action == "approve" and not specs:
+            raise RuntimeError("human approval has no capability/resource/version scope")
+
+        existing_refs = list(work.metadata.get("human_approval_grant_refs", []))
+        for raw_spec in specs:
+            capability = str(raw_spec.get("capability") or "").strip()
+            resource_ref = str(raw_spec.get("resource_ref") or "").strip()
+            versions = [str(value).strip() for value in raw_spec.get("subject_version_refs", []) if str(value).strip()]
+            effect_class = str(raw_spec.get("effect_class") or "write-local")
+            if not capability or not resource_ref or not versions:
+                raise ValueError("human approval grant requires capability, resource_ref, and subject_version_refs")
+            token = self._stable_token(
+                f"{decision.id}:{capability}:{resource_ref}:{','.join(versions)}:{effect_class}"
+            )
+            grant_id = f"authz_{repair_id}_human_{token}"
+            get_authorization = getattr(self.runtime.store, "get_authorization", None)
+            existing = get_authorization(grant_id) if callable(get_authorization) else None
+            if isinstance(existing, AuthorizationGrant):
+                grant = existing
+            else:
+                grant = AuthorizationGrant(
+                    id=grant_id,
+                    principal_ref=actor,
+                    grantee_ref=self.actor_ref,
+                    allowed_capabilities=[capability],
+                    resource_scope=[resource_ref],
+                    effect_ceiling=effect_class,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    subject_version_refs=versions,
+                    source_decision_ref=decision.id,
+                    metadata={
+                        "authority": "human-approval",
+                        "source": "control-plane.approval",
+                        "repair_id": repair_id,
+                        "decided_by": decided_by,
+                        "note": note[:4_000],
+                    },
+                )
+                save_authorization = getattr(self.runtime.store, "save_authorization", None)
+                if not callable(save_authorization):
+                    raise RuntimeError("portable approval store cannot persist AuthorizationGrant")
+                save_authorization(grant)
+            grants.append(grant)
+            if grant.id not in existing_refs:
+                existing_refs.append(grant.id)
+
+        work_metadata = dict(work.metadata)
+        work_authorization_refs = list(work_metadata.get("authorization_refs", []))
+        work_authorization_ids = {
+            str(ref.get("id")) if isinstance(ref, dict) else str(ref)
+            for ref in work_authorization_refs
+        }
+        for grant in grants:
+            if grant.id not in work_authorization_ids:
+                work_authorization_refs.append({"id": grant.id, "kind": "authorization"})
+                work_authorization_ids.add(grant.id)
+        work_metadata.update(
+            {
+                "human_approval_decision_ref": decision.id,
+                "human_approval_action": action,
+                "human_approval_decided_by": decided_by,
+                "human_approval_note": note[:4_000],
+                "human_approval_grant_refs": existing_refs,
+                "authorization_refs": work_authorization_refs,
+            }
+        )
+        self.runtime.store.save_work(work.model_copy(update={"metadata": work_metadata, "updated_at": utcnow()}))
+        run_metadata = dict(run.metadata)
+        run_authorization_refs = list(run_metadata.get("authorization_refs", []))
+        run_authorization_ids = {
+            str(ref.get("id")) if isinstance(ref, dict) else str(ref)
+            for ref in run_authorization_refs
+        }
+        for grant in grants:
+            if grant.id not in run_authorization_ids:
+                run_authorization_refs.append({"id": grant.id, "kind": "authorization"})
+                run_authorization_ids.add(grant.id)
+        run_metadata.update(
+            {
+                "human_approval_decision_ref": decision.id,
+                "human_approval_action": action,
+                "human_approval_grant_refs": existing_refs,
+                "authorization_refs": run_authorization_refs,
+            }
+        )
+        self.runtime.store.save_run(run.model_copy(update={"metadata": run_metadata}))
+        return decision, grants
 
     def _prepare_qualification(
         self,
@@ -545,9 +716,12 @@ class PortableRuntimeAuthority:
         """Invoke a non-Codex personal operation through the Runtime.
 
         Git merge/push and Docker lifecycle actions use the same Work/Run as
-        the repair, but receive a separate capability-scoped Decision and
-        AuthorizationGrant.  A successful provider invocation leaves the Run
-        in ``waiting``; deterministic repair verification owns final closure.
+        the repair, but must consume a capability-scoped grant previously
+        materialised by :meth:`record_human_approval`.  This method is not an
+        authority to mint personal-owner-policy grants: missing or mismatched
+        human provenance fails closed before a provider is selected.  A
+        successful provider invocation leaves the Run in ``waiting``;
+        deterministic repair verification owns final closure.
         """
 
         work_id = f"work_legacy_{repair_id}"
@@ -557,42 +731,67 @@ class PortableRuntimeAuthority:
         if work is None or run is None:
             raise RuntimeError(f"portable operation requires canonical Work/Run for {repair_id}")
         versions = list(subject_version_refs or [])
+        if not versions:
+            return CapabilityResult(
+                request_id=f"req-{repair_id}-{capability.replace('.', '-')}",
+                provider_id="portable-runtime-authority",
+                status="failed",
+                message="personal operation requires an immutable subject version",
+                error={"code": "SubjectVersionRequired", "repair_id": repair_id, "capability": capability},
+            )
+        decision_id = str(work.metadata.get("human_approval_decision_ref") or "")
+        get_decision = getattr(self.runtime.store, "get_decision", None)
+        decision = get_decision(decision_id) if decision_id and callable(get_decision) else None
+        if (
+            decision is None
+            or getattr(decision, "decision_type", None) != "human-approval"
+            or getattr(decision, "selected_option", None) != "approve"
+        ):
+            return CapabilityResult(
+                request_id=f"req-{repair_id}-{capability.replace('.', '-')}",
+                provider_id="portable-runtime-authority",
+                status="failed",
+                message="human approval provenance is required before personal operation",
+                error={"code": "HumanApprovalRequired", "repair_id": repair_id, "capability": capability},
+            )
+        grant_refs = [str(ref) for ref in work.metadata.get("human_approval_grant_refs", [])]
+        grants: list[AuthorizationGrant] = []
+        get_authorization = getattr(self.runtime.store, "get_authorization", None)
+        if callable(get_authorization):
+            for ref in grant_refs:
+                candidate = get_authorization(ref)
+                if isinstance(candidate, AuthorizationGrant):
+                    grants.append(candidate)
+        matching = [
+            grant
+            for grant in grants
+            if capability in grant.allowed_capabilities
+            and resource_ref in grant.resource_scope
+            and grant.subject_version_refs == versions
+            and grant.source_decision_ref == decision.id
+        ]
+        if not matching:
+            return CapabilityResult(
+                request_id=f"req-{repair_id}-{capability.replace('.', '-')}",
+                provider_id="portable-runtime-authority",
+                status="failed",
+                message="human approval grant does not cover this operation scope",
+                error={
+                    "code": "HumanApprovalScopeMismatch",
+                    "repair_id": repair_id,
+                    "capability": capability,
+                    "resource_ref": resource_ref,
+                    "subject_version_refs": versions,
+                },
+            )
+        grant = matching[0]
         token = self._stable_token(f"{capability}:{resource_ref}:{','.join(versions)}")
-        decision_id = f"decision_{repair_id}_{capability.replace('.', '_')}_{token}"
-        decision = Decision(
-            id=decision_id,
-            work_id=work.id,
-            decision_type="personal-operation-authorization",
-            selected_option=capability,
-            rationale_artifact_refs=[
-                str(ref.get("id")) if isinstance(ref, dict) else str(ref)
-                for ref in work.metadata.get("procedure_proof_refs", [])
-            ],
-            authorized_by=[self.principal_ref],
-        )
-        save_decision = getattr(self.runtime.store, "save_decision", None)
-        if not callable(save_decision):
-            raise RuntimeError("portable operation store cannot persist Decision")
-        save_decision(decision)
-        grant_id = f"authz_{repair_id}_{capability.replace('.', '_')}_{token}"
-        grant = AuthorizationGrant(
-            id=grant_id,
-            principal_ref=self.principal_ref,
-            grantee_ref=self.actor_ref,
-            allowed_capabilities=[capability],
-            resource_scope=[resource_ref],
-            effect_ceiling=effect_class,
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-            subject_version_refs=versions,
-            source_decision_ref=decision.id,
-            metadata={"authority": "personal-owner-policy", "operation": capability, "work_id": work.id},
-        )
-        save_authorization = getattr(self.runtime.store, "save_authorization", None)
-        if not callable(save_authorization):
-            raise RuntimeError("portable operation store cannot persist AuthorizationGrant")
-        save_authorization(grant)
         procedure_refs = list(work.metadata.get("procedure_proof_refs", []))
-        procedure_refs.append({"id": decision.id, "kind": "decision"})
+        if not any(
+            (ref.get("id") if isinstance(ref, dict) else ref) == decision.id
+            for ref in procedure_refs
+        ):
+            procedure_refs.append({"id": decision.id, "kind": "decision"})
         work_metadata = dict(work.metadata)
         work_metadata.update(
             {

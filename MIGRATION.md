@@ -25,6 +25,14 @@ Portable Runtime owns:
 - authorization, qualification, reliability, fencing and RealityBoundary;
 - provider protocol and capability-scoped Codex execution semantics.
 
+The private Windows profile additionally owns the deployment-specific Codex
+process boundary: detached candidate worktrees and host-control credential
+scrubbing are implemented by the private `control_plane.codex_runner` helper
+and injected into the actual vendored Codex provider at app bootstrap, while
+the public provider remains provider-neutral. This boundary must not be used as
+a reason to add personal paths, secrets or Docker policy to the public
+repository.
+
 Control Plane owns:
 
 - Alertmanager/Feishu/Prometheus and Windows deployment adapters;
@@ -58,6 +66,36 @@ packages = ["src/control_plane", "src/portable_runtime"]
 This is packaging convenience, not ownership transfer. Do not replace it with
 a thin-shim or archived `control_plane` target without a separately approved
 architecture decision.
+
+## Upstream follow-up list
+
+The current private vendored tree differs from the public `portable-runtime`
+tree in these semantic files (verified against the public checkout on
+2026-08-21):
+
+- `portable_runtime/core/capability_contract.py`: monotonic procedure-profile
+  resolver, explicit `code.read`/`code.test`/`shell.exec`/`git.diff` contracts,
+  and fail-closed unknown `code.*` effect classification;
+- `portable_runtime/core/boundary.py`: use the monotonic resolver when checking
+  Work/Run/request procedure metadata;
+- `portable_runtime/providers/codex/provider.py`: capability-to-sandbox mapping
+  (`reason.generate`/read capabilities → `read-only`, edits/tests/shell →
+  `workspace-write`) and provider `reconcile()` protocol parity;
+- `portable_runtime/core/qualification.py`, `interfaces/store.py`,
+  `stores/memory.py`, `stores/sqlite.py`: small typed-record/store compatibility
+  changes required by the above semantics;
+- `portable_runtime/providers/codex/manifest.json`: provider manifest version
+  metadata.
+
+The detached worktree and Windows credential/Docker environment boundary are
+deliberately not upstream patch candidates: they depend on this private
+profile's filesystem, Codex CLI and deployment policy. Only the portable
+capability-to-sandbox/procedure semantics above should be proposed upstream.
+
+These are upstream patch candidates, not permission to edit
+`D:\agent\portable-runtime` from this repository. The public project should
+receive equivalent portable tests and release a new pin before this profile
+removes its vendored delta.
 
 ## Migration invariants
 
