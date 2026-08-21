@@ -19,6 +19,7 @@ from control_plane.reconciliation import (
     ReconciliationDescriptor,
     ReconciliationDescriptorStore,
     ReconciliationObservation,
+    ReconciliationState,
     ReconciliationVerdict,
 )
 from control_plane.service import RepairService
@@ -61,6 +62,19 @@ class _FakeCapabilities:
 class _FakeRuntime:
     def __init__(self, capabilities: _FakeCapabilities) -> None:
         self.capabilities = capabilities
+
+
+class _NoObservationCapabilities:
+    """Provider double that returns a result without persisting an observation."""
+
+    def __init__(self, result: CapabilityResult | None = None, error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+
+    async def reconcile(self, request_id: str, provider_id: str) -> CapabilityResult | None:
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
 def _config(tmp_path: Path) -> ControlPlaneConfig:
@@ -174,6 +188,113 @@ async def test_startup_reconciliation_unknown_stays_recovering_and_does_not_wait
     assert outcomes[0]["next_action"] == "observe-or-escalate"
     assert store.get_repair(repair_id)["status"] == "recovering"
     assert [item.id for item in descriptors.list_open()] == [descriptor.id]
+    await service.close()
+    descriptors.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciliation_unknown_without_provider_observation_is_durable(
+    tmp_path: Path,
+) -> None:
+    """An unknown provider result writes an explicit durable observation."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "repair-unknown-no-observation"
+    store.create_repair(repair_id, "fp-startup", "{}", 1)
+    store.set_repair_status(repair_id, "recovering", error="provider outcome unknown")
+    descriptors = ReconciliationDescriptorStore(tmp_path / "reconciliation.db")
+    descriptor = _descriptor(repair_id, descriptors)
+    capabilities = _NoObservationCapabilities(
+        CapabilityResult(
+            request_id=descriptor.request_id,
+            provider_id=descriptor.provider_id,
+            status="unknown",
+            message="provider cannot establish the remote state",
+        )
+    )
+    service = _service(config, store)
+    service.portable_runtime = _FakeRuntime(capabilities)  # type: ignore[arg-type]
+
+    outcomes = await service.reconcile_startup_descriptors(descriptors)
+
+    persisted = descriptors.get(descriptor.id)
+    assert persisted is not None
+    assert persisted.state.value == "unknown"
+    assert persisted.last_observation is not None
+    assert persisted.last_observation.verdict is ReconciliationVerdict.UNKNOWN
+    assert persisted.last_observation.details["failure_code"] == "provider-observation-missing"
+    assert outcomes[0]["state"] == "unknown"
+    assert store.get_repair(repair_id)["status"] == "recovering"
+    assert store.get_repair(repair_id)["recovery_error"]
+    await service.close()
+    descriptors.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciliation_provider_unavailable_is_durable(
+    tmp_path: Path,
+) -> None:
+    """A missing capability service is recorded without reopening approval."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "repair-provider-unavailable"
+    store.create_repair(repair_id, "fp-startup", "{}", 1)
+    store.set_repair_status(repair_id, "needs_approval")
+    descriptors = ReconciliationDescriptorStore(tmp_path / "reconciliation.db")
+    descriptor = _descriptor(repair_id, descriptors)
+    service = _service(config, store)
+    service.portable_runtime = object()
+
+    outcomes = await service.reconcile_startup_descriptors(descriptors)
+
+    persisted = descriptors.get(descriptor.id)
+    assert persisted is not None
+    assert persisted.state is ReconciliationState.UNKNOWN
+    assert persisted.last_observation is not None
+    assert persisted.last_observation.details["failure_code"] == "provider-unavailable"
+    assert outcomes[0]["next_action"] == "observe-or-escalate"
+    assert store.get_repair(repair_id)["status"] == "recovering"
+    assert "capability service missing" in store.get_repair(repair_id)["recovery_error"]
+    await service.close()
+    descriptors.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciliation_exception_writes_observation_ledger(
+    tmp_path: Path,
+) -> None:
+    """Provider exceptions leave an auditable unknown observation and RECOVERING repair."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    repair_id = "repair-reconcile-exception"
+    store.create_repair(repair_id, "fp-startup", "{}", 1)
+    store.set_repair_status(repair_id, "recovering")
+    descriptors = ReconciliationDescriptorStore(tmp_path / "reconciliation.db")
+    descriptor = _descriptor(repair_id, descriptors)
+    capabilities = _NoObservationCapabilities(error=RuntimeError("provider transport unavailable"))
+    service = _service(config, store)
+    service.portable_runtime = _FakeRuntime(capabilities)  # type: ignore[arg-type]
+
+    outcomes = await service.reconcile_startup_descriptors(descriptors)
+
+    persisted = descriptors.get(descriptor.id)
+    assert persisted is not None
+    assert persisted.state is ReconciliationState.UNKNOWN
+    assert persisted.last_observation is not None
+    assert persisted.last_observation.details == {
+        "failure_code": "reconciliation-exception",
+        "exception_type": "RuntimeError",
+    }
+    assert outcomes[0]["state"] == "unknown"
+    assert outcomes[0]["next_action"] == "observe-or-escalate"
+    assert store.get_repair(repair_id)["status"] == "recovering"
+    assert "provider transport unavailable" in store.get_repair(repair_id)["recovery_error"]
     await service.close()
     descriptors.close()
     store.close()

@@ -59,6 +59,14 @@ and leave `unknown` or `concurrent-change` open for recovery. The authority
 layer must not turn those classifications into deterministic verification
 failure without a separate verifier result.
 
+When the capability service is unavailable, returns no reconciliation result,
+or raises before a provider observation is persisted, the startup adapter writes
+an explicit `unknown` `ReconciliationObservation` with a bounded failure code
+(`provider-unavailable`, `provider-observation-missing`, or
+`reconciliation-exception`). The legacy repair projection records the same
+reason in `recovery_error` and remains `recovering`; the observation ledger is
+never used to reopen approval.
+
 ## Startup recovery boundary
 
 The application lifespan consumes `list_open()` before it restores any
