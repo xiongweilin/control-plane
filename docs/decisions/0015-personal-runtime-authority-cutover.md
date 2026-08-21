@@ -43,11 +43,15 @@ The adapter binds every local edit to:
 | `actor_ref` | runtime identity | personal policy | matches grant grantee | provider invocation |
 | AuthorizationGrant | owner policy | Portable Store | capability, resource, version, effect ceiling, TTL | `code.edit` only |
 
-The personal edit procedure uses a minimal pre-execution profile: purpose,
-execution boundary, explicit waiting/result state, and a typed failure-stop
-record are required before the provider runs.  The existing independent
-verifier remains the owner of post-edit verification and repair closure; a
-precondition assertion is never treated as final repair verification.
+The personal `code.edit` request keeps the Runtime contract minimum of
+`standard`.  Personal authority materialises the typed candidate, evidence,
+authorization, source-version verification, rollback/checkpoint and owner
+decision records needed by that profile before the provider runs.  The
+`RealityBoundary` resolves the effective profile as the maximum of the
+contract minimum and all Work/Run/request requirements; metadata can request a
+stricter profile but can never downgrade one.  The independent verifier still
+owns post-edit verification and repair closure; the pre-execution source
+version assertion is not treated as the final repair result.
 
 The legacy SQLite row remains writable only as a compatibility projection for
 the existing HTTP/Feishu/state-machine API.  Its status updates are mirrored
@@ -63,6 +67,7 @@ rows continue to be imported with `dual_write_repair`.
 | request → provider | `RealityBoundary` | qualification/policy/procedure/reliability/precommit gates; fail closed |
 | provider result → canonical outcome | Portable Runtime | post-fencing/commit failure becomes unknown |
 | canonical result → legacy status | compatibility projection | best-effort mirror; canonical state remains inspectable |
+| candidate → official knowledge | Portable `KnowledgeProjection` | typed verification/evidence/decision/grant/scope must promote first; legacy playbook is a projection |
 | repair closure | independent verifier + existing approval flow | failed verification never closes the repair |
 
 The public `portable-runtime` project remains the provider-neutral base. The
@@ -76,6 +81,8 @@ change, not a deprecation of the private project or its entrypoint.
 - Production repair traffic no longer uses `_LegacyRoutingBoundary` when the
   app creates its personal Runtime.
 - Portable Work/Run and typed authorization are durable before Codex starts.
+- Procedure profile metadata is monotonic: a caller cannot turn the
+  `code.edit` `standard` minimum into `minimal`.
 - Compatibility callers that do not provide a Runtime retain only their
   explicitly constructed in-process compatibility adapters; production
   launchers cannot enter that path.

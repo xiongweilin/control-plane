@@ -1,82 +1,93 @@
-# Migration: portable_runtime extraction
+# Migration: portable-runtime base and private control-plane profile
 
-## Goal
+## Current goal
 
-Single-form private repo and single-form public lib; difference is only private info.
+This is a deliberate two-project architecture, not a plan to archive
+`control-plane`:
 
-- **Private** `ratiolin/control-plane` (after §64): `portable_runtime` + `profiles/personal-platform` (`control_plane` becomes thin compat/shim or archived), plus Windows/Feishu/Docker glue under `deployments/windows-personal-platform` and `scripts/`.
-- **Public** `ratiolin/portable-runtime`: `portable_runtime` core (store/work/run/event/provider/plugin/verifier), no Feishu token, no metratio URLs, no `D:\agent` paths, placeholder `examples/echo-provider`.
+- Public `ratiolin/portable-runtime` owns the provider-neutral Work/Run,
+  capability, authorization, reliability and `RealityBoundary` semantics.
+- Private `ratiolin/control-plane` vendors that runtime as its base and adds
+  the personal Windows, Feishu, Prometheus, Alertmanager, Codex and legacy HTTP
+  integration surface.
+- `python -m control_plane` remains the private production entrypoint.
 
-Diff is config/secrets only: `control_plane.toml` / `data/` / `CONTROL_PLANE_API_KEY` / Feishu webhook / Prometheus remote URLs.
+The public project must remain independently usable and must not import private
+modules, secrets, metratio URLs or `D:\agent` paths. The private profile may
+depend on `portable_runtime`; the dependency direction does not reverse.
 
-## Steps (additive, not destructive)
+## Ownership rules
 
-1. Publish `portable_runtime` as `ratiolin/portable-runtime` (MIT, CI + SonarCloud green, README rewrite).
-2. Keep dual packages in private repo until replacement tests pass; writes go to legacy `repair` rows and `dual_write_repair` mirrors to `Work/Run/Event`.
-3. Readers switch via `portable_runtime.compat.import_legacy_repair` and `dual_write` helpers.
-4. Gate `§64 replacement test`: portable paths fully replace legacy call sites under same semantics; evidence/coverage preserved.
+Portable Runtime owns:
 
-## Private repo single-form target
+- Work/Run/record and canonical state transitions;
+- capability effect contracts and minimum procedure profiles;
+- authorization, qualification, reliability, fencing and RealityBoundary;
+- provider protocol and capability-scoped Codex execution semantics.
 
-`
-src/portable_runtime/      # primary runtime (public parity)
-src/control_plane/         # DEPRECATED - compat only, archived after §64 (see README banner + docs/legacy-control-plane.md)
-profiles/personal-platform/ # future: legacy config + windows/feishu profile (not yet split)
-deployments/windows-personal-platform/
-scripts/                   # windows scheduler wrappers stay in private profile
-data/                      # gitignored, private only
-`
+Control Plane owns:
 
-Do NOT delete legacy before §64. The deprecation banner in `README.md` and `docs/legacy-control-plane.md` marks `control_plane` as deprecated; new code must use `portable_runtime`.
+- Alertmanager/Feishu/Prometheus and Windows deployment adapters;
+- personal owner policy, allowed repositories, budgets and local paths;
+- the legacy HTTP/CLI/SQLite compatibility projection;
+- the `control_plane.__main__` launcher and scheduled-task glue.
 
-## Public lib single-form target
+Legacy tables and routes remain compatibility projections. New personal repair
+traffic materialises canonical Work/Run first and enters the portable
+`RealityBoundary`; `_LegacyRoutingBoundary` is retained only for explicitly
+constructed compatibility callers.
 
-`
-src/portable_runtime/
-examples/echo-provider/
-docs/
-tests/
-`
+## Vendored runtime policy
 
-No private imports. No `D:\agent` absolute paths. Secrets via env only.
+`src/portable_runtime` is synchronized from the public repository and the
+public source tree is read-only from this project. A private semantic hardening
+delta must be documented, tested, and treated as an upstream follow-up; it
+must not be mistaken for a new private authority. The current private delta
+includes capability-scoped Codex sandbox selection and the monotonic procedure
+profile resolver. Do not claim zero drift until the corresponding public
+changes have landed and a new pin has been recorded.
 
-## pyproject transition
+The private repository currently builds both packages so the personal profile
+can run from one checkout:
 
-Current (private, dual):
-
-`	oml
+```toml
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]
-`
+```
 
-Future (private, after extract):
+This is packaging convenience, not ownership transfer. Do not replace it with
+a thin-shim or archived `control_plane` target without a separately approved
+architecture decision.
 
-`	oml
-dependencies = ["portable-runtime @ git+ssh://github.com/ratiolin/portable-runtime.git"]
-# + packages = ["src/control_plane"] as thin shim or removed
-`
+## Migration invariants
 
-Comment in `pyproject.toml` tracks this; do not change packages until §64 passes.
+1. Alert admission writes canonical Work/Run before the legacy repair
+   projection; projection failure blocks admission.
+2. Every local edit is bound to actor, repository resource and git subject
+   version, with a typed `AuthorizationGrant`.
+3. A capability contract's procedure profile is a floor. Work/Run/request
+   metadata may only raise it; unknown profile values fail closed.
+4. Independent post-edit verification remains distinct from pre-execution
+   qualification and owns repair closure.
+5. Candidate promotion must preserve typed evidence, verification, decision,
+   authorization and scope/version records before the legacy official row is
+   projected.
+6. `D:\agent\portable-runtime` is never modified by a control-plane-only
+   migration.
 
 ## Gates
 
-- `§64`: replacement tests prove portable store/work/run cover legacy repair flows.
-- `ruff check` / `mypy` / `pytest` / coverage baseline must stay green during transition.
-- No push of private secrets to public lib; scan `control_plane.toml` and `data/` before publish.
+- `ruff check src tests`
+- `mypy src`
+- `scripts/check_portable_core_imports.py`
+- full `pytest` suite and coverage regression gate over both packages;
+- public-base cleanliness and pin verification;
+- production `/live` and `/ready` after launcher changes.
 
-## 2026-08-21: initial vendored portable_runtime sync to upstream 4de0284
+## Historical notes
 
-- `src/portable_runtime` replicated byte-for-byte from `ratiolin/portable-runtime` HEAD `4de0284` (strict-enforcement P1/P2 closure; 92 tracked files, zero local drift).
-- The legacy `control_plane` package stays the compatibility profile (additive seam per ADR-0013); no vendored portable file was locally patched.
-- Portable V2 `CapabilityService` routes every invocation through `RealityBoundary` governance. The deprecated legacy repair path keeps pre-V2 routing semantics via `control_plane.service._LegacyRoutingBoundary`; the portable Runtime path keeps the full boundary.
-- `control_plane.tools` gained `check_container_status` / `check_logs` compat helpers for portable verifier providers' fallback imports.
-- Tool config aligned with upstream in `pyproject.toml` (ruff per-file-ignores + mypy overrides for the vendored tree).
-- Gates: `ruff check .`, `mypy src`, `scripts/check_portable_core_imports.py`, `pytest` 231 passed, coverage 75% (baseline 74.0). Service restarted 2026-08-21 11:41 local, run `run-1787283657-7281aae8`.
-
-## 2026-08-21: strict runtime sync and Codex sandbox hardening
-
-- `src/portable_runtime` was synchronized from `ratiolin/portable-runtime` HEAD `6789a96` (94 tracked files), including strict Boundary stages/fencing, canonical graph validation, authorization compatibility, reliability policy separation and version-axis cleanup.
-- The personal Codex adapter adds a physical sandbox ceiling: `reason.generate` / `code.read` / `git.diff` use `read-only`, candidate edit/test capabilities use `workspace-write`, and unknown capabilities fail closed. `danger-full-access` is rejected by the personal profile (ADR-0014).
-- Repair requests are labeled `code.edit` instead of `reason.generate`, preserving the distinction between read-only reasoning and candidate workspace changes.
-- Candidate promotion now requires a closed source repair and mirrors the Feishu decision as a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource before the legacy playbook row is promoted.
-- Gates: `ruff check .`, `mypy src`, `scripts/check_portable_core_imports.py`, `pytest` 480 passed. The remaining operational cutover is intentionally not claimed by this source sync.
+The earlier extraction wording that described `control_plane` as deprecated or
+archived is obsolete. It has been replaced by this two-project boundary. The
+canonical authority cutover and the private entrypoint correction are recorded
+in `docs/decisions/0015-personal-runtime-authority-cutover.md` and
+`docs/refactor/progress.md`.

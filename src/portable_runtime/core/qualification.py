@@ -484,6 +484,8 @@ def _lookup(store: Any, ref: QualificationRef) -> Any | None:
         getters = ["get_relation"]
     elif kind in {"checkpoint"}:
         getters = ["get_checkpoint"]
+    elif kind in {"decision", "decisionrecord"}:
+        getters = ["get_decision", "get_record"]
     elif kind in {"evidence", "evidenceartifact", "observation"}:
         getters = ["get_record", "get_evidence"]
     else:
@@ -717,7 +719,7 @@ class AssessmentContext:
                     )
                 refs.append(ref)
                 if bucket == "procedure_proofs":
-                    category = _metadata(cloned).get("qualification_kind")
+                    category = _metadata(cloned).get("qualification_kind") or ref.kind
                     target_bucket = (
                         _KIND_TO_PROOF.get(str(category).replace("_", "").replace("-", "").lower())
                         if category
