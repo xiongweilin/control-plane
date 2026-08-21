@@ -54,6 +54,7 @@ def test_canonical_human_principal_never_preserves_another_namespace() -> None:
 def test_owner_principal_loads_from_auth_section_and_env_override(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / "control_plane.toml"
     config_path.write_text('[auth]\nowner_principal = "configured-owner"\n', encoding="utf-8")
+    monkeypatch.setenv("CONTROL_PLANE_API_KEY", "test-key")
     monkeypatch.delenv("CONTROL_PLANE_OWNER_PRINCIPAL", raising=False)
     assert ControlPlaneConfig.load(config_path).owner_principal == "human:configured-owner"
     monkeypatch.setenv("CONTROL_PLANE_OWNER_PRINCIPAL", "env-owner")
