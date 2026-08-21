@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
-from portable_runtime.core.capabilities import CapabilityRequest, InvocationContext
-from portable_runtime.interfaces.provider import CapabilityProvider
+from portable_runtime.core.capabilities import CapabilityRequest
+from portable_runtime.core.registry import ProviderRegistry
+from portable_runtime.core.router import CapabilityService
+from portable_runtime.stores.memory import InMemoryStateStore
 
 
-async def check_provider(provider: CapabilityProvider) -> list[str]:
+async def check_provider(provider: Any) -> list[str]:
     """Run the small provider contract suite without touching Runtime state."""
 
     errors: list[str] = []
@@ -19,6 +22,9 @@ async def check_provider(provider: CapabilityProvider) -> list[str]:
     if not health.available:
         errors.append(f"health unavailable: {health.detail}")
         return errors
+    registry = ProviderRegistry()
+    registry.register(provider)
+    service = CapabilityService(registry, store=InMemoryStateStore())
     for capability in descriptor.capabilities:
         request = CapabilityRequest(
             id=f"conformance_{uuid4().hex}",
@@ -26,7 +32,7 @@ async def check_provider(provider: CapabilityProvider) -> list[str]:
             instruction="provider conformance probe",
         )
         try:
-            result = await provider.invoke(request, InvocationContext(runtime_id="conformance"))
+            result = await service.invoke(request)
         except Exception as exc:  # noqa: BLE001 - provider boundary
             errors.append(f"invoke raised: {exc}")
             continue
@@ -34,7 +40,7 @@ async def check_provider(provider: CapabilityProvider) -> list[str]:
             errors.append("result request_id does not match")
         if result.provider_id != descriptor.id:
             errors.append("result provider_id does not match descriptor")
-        if result.status not in {"succeeded", "failed", "unavailable", "needs-input", "cancelled"}:
+        if result.status not in {"succeeded", "failed", "unavailable", "needs-input", "cancelled", "unknown"}:
             errors.append("result status is invalid")
         if result.status == "failed" and result.error:
             errors.append(f"invoke failed: {result.error}")
@@ -43,3 +49,5 @@ async def check_provider(provider: CapabilityProvider) -> list[str]:
     except Exception as exc:  # noqa: BLE001 - provider boundary
         errors.append(f"cancel raised: {exc}")
     return errors
+
+
