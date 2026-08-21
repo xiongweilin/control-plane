@@ -175,6 +175,11 @@
 - Repair lifecycle projection is now canonical-first: when a portable store is
   attached, a failed Work/Run projection prevents the legacy SQLite status
   update from committing.
+- Docker side effects now expose two independent facts in provider metadata:
+  `desired_state_verified` records the current running/healthy postcondition,
+  while `event_attribution` stays `unknown` for `docker.restart` and
+  `not-applicable` for `docker.compose.up`. A healthy `docker ps` result does
+  not by itself prove that a particular restart event occurred.
 
 ## 2026-08-21: Codex process boundary
 

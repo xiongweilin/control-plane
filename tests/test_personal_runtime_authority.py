@@ -64,6 +64,17 @@ class FakeGitExecutor:
         return ""
 
 
+class FakeUnknownProvider(FakeCodexProvider):
+    async def invoke(self, request, context) -> CapabilityResult:
+        self.calls.append((request, context))
+        return CapabilityResult(
+            request_id=request.id,
+            provider_id=self.descriptor.id,
+            status="unknown",
+            message="remote outcome cannot be observed",
+        )
+
+
 @pytest.mark.asyncio
 async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant(tmp_path: Path) -> None:
     store = InMemoryStateStore()
@@ -102,6 +113,35 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert len(grants) == 1
     assert grants[0].grantee_ref == "personal-agent"
     assert grants[0].subject_version_refs == ["git:abc123"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_outcome_keeps_canonical_execution_waiting(tmp_path: Path) -> None:
+    store = InMemoryStateStore()
+    registry = ProviderRegistry()
+    provider = FakeUnknownProvider()
+    registry.register(provider)
+    runtime = Runtime(store=store, registry=registry)
+
+    async def resolve_version(repo: str) -> str:
+        return "abc123"
+
+    authority = PortableRuntimeAuthority(runtime, version_resolver=resolve_version)
+    result = await authority.invoke(
+        repair_id="repair-authority-unknown",
+        repo=str(tmp_path),
+        prompt="make the local repair",
+    )
+
+    assert result.status == "unknown"
+    work = runtime.store.get_work("work_legacy_repair-authority-unknown")
+    run = runtime.store.get_run("run_legacy_repair-authority-unknown")
+    assert work is not None and work.status == "waiting"
+    assert run is not None and run.status == "waiting"
+    assert work.metadata["execution_outcome"] == "unknown"
+    assert work.metadata["reconciliation_required"] is True
+    assert "verification_status" not in work.metadata
+    assert "verified" not in work.metadata
 
 
 def test_procedure_profile_minimum_is_monotonic() -> None:
@@ -220,6 +260,58 @@ async def test_repair_service_uses_runtime_authority_instead_of_legacy_runner(tm
     assert legacy.calls == 0
     assert isinstance(service.capability_service.boundary, RealityBoundary)
     assert provider.calls[0][0].actor_ref == "personal-agent"
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_keeps_unknown_codex_outcome_recoverable(tmp_path: Path) -> None:
+    config = replace(
+        ControlPlaneConfig(),
+        data_dir=tmp_path / "data",
+        patch_dir=tmp_path / "data" / "patches",
+        evidence_dir=tmp_path / "data" / "evidence",
+        state_db=tmp_path / "data" / "control-plane.db",
+        notification_enabled=False,
+    )
+    store = Store(config.state_db)
+    runtime = Runtime(store=InMemoryStateStore(), registry=ProviderRegistry())
+    runtime.registry.register(FakeUnknownProvider())
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 10, 2),
+        object(),
+        Notifier(config),
+        executor=FakeGitExecutor(),
+        portable_runtime=runtime,
+    )
+    repair_id = "repair-service-unknown"
+    payload_json = '{"kind":"repair","labels":{}}'
+    store.create_repair(repair_id, "fp-unknown", payload_json, 1)
+    service.portable_authority.ensure_repair_projection(
+        repair_id=repair_id,
+        fingerprint="fp-unknown",
+        payload_json=payload_json,
+        attempt=1,
+    )
+
+    result = await service._invoke_codex_via_capability(
+        repair_id=repair_id,
+        repo=str(tmp_path),
+        prompt="edit through portable authority",
+    )
+    assert "reconciliation-required" in result.stderr_tail
+    await service._record_failure(repair_id, "fp-unknown", RuntimeError(result.stderr_tail))
+
+    row = store.get_repair(repair_id)
+    work = runtime.store.get_work(f"work_legacy_{repair_id}")
+    run = runtime.store.get_run(f"run_legacy_{repair_id}")
+    assert row is not None and row["status"] == "recovering"
+    assert work is not None and work.status == "waiting"
+    assert run is not None and run.status == "waiting"
+    assert work.metadata["reconciliation_required"] is True
+    assert "verification_status" not in work.metadata
     await service.close()
     store.close()
 

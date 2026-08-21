@@ -91,6 +91,94 @@ class PortableRuntimeAuthority:
         self.runtime.store.save_record(record)
         return record
 
+    def _persist_execution_outcome(
+        self,
+        work: Work,
+        run: Run,
+        result: CapabilityResult,
+    ) -> None:
+        """Project provider execution without confusing it with verification.
+
+        ``unknown`` means that the provider cannot currently prove the
+        external outcome.  It is therefore deliberately kept recoverable:
+        canonical Work/Run remain waiting and carry enough metadata for a
+        later reconciliation attempt.  Only an explicit provider failure is
+        projected as an execution failure; this method never writes a
+        verification failure record.
+        """
+
+        now = utcnow()
+        outcome = str(result.status)
+        work_metadata = dict(work.metadata)
+        run_metadata = dict(run.metadata)
+        outcome_metadata = {
+            "execution_outcome": outcome,
+            "execution_request_ref": result.request_id,
+            "execution_provider_ref": result.provider_id,
+            "execution_message": (result.message or "")[:4_000],
+        }
+        work_metadata.update(outcome_metadata)
+        run_metadata.update(outcome_metadata)
+        if outcome == "unknown":
+            recovery_metadata = {
+                "reconciliation_required": True,
+                "reconciliation_status": "required",
+                "reconciliation_reason": (result.message or "provider outcome is unknown")[:4_000],
+            }
+            work_metadata.update(recovery_metadata)
+            run_metadata.update(recovery_metadata)
+            self.runtime.store.save_work(
+                work.model_copy(update={"status": "waiting", "metadata": work_metadata, "updated_at": now})
+            )
+            self.runtime.store.save_run(
+                run.model_copy(update={"status": "waiting", "metadata": run_metadata})
+            )
+            return
+
+        if outcome == "succeeded":
+            # A provider success still waits for the deterministic verifier.
+            work_status = "waiting"
+            run_status = "waiting"
+            run_update: dict[str, Any] = {"status": run_status, "metadata": run_metadata}
+        else:
+            work_status = "failed"
+            run_status = "failed"
+            run_update = {
+                "status": run_status,
+                "metadata": run_metadata,
+                "ended_at": now,
+            }
+        self.runtime.store.save_work(
+            work.model_copy(update={"status": work_status, "metadata": work_metadata, "updated_at": now})
+        )
+        self.runtime.store.save_run(run.model_copy(update=run_update))
+
+    def mark_reconciliation_required(self, repair_id: str, summary: str) -> None:
+        """Keep canonical execution open when reality cannot be observed."""
+
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            return
+        now = utcnow()
+        message = summary[:4_000]
+        work_metadata = dict(work.metadata)
+        run_metadata = dict(run.metadata)
+        for metadata in (work_metadata, run_metadata):
+            metadata.update(
+                {
+                    "execution_outcome": "unknown",
+                    "reconciliation_required": True,
+                    "reconciliation_status": "required",
+                    "reconciliation_reason": message,
+                }
+            )
+        self.runtime.store.save_work(
+            work.model_copy(update={"status": "waiting", "metadata": work_metadata, "updated_at": now})
+        )
+        self.runtime.store.save_run(run.model_copy(update={"status": "waiting", "metadata": run_metadata})
+        )
+
     def _grant(
         self,
         repair_id: str,
@@ -558,17 +646,10 @@ class PortableRuntimeAuthority:
             },
         )
         result = await self.runtime.capabilities.invoke(request)
-        final_run = self.runtime.store.get_run(run.id)
-        if final_run is not None:
-            status = "waiting" if result.status == "succeeded" else "failed"
-            update: dict[str, Any] = {"status": status}
-            if status == "failed":
-                update["ended_at"] = datetime.now(UTC)
-            self.runtime.store.save_run(final_run.model_copy(update=update))
         final_work = self.runtime.store.get_work(work.id)
-        if final_work is not None:
-            status = "waiting" if result.status == "succeeded" else "failed"
-            self.runtime.store.save_work(final_work.model_copy(update={"status": status, "updated_at": utcnow()}))
+        final_run = self.runtime.store.get_run(run.id)
+        if final_work is not None and final_run is not None:
+            self._persist_execution_outcome(final_work, final_run, result)
         return result
 
     def finalize_repair(
@@ -623,6 +704,7 @@ class PortableRuntimeAuthority:
         passed: bool,
         summary: str,
         evidence_refs: list[str] | None = None,
+        verifier_ref: str = "control-plane.deterministic-verifier",
     ) -> list[str]:
         """Persist deterministic verifier output before canonical closure."""
 
@@ -643,7 +725,7 @@ class PortableRuntimeAuthority:
                     "result": "pass" if passed else "fail",
                     "target_refs": [work.id, run.id],
                     "subject_version_refs": version_refs,
-                    "verifier_ref": "control-plane.deterministic-verifier",
+                    "verifier_ref": verifier_ref,
                     "summary": summary[:4_000],
                 },
             )
@@ -657,7 +739,7 @@ class PortableRuntimeAuthority:
                     "qualification_kind": "evidence",
                     "target_refs": [work.id, run.id],
                     "subject_version_refs": version_refs,
-                    "verifier_ref": "control-plane.deterministic-verifier",
+                    "verifier_ref": verifier_ref,
                     "evidence_refs": list(evidence_refs or []),
                     "summary": summary[:4_000],
                 },
@@ -673,7 +755,7 @@ class PortableRuntimeAuthority:
                 subject_ref=evidence.id,
                 object_ref=verification.id,
                 scope={"work_id": work.id, "run_id": run.id},
-                created_by="control-plane.deterministic-verifier",
+                created_by=verifier_ref,
                 metadata={"qualification_kind": "relation"},
             )
             save_relation = getattr(self.runtime.store, "save_relation", None)
@@ -849,13 +931,8 @@ class PortableRuntimeAuthority:
             },
         )
         result = await self.runtime.capabilities.invoke(request)
-        if result.status != "succeeded":
-            final_run = self.runtime.store.get_run(run.id)
-            if final_run is not None:
-                self.runtime.store.save_run(
-                    final_run.model_copy(update={"status": "failed", "ended_at": datetime.now(UTC)})
-                )
-            final_work = self.runtime.store.get_work(work.id)
-            if final_work is not None:
-                self.runtime.store.save_work(final_work.model_copy(update={"status": "failed", "updated_at": utcnow()}))
+        final_work = self.runtime.store.get_work(work.id)
+        final_run = self.runtime.store.get_run(run.id)
+        if final_work is not None and final_run is not None:
+            self._persist_execution_outcome(final_work, final_run, result)
         return result
