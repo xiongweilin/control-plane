@@ -40,10 +40,10 @@ from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionRes
 from .config import ControlPlaneConfig
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
-from .gitpush import push_with_ssh_fallback
 from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
+from .personal_operations import PersonalOperationsProvider
 from .runtime import current_run_id
 from .state_machine import TERMINAL_STATES, RepairState, require_transition
 from .storage import Store
@@ -264,6 +264,11 @@ class RepairService:
         self._fingerprint_locks: dict[str, asyncio.Lock] = {}
         self.run_id = config.run_id or current_run_id()
         self.portable_runtime = portable_runtime
+        # The private provider remains available for legacy unit/service
+        # construction that does not bootstrap the full personal Runtime. The
+        # application path always uses ``portable_authority`` below, so this
+        # fallback never bypasses the production RealityBoundary.
+        self.personal_operations = PersonalOperationsProvider(config, self.executor)
         self.portable_authority = None
         if hasattr(self.executor, "attach_store"):
             self.executor.attach_store(store)
@@ -310,6 +315,52 @@ class RepairService:
         """Resolve the immutable source version used by the owner grant."""
 
         return await self.executor.run(["git", "rev-parse", "HEAD"], cwd=repo, timeout=60)
+
+    async def _invoke_personal_operation(
+        self,
+        *,
+        repair_id: str,
+        capability: str,
+        resource_ref: str,
+        parameters: dict[str, Any],
+        effect_class: str,
+        subject_version_refs: list[str] | None = None,
+        instruction: str = "",
+    ) -> CapabilityResult:
+        """Route Git/Docker effects through the typed personal provider.
+
+        Production uses the portable Runtime authority. The direct provider
+        fallback exists only for legacy service instances used by compatibility
+        tests and callers that do not construct a Runtime at all.
+        """
+
+        if self.portable_authority is not None:
+            return await self.portable_authority.invoke_operation(
+                repair_id=repair_id,
+                capability=capability,
+                resource_ref=resource_ref,
+                parameters=parameters,
+                effect_class=effect_class,
+                subject_version_refs=subject_version_refs,
+                instruction=instruction,
+            )
+        request = CapabilityRequest(
+            id=f"compat-{repair_id}-{capability.replace('.', '-')}-{uuid.uuid4().hex[:8]}",
+            capability=capability,
+            instruction=instruction or capability,
+            parameters=parameters,
+            resource_ref=resource_ref,
+            subject_version_refs=list(subject_version_refs or []),
+            actor_ref="control-plane:compatibility",
+            effect_class=effect_class,  # type: ignore[arg-type]
+            idempotency_key=f"compat:{repair_id}:{capability}",
+            work_id=repair_id,
+            run_id=self.run_id,
+        )
+        return await self.personal_operations.invoke(
+            request,
+            InvocationContext(runtime_id=self.run_id, work_id=repair_id, run_id=self.run_id),
+        )
 
     async def _invoke_codex_via_capability(
         self,
@@ -727,6 +778,13 @@ class RepairService:
             {"kind": "task", "prompt": prompt, "repo": target},
             ensure_ascii=False,
         )
+        if self.portable_authority is not None:
+            self.portable_authority.ensure_repair_projection(
+                repair_id=task_id,
+                fingerprint=fingerprint,
+                payload_json=payload_json,
+                attempt=1,
+            )
         self.store.create_repair(task_id, fingerprint, payload_json, 1)
         await self._notify(
             "info",
@@ -782,7 +840,10 @@ class RepairService:
                 "- 禁止不可逆操作：删除/清空数据卷或数据库（docker compose down -v、"
                 "docker volume rm、DROP/TRUNCATE、删除持久化数据）、"
                 "修改凭据/防火墙/sshd、停机或删除含持久化数据的容器。\n"
-                "- 运维允许白名单 Compose 项目的 docker compose restart / up -d 与只读诊断；URL 探针与 PromQL 查询。\n"
+                "- Codex 只能提出运维建议；不得执行 docker restart、docker compose restart/up -d、"
+                "git merge 或 git push。\n"
+                "- 运行态变更由 control-plane 的 typed Docker/Git capability 在单独授权后执行；"
+                "URL 探针与 PromQL 查询仍可只读执行。\n"
                 "- 完成后最后一条消息总结：做了什么、验证结果、是否创建分支与分支名。"
             )
             result = await self._invoke_codex_via_capability(
@@ -1204,6 +1265,19 @@ class RepairService:
             ) from exc
         if not report.all_passed:
             raise RuntimeError(f"Verification failed:\n{report.summary}")
+        if self.portable_authority is not None:
+            verification_refs = self.portable_authority.record_verification(
+                repair_id,
+                passed=True,
+                summary=report.summary,
+                evidence_refs=[check.evidence_ref for check in report.checks if check.evidence_ref],
+            )
+            self.portable_authority.finalize_repair(
+                repair_id,
+                verified=True,
+                verification_refs=verification_refs,
+                summary=report.summary,
+            )
         self._transition(repair_id, RepairState.VERIFIED)
         await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
         if self._alert_is_firing(fingerprint):
@@ -1260,6 +1334,21 @@ class RepairService:
         else:
             original_error = previous_original or error_text
             recovery_error = ""
+        if self.portable_authority is not None:
+            if error_text.startswith("Verification failed"):
+                verification_refs = self.portable_authority.record_verification(
+                    repair_id,
+                    passed=False,
+                    summary=error_text,
+                )
+            else:
+                verification_refs = None
+            self.portable_authority.finalize_repair(
+                repair_id,
+                verified=False,
+                verification_refs=verification_refs,
+                summary=error_text,
+            )
         self.store.set_repair_status(
             repair_id,
             self._failure_status_for(error_text).value,
@@ -1532,9 +1621,9 @@ class RepairService:
             f"git checkout -b {branch}；完成后 git add -A && git commit。禁止 push。",
             "- 禁止修改：验证器、告警规则（alert.rules.yml / prometheus.yml / alertmanager.yml）、"
             "权限、AGENTS.md、凭据、control-plane 自身代码与数据。",
-            "- 运维允许：对任何运行中的 Compose 项目（dify、feedback-analysis-agent、"
-            "catalog-ops-automation、observability、feishu-dify-gateway）执行 "
-            "docker compose restart / up -d、docker restart 与只读 docker 诊断；URL 探针与 PromQL 查询。",
+            "- Codex 只能提出运行态变更建议；不得执行 docker restart、docker compose restart/up -d、"
+            "git merge 或 git push。运行态变更由 control-plane 的 typed Docker/Git capability "
+            "在单独授权后执行；URL 探针与 PromQL 查询仍可只读执行。",
             "- 禁止不可逆操作：删除/清空数据卷或数据库（docker compose down -v、docker volume rm、"
             "DROP/TRUNCATE、删除持久化数据）、docker compose down、git push --force 或删除 main/受保护分支、"
             "修改凭据/防火墙/sshd、停止或删除含持久化数据的容器（先验证备份再做）。",
@@ -1928,24 +2017,34 @@ class RepairService:
             if not repo:
                 continue
             branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
-            await self.executor.run(["git", "-C", repo, "checkout", "-q", "main"], timeout=120)
-            try:
-                await self.executor.run(["git", "-C", repo, "merge", "--ff-only", branch], timeout=120)
-            except ToolError:
-                await self.executor.run(["git", "-C", repo, "merge", "-q", "--no-edit", branch], timeout=120)
-            pushed, detail = await push_with_ssh_fallback(
-                self.executor,
-                repo,
-                remote="origin",
-                branch="main",
-                timeout=self.config.git_push_timeout_seconds,
-                fallback_enabled=self.config.github_ssh_fallback,
-                fallback_host=self.config.github_ssh_host_port,
+            version = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
+            resource = f"repo:{Path(repo).resolve()}"
+            merge_result = await self._invoke_personal_operation(
+                repair_id=repair_id,
+                capability="git.merge",
+                resource_ref=resource,
+                parameters={"repo": repo, "branch": branch, "target": "main"},
+                effect_class="write-local",
+                subject_version_refs=[f"git:{version}"],
+                instruction=f"merge candidate {branch} into main",
             )
+            if merge_result.status != "succeeded":
+                raise ToolError(merge_result.message or "portable git.merge failed")
+            push_result = await self._invoke_personal_operation(
+                repair_id=repair_id,
+                capability="git.push",
+                resource_ref=resource,
+                parameters={"repo": repo, "remote": "origin", "branch": "main"},
+                effect_class="write-remote",
+                subject_version_refs=[f"git:{version}"],
+                instruction="push the approved merge to origin/main",
+            )
+            if push_result.status != "succeeded":
+                raise ToolError(push_result.message or "portable git.push failed")
             await self._notify(
                 "info",
                 "代码候选已合并到 main",
-                f"repair_id={repair_id}\nrepo={repo}\npush: {detail}",
+                f"repair_id={repair_id}\nrepo={repo}\npush: {push_result.message or 'succeeded'}",
             )
 
     async def resume_pending_approval(self, repair_id: str) -> None:
@@ -2506,14 +2605,18 @@ class RepairService:
                 repo = row["target"]
                 branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
                 try:
-                    for git_args in (
-                        ["git", "-C", repo, "checkout", "-q", "main"],
-                        ["git", "-C", repo, "branch", "-D", branch],
-                    ):
-                        try:
-                            await self.executor.run(git_args, timeout=120)
-                        except ToolError:
-                            logger.warning("candidate branch cleanup step failed for %s", row["id"])
+                    version = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
+                    result = await self._invoke_personal_operation(
+                        repair_id=repair_id,
+                        capability="git.rollback",
+                        resource_ref=f"repo:{Path(repo).resolve()}",
+                        parameters={"repo": repo, "branch": branch},
+                        effect_class="write-local",
+                        subject_version_refs=[f"git:{version}"],
+                        instruction=f"rollback candidate branch {branch}",
+                    )
+                    if result.status != "succeeded":
+                        logger.warning("portable candidate rollback failed for %s: %s", row["id"], result.message)
                 except ToolError:
                     logger.warning("candidate branch cleanup failed for %s", row["id"])
         resolved_project = self._resolve_project(project)
@@ -2522,12 +2625,17 @@ class RepairService:
                 project_dir = self.config.project_dirs.get(
                     resolved_project, f"D:\\infrastructure\\compose\\{resolved_project}"
                 )
-                await self.executor.run(
-                    ["docker", "compose", "restart"],
-                    cwd=str(project_dir),
-                    timeout=180,
+                result = await self._invoke_personal_operation(
+                    repair_id=repair_id,
+                    capability="docker.restart",
+                    resource_ref=f"compose:{resolved_project}",
+                    parameters={"project": resolved_project, "project_dir": str(project_dir)},
+                    effect_class="write-remote",
+                    instruction=f"restart allowlisted compose project {resolved_project}",
                 )
-            except ToolError:
+                if result.status != "succeeded":
+                    logger.warning("portable rollback restart failed for project %s: %s", project, result.message)
+            except (ToolError, RuntimeError):
                 logger.warning("rollback restart failed for project %s", project)
 
     async def _create_candidate(

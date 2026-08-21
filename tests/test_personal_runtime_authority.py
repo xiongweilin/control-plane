@@ -93,6 +93,9 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert request.subject_version_refs == ["git:abc123"]
     assert request.effect_class == "write-local"
     assert context.work_id == "work_legacy_repair-authority-1"
+    assert runtime.store.get_work("work_legacy_repair-authority-1").status == "waiting"
+    assert runtime.store.get_run("run_legacy_repair-authority-1").status == "waiting"
+    authority.finalize_repair("repair-authority-1", verified=True, summary="verification passed")
     assert runtime.store.get_work("work_legacy_repair-authority-1").status == "completed"
     assert runtime.store.get_run("run_legacy_repair-authority-1").status == "succeeded"
     grants = runtime.store.list_authorizations()

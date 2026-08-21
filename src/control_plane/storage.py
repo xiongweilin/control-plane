@@ -277,11 +277,17 @@ class Store:
             "recovery_error",
             "timeout_kind",
         }
+        for key in fields:
+            if key not in allowed:
+                raise ValueError(f"Unsupported repair field: {key}")
+        # The portable Work/Run is authoritative once attached.  Commit its
+        # lifecycle projection first; a failure must prevent the legacy row
+        # from claiming a state that canonical storage did not accept.
+        if self._portable_store is not None:
+            self._sync_portable_repair_status(repair_id, status, fields)
         columns = ["status=?", "updated_at=?"]
         values: list[Any] = [status, int(time.time())]
         for key, value in fields.items():
-            if key not in allowed:
-                raise ValueError(f"Unsupported repair field: {key}")
             columns.append(f"{key}=?")
             values.append(value)
         values.append(repair_id)
@@ -290,80 +296,70 @@ class Store:
                 f"UPDATE repairs SET {', '.join(columns)} WHERE id=?",  # noqa: S608
                 values,
             )
-        # Keep the legacy row as a compatibility projection of canonical
-        # Work/Run state.  This is deliberately best-effort for old databases
-        # that have no attached portable store; the canonical app path always
-        # attaches one during bootstrap.
-        self._sync_portable_repair_status(repair_id, status, fields)
 
     def _sync_portable_repair_status(
         self, repair_id: str, status: str, fields: dict[str, Any]
-    ) -> None:
+    ) -> bool:
         portable = self._portable_store
         if portable is None:
-            return
-        try:
-            work = portable.get_work(f"work_legacy_{repair_id}")
-            run = portable.get_run(f"run_legacy_{repair_id}")
-            if work is None and run is None:
-                return
-            work_status = {
-                "queued": "open",
-                "diagnosing": "running",
-                "proposing": "running",
-                "staged": "waiting",
-                "applying": "running",
-                "verified": "waiting",
-                "recovering": "waiting",
-                "needs_approval": "waiting",
-                "closed": "completed",
-                "rolled_back": "completed",
-                "failed": "failed",
-                "escalated": "blocked",
-                "interrupted": "waiting",
-                "timed_out": "failed",
-            }.get(status, "running")
-            run_status = {
-                "queued": "queued",
-                "diagnosing": "running",
-                "proposing": "running",
-                "staged": "waiting",
-                "applying": "running",
-                "verified": "waiting",
-                "recovering": "waiting",
-                "needs_approval": "waiting",
-                "closed": "succeeded",
-                "rolled_back": "succeeded",
-                "failed": "failed",
-                "escalated": "failed",
-                "interrupted": "interrupted",
-                "timed_out": "failed",
-            }.get(status, "running")
-            now = datetime.now(UTC)
-            if work is not None:
-                metadata = dict(work.metadata)
-                metadata.update({"legacy_status": status, **fields})
-                portable.save_work(
-                    work.model_copy(
-                        update={
-                            "status": work_status,
-                            "metadata": metadata,
-                            "updated_at": now,
-                        }
-                    )
+            return True
+        work = portable.get_work(f"work_legacy_{repair_id}")
+        run = portable.get_run(f"run_legacy_{repair_id}")
+        if work is None and run is None:
+            return True
+        work_status = {
+            "queued": "open",
+            "diagnosing": "running",
+            "proposing": "running",
+            "staged": "waiting",
+            "applying": "running",
+            "verified": "waiting",
+            "recovering": "waiting",
+            "needs_approval": "waiting",
+            "closed": "completed",
+            "rolled_back": "failed",
+            "failed": "failed",
+            "escalated": "blocked",
+            "interrupted": "waiting",
+            "timed_out": "failed",
+        }.get(status, "running")
+        run_status = {
+            "queued": "queued",
+            "diagnosing": "running",
+            "proposing": "running",
+            "staged": "waiting",
+            "applying": "running",
+            "verified": "waiting",
+            "recovering": "waiting",
+            "needs_approval": "waiting",
+            "closed": "succeeded",
+            "rolled_back": "failed",
+            "failed": "failed",
+            "escalated": "failed",
+            "interrupted": "interrupted",
+            "timed_out": "failed",
+        }.get(status, "running")
+        now = datetime.now(UTC)
+        if work is not None:
+            metadata = dict(work.metadata)
+            metadata.update({"legacy_status": status, **fields})
+            portable.save_work(
+                work.model_copy(
+                    update={
+                        "status": work_status,
+                        "metadata": metadata,
+                        "updated_at": now,
+                    }
                 )
-            if run is not None:
-                metadata = dict(run.metadata)
-                metadata.update({"legacy_status": status, **fields})
-                update: dict[str, Any] = {"status": run_status, "metadata": metadata}
-                if status in {"closed", "rolled_back", "failed", "escalated", "timed_out"}:
-                    update["ended_at"] = now
-                portable.save_run(run.model_copy(update=update))
-        except Exception:
-            # A projection failure must remain visible in the legacy path's
-            # logs/metrics without making the already-committed transition
-            # disappear.
-            return
+            )
+        if run is not None:
+            metadata = dict(run.metadata)
+            metadata.update({"legacy_status": status, **fields})
+            update: dict[str, Any] = {"status": run_status, "metadata": metadata}
+            if status in {"closed", "rolled_back", "failed", "escalated", "timed_out"}:
+                update["ended_at"] = now
+            portable.save_run(run.model_copy(update=update))
+        return True
 
     def increment_agent_calls(self, repair_id: str, amount: int = 1) -> None:
         with self._lock:
@@ -802,8 +798,8 @@ class Store:
 
     # ---- portable read switch (S31 Step C, S32, S52) ----
     # Reads are delegated to the portable StateStore when attached and enabled.
-    # Legacy SQLite remains the source of truth until the switch is fully validated;
-    # old rows are never auto-deleted (S31-D).
+    # Portable Work/Run is authoritative when attached; legacy SQLite remains
+    # a compatibility projection and old rows are never auto-deleted (S31-D).
 
     def attach_portable_store(self, store: Any, *, enable_read: bool = True) -> None:
         """Attach a portable StateStore for dual-read. When enable_read is True,

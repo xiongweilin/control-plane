@@ -69,10 +69,14 @@ architecture decision.
    metadata may only raise it; unknown profile values fail closed.
 4. Independent post-edit verification remains distinct from pre-execution
    qualification and owns repair closure.
-5. Candidate promotion must preserve typed evidence, verification, decision,
+5. Git merge/push and Docker lifecycle effects are separate typed providers;
+   Codex sessions can propose them but cannot execute them.
+6. Provider execution success is an execution outcome, not repair verification;
+   Work/Run remain waiting until deterministic verification finalizes them.
+7. Candidate promotion must preserve typed evidence, verification, decision,
    authorization and scope/version records before the legacy official row is
    projected.
-6. `D:\agent\portable-runtime` is never modified by a control-plane-only
+8. `D:\agent\portable-runtime` is never modified by a control-plane-only
    migration.
 
 ## Gates
