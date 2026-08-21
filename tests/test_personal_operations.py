@@ -231,6 +231,51 @@ async def test_docker_reconcile_rereads_container_health(tmp_path: Path) -> None
 
     assert result.status == "succeeded"
     assert result.metadata["container_status"].startswith("cp-api")
+    assert result.metadata["desired_state"] == "running"
+    assert result.metadata["desired_state_verified"] is True
+    assert result.metadata["event_attribution"] == "unknown"
+    assert result.metadata["event_verified"] is False
     assert reconciled is not None
     assert reconciled.status == "unknown"
     assert reconciled.reconciled is True
+
+
+@pytest.mark.asyncio
+async def test_docker_desired_state_does_not_claim_restart_event(tmp_path: Path) -> None:
+    executor = QueueExecutor(["ok", "cp-api\tUp 2 minutes (healthy)"])
+    config = ControlPlaneConfig(project_dirs={"dify": str(tmp_path)})
+    provider = PersonalOperationsProvider(config, executor)  # type: ignore[arg-type]
+    request = CapabilityRequest(
+        id="req-docker-restart-attribution",
+        capability="docker.restart",
+        parameters={"project": "dify"},
+        effect_class="write-remote",
+    )
+
+    result = await provider.invoke(request, InvocationContext(runtime_id="test"))
+
+    assert result.status == "succeeded"
+    assert result.metadata["desired_state_verified"] is True
+    assert result.metadata["event_attribution"] == "unknown"
+    assert result.metadata["event_verification_basis"] == "not-observable"
+
+
+@pytest.mark.asyncio
+async def test_compose_up_is_reported_as_desired_state_operation(tmp_path: Path) -> None:
+    executor = QueueExecutor(["ok", "cp-api\tUp 2 minutes (healthy)"])
+    config = ControlPlaneConfig(project_dirs={"dify": str(tmp_path)})
+    provider = PersonalOperationsProvider(config, executor)  # type: ignore[arg-type]
+    request = CapabilityRequest(
+        id="req-docker-compose-up",
+        capability="docker.compose.up",
+        parameters={"project": "dify"},
+        effect_class="write-remote",
+    )
+
+    result = await provider.invoke(request, InvocationContext(runtime_id="test"))
+
+    assert result.status == "succeeded"
+    assert result.metadata["desired_state"] == "running"
+    assert result.metadata["desired_state_verified"] is True
+    assert result.metadata["event_attribution"] == "not-applicable"
+    assert result.metadata["event_verification_basis"] == "desired-state-operation"

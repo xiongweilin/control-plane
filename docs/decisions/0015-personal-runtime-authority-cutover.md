@@ -59,7 +59,14 @@ effects. The private profile registers `git.merge`, `git.push`, `git.rollback`,
 `docker.restart` and `docker.compose.up` providers with scoped contracts and
 uses a separate Decision + AuthorizationGrant for each operation. The
 deterministic verifier remains responsible for final repair closure after those
-providers return.
+providers return. Docker operation metadata deliberately separates the
+postcondition from event attribution: `desired_state_verified=true` means the
+allowlisted Compose project is currently running/healthy, while
+`event_attribution=unknown` remains the honest result for `docker.restart`
+unless a separate observer proves that this restart event occurred.
+`docker.compose.up` is a desired-state operation and therefore reports
+`event_attribution=not-applicable`; a healthy postcondition must never be
+treated as restart-event evidence.
 
 The legacy SQLite row remains writable only as a compatibility projection for
 the existing HTTP/Feishu/state-machine API.  Its status updates are mirrored
