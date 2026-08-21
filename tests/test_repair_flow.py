@@ -40,6 +40,8 @@ class FakeExecutor:
             return "true"
         if "rev-parse HEAD" in joined:
             return "abc123"
+        if "rev-parse main" in joined:
+            return "abc123"
         if "symbolic-ref --quiet --short HEAD" in joined:
             return self.current_branch
         if " switch " in f" {joined} ":
@@ -53,6 +55,8 @@ class FakeExecutor:
             return ""
         if "rev-parse --verify fix/control-plane-" in joined:
             return "abc123\n"
+        if "ls-remote" in joined:
+            return "abc123\trefs/heads/main"
         return ""
 
 

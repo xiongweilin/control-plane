@@ -27,10 +27,13 @@ runtime = "portable_runtime.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# TODO(portable_runtime-extract): after portable-runtime repo is published, replace
-# dual-package build with single package + external dependency:
-#   dependencies = ["portable-runtime @ git+ssh://github.com/ratiolin/portable-runtime.git"]
-# Keep both packages for now to allow dual_write parity; do not split yet (gate §64).
+# The public portable-runtime repository is the semantic upstream.  This private
+# profile intentionally ships the vendored runtime alongside control_plane so a
+# Windows installation is reproducible, but the vendored tree is not a second
+# authority.  Capability-scoped Codex sandbox and monotonic procedure changes
+# are tracked as explicit upstream follow-ups in MIGRATION.md and ADR-0015;
+# after they land publicly, update the pin and remove the corresponding local
+# semantic delta.  Do not describe this package as zero-drift in the meantime.
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]
 
