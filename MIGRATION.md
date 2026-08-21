@@ -48,12 +48,11 @@ constructed compatibility callers.
 ## Vendored runtime policy
 
 `src/portable_runtime` is synchronized from the public repository and the
-public source tree is read-only from this project. A private semantic hardening
-delta must be documented, tested, and treated as an upstream follow-up; it
-must not be mistaken for a new private authority. The current private delta
-includes capability-scoped Codex sandbox selection and the monotonic procedure
-profile resolver. Do not claim zero drift until the corresponding public
-changes have landed and a new pin has been recorded.
+public source tree is read-only from this project. The provider-neutral
+semantic hardening delta was upstreamed to public commit `2bf0932` and the
+private vendored tree was repinned to that commit. The remaining private
+provider difference is deployment-specific Windows boundary injection and is
+not a second semantic authority.
 
 The private repository currently builds both packages so the personal profile
 can run from one checkout:
@@ -67,38 +66,14 @@ This is packaging convenience, not ownership transfer. Do not replace it with
 a thin-shim or archived `control_plane` target without a separately approved
 architecture decision.
 
-## Upstream follow-up list
+## Upstream synchronization status
 
-The current private vendored tree differs from the public `portable-runtime`
-tree in these semantic files (verified against the public checkout on
-2026-08-21):
-
-- `portable_runtime/core/capability_contract.py`: monotonic procedure-profile
-  resolver, explicit `code.read`/`code.test`/`shell.exec`/`git.diff` contracts,
-  and fail-closed unknown `code.*` effect classification;
-- `portable_runtime/core/boundary.py`: use the monotonic resolver when checking
-  Work/Run/request procedure metadata;
-- `portable_runtime/providers/codex/provider.py`: capability-to-sandbox mapping
-  (`reason.generate`/read capabilities → `read-only`, edits/tests/shell →
-  `workspace-write`) and provider `reconcile()` protocol parity;
-- `portable_runtime/core/qualification.py`, `interfaces/store.py`,
-  `stores/memory.py`, `stores/sqlite.py`: small typed-record/store compatibility
-  changes required by the above semantics;
-- `portable_runtime/core/invocation.py`: preserve a caller's stricter
-  procedure-profile requirement instead of replacing it with the contract
-  minimum during request construction;
-- `portable_runtime/providers/codex/manifest.json`: provider manifest version
-  metadata.
-
-The detached worktree and Windows credential/Docker environment boundary are
-deliberately not upstream patch candidates: they depend on this private
-profile's filesystem, Codex CLI and deployment policy. Only the portable
-capability-to-sandbox/procedure semantics above should be proposed upstream.
-
-These are upstream patch candidates, not permission to edit
-`D:\agent\portable-runtime` from this repository. The public project should
-receive equivalent portable tests and release a new pin before this profile
-removes its vendored delta.
+The provider-neutral procedure floors, explicit capability contracts,
+qualification Decision lookup, typed store access, and Codex sandbox mapping
+are now present in public `ratiolin/portable-runtime` at `2bf0932`. The private
+profile intentionally retains only the detached worktree and Windows
+credential/Docker environment boundary, which depends on this profile's
+filesystem and deployment policy and must not be moved into the public base.
 
 ## Migration invariants
 

@@ -9,8 +9,10 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, cast
+from types import MappingProxyType
+from typing import Any, Final, Literal, cast
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
@@ -24,23 +26,25 @@ from portable_runtime.stores.filesystem import FilesystemArtifactStore
 
 logger = logging.getLogger(__name__)
 
+SandboxProfile = Literal["read-only", "workspace-write"]
 
-# The capability contract describes the requested effect; this map makes the
-# corresponding Codex process sandbox an independent, physical guard.  In
-# particular, ``reason.generate`` must never inherit the write-capable sandbox
-# merely because the same provider also supports ``code.edit``.
-CODEX_SANDBOX_BY_CAPABILITY: dict[str, str] = {
-    "reason.generate": "read-only",
-    "code.read": "read-only",
-    "git.diff": "read-only",
-    "code.edit": "workspace-write",
-    "code.test": "workspace-write",
-    "shell.exec": "workspace-write",
-}
+# The capability is the authority for the Codex process sandbox.  Keep the
+# default mapping immutable so callers cannot widen it at runtime; the private
+# profile may still pass an explicitly validated mapping for deployment tests.
+CODEX_SANDBOX_BY_CAPABILITY: Final[Mapping[str, SandboxProfile]] = MappingProxyType(
+    {
+        "reason.generate": "read-only",
+        "code.read": "read-only",
+        "git.diff": "read-only",
+        "code.edit": "workspace-write",
+        "code.test": "workspace-write",
+        "shell.exec": "workspace-write",
+    }
+)
 _ALLOWED_CODEX_SANDBOXES = frozenset({"read-only", "workspace-write"})
 
 
-def sandbox_for_capability(capability: str) -> str:
+def sandbox_for_capability(capability: str) -> SandboxProfile:
     """Return the least-privilege Codex sandbox for a capability.
 
     Unknown capabilities fail closed to ``read-only``.  ``danger-full-access``
@@ -90,7 +94,7 @@ class CodexProvider:
         executor: ProcessExecutor | None = None,
         artifact_store: FilesystemArtifactStore | None = None,
         gateway_base_url: str | None = None,
-        sandbox_by_capability: dict[str, str] | None = None,
+        sandbox_by_capability: Mapping[str, str] | None = None,
         execution_boundary_config: Any | None = None,
     ) -> None:
         self._cli = _resolve_cli(cli)
@@ -105,7 +109,7 @@ class CodexProvider:
         # provider receives the same candidate-worktree and credential/Docker
         # environment boundary as the compatibility CodexRunner.
         self._execution_boundary_config = execution_boundary_config
-        self._sandbox_by_capability = dict(CODEX_SANDBOX_BY_CAPABILITY)
+        self._sandbox_by_capability: dict[str, SandboxProfile] = dict(CODEX_SANDBOX_BY_CAPABILITY)
         if sandbox_by_capability:
             for capability, sandbox in sandbox_by_capability.items():
                 if sandbox not in _ALLOWED_CODEX_SANDBOXES:
@@ -113,7 +117,7 @@ class CodexProvider:
                         f"unsupported Codex sandbox {sandbox!r} for {capability!r}; "
                         f"allowed={sorted(_ALLOWED_CODEX_SANDBOXES)}"
                     )
-                self._sandbox_by_capability[capability] = sandbox
+                self._sandbox_by_capability[capability] = cast(SandboxProfile, sandbox)
         self._descriptor = ProviderDescriptor(
             id=provider_id,
             name="Codex Provider",
@@ -129,7 +133,14 @@ class CodexProvider:
             priority=10,
             tags={"external-tool", "supports-files"},
             constraints={},
-            metadata={"model": model, "cli": str(self._cli), "gateway_base_url": gateway_base_url or ""},
+            metadata={
+                "model": model,
+                "cli": str(self._cli),
+                "gateway_base_url": gateway_base_url or "",
+                "sandbox_by_capability": dict(CODEX_SANDBOX_BY_CAPABILITY),
+                "unknown_capability_sandbox": "read-only",
+                "sandbox_override": "forbidden",
+            },
         )
 
     @property
@@ -184,10 +195,7 @@ class CodexProvider:
         repo = str(request.parameters.get("repo", "") or self._working_directory or "")
         # Use provider-level model unless overridden per-request
         model = str(request.parameters.get("model", self._model))
-        sandbox = cast(
-            Literal["read-only", "workspace-write"],
-            self._sandbox_by_capability.get(request.capability, "read-only"),
-        )
+        sandbox = self._sandbox_by_capability.get(request.capability, "read-only")
         cwd = Path(repo) if repo else (self._working_directory or Path.cwd())
         boundary = None
         if self._execution_boundary_config is not None:
