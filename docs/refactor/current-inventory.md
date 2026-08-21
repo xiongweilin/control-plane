@@ -5,7 +5,8 @@ package is `src/control_plane` and exposes a FastAPI app from `control_plane.app
 
 ## Entrypoints and loops
 
-- `portable_runtime.deployment.personal_platform`: uvicorn serving, candidate cleanup, session inspection.
+- `control_plane.__main__`: private personal-platform uvicorn serving, candidate cleanup, and session inspection entrypoint.
+- `portable_runtime`: vendored public runtime base; it remains independently usable and does not own personal integrations.
 - `control_plane.app`: liveness/readiness/metrics, Alertmanager webhook, approvals,
   task dispatch, digest/scan/model-recovery background loops.
 - `control_plane.service.RepairService`: alert ingestion, repair lifecycle,
@@ -35,10 +36,9 @@ legacy repair IDs. Alertmanager payloads are parsed by `control_plane.models`.
 HTTP routes are concentrated in `control_plane.app` and currently use the
 legacy `/healthz`, `/live`, `/ready`, `/status`, `/v1/...` surface.
 
-`portable_runtime` is now the canonical Work/Run and capability authority for
-the personal profile. `control_plane` remains the compatibility/deployment
-surface: its service admits alerts/tasks, projects legacy rows, and retains
-the Windows/Feishu/HTTP lifecycle until the separate launcher cutover is
-verified. Production repair execution must use the personal Runtime and its
-`RealityBoundary`; the legacy routing seam is only for explicitly constructed
-compatibility callers.
+`portable_runtime` is the canonical Work/Run and capability authority used by
+the personal profile. `control_plane` remains the private deployment and
+personal-integration surface: its service admits alerts/tasks, projects legacy
+rows, and owns the production entrypoint. Production repair execution uses the
+personal Runtime and its `RealityBoundary`; the legacy routing seam is only for
+explicitly constructed compatibility callers.

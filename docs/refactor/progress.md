@@ -118,26 +118,21 @@
 - The coverage decline gate now measures both `control_plane` and
   `portable_runtime`, so migration code cannot be hidden behind a legacy-only
   coverage target.
-- The repository-side launcher switch is prepared; the machine-level
-  `/live` → `/ready` → Alertmanager → repair → approval → restart/recovery
-  drill is recorded after the pushed entrypoint is started.
+- The portable authority migration is complete, but the project boundary is
+  intentionally dual-project: public `portable-runtime` remains the generic
+  base, while private `control-plane` remains the personal production profile
+  and entrypoint. The machine-level `/live` → `/ready` → Alertmanager →
+  repair → approval → restart/recovery drill is verified after the launcher is
+  restored to `python -m control_plane`.
 
-## 2026-08-21: personal-platform entrypoint cutover
+## 2026-08-21: preserve the two-project entrypoint boundary
 
-- Windows launchers now execute
-  `portable_runtime.deployment.personal_platform`; the old
-  `python -m control_plane` executable path was removed.
-- The personal HTTP/Feishu/Prometheus implementation remains under
-  `control_plane` as an internal profile module, while its public executable
-  ownership belongs to Portable Runtime deployment.
-- Authority/entrypoint code was pushed as `31b6716`; the follow-up CI policy
-  commit is `074d187`. GitHub Actions run
-  [32457912555](https://github.com/ratiolin/control-plane/actions/runs/32457912555)
-  is fully green: `lint-and-test`, `windows-native`, coverage and the
-  SonarCloud job (the external scan is explicitly skipped when no token is
-  configured).
-- Machine switch evidence: `ControlPlane` Task Scheduler was stopped and
-  restarted; fresh run `run-1787296287-7d58acd4` serves `/live` and `/ready`
-  with database, Prometheus and Alertmanager checks all true. No running
-  process contains `-m control_plane`; the old module invocation returns the
-  expected missing-`__main__` error.
+- A temporary experiment moved the private launcher into the public runtime
+  deployment layer; that relocation was reverted because it would make the
+  public base own private integrations.
+- `src/control_plane/__main__.py` and both Windows launchers are the supported
+  personal-platform entrypoint again. The private-only portable deployment
+  module was removed. `D:\agent\portable-runtime` remains untouched.
+- The authority/canonical Work/Run migration from `31b6716` and its CI policy
+  follow-ups remain in effect; this correction changes only executable
+  ownership and documentation.

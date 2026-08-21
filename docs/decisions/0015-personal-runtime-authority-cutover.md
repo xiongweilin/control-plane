@@ -65,11 +65,11 @@ rows continue to be imported with `dual_write_repair`.
 | canonical result → legacy status | compatibility projection | best-effort mirror; canonical state remains inspectable |
 | repair closure | independent verifier + existing approval flow | failed verification never closes the repair |
 
-The Windows launcher and supervisor now enter
-`portable_runtime.deployment.personal_platform`. The old
-`python -m control_plane` executable entrypoint is removed. The profile
-implementation remains available behind the new entrypoint until the source
-extraction and recovery evidence are complete.
+The public `portable-runtime` project remains the provider-neutral base. The
+private `control-plane` project remains the personal-platform superset and its
+Windows launcher and supervisor intentionally enter `python -m control_plane`.
+The canonical Work/Run and authority migration is an internal architecture
+change, not a deprecation of the private project or its entrypoint.
 
 ## Consequences
 
