@@ -46,14 +46,10 @@ from .service import RepairService
 # Portable runtime bridge (additive, section 14/31)
 try:
     from portable_runtime.deployment.local import create_personal_platform_runtime
-    from portable_runtime.stores.migration import dual_write_repair
-    from portable_runtime.triggers.alertmanager.trigger import AlertmanagerTrigger
     _PORTABLE_AVAILABLE = True
 except Exception:  # pragma: no cover
     _PORTABLE_AVAILABLE = False
     create_personal_platform_runtime = None  # type: ignore[assignment]
-    dual_write_repair = None  # type: ignore[assignment]
-    AlertmanagerTrigger = None  # type: ignore
 from .state_machine import RepairState
 from .storage import Store
 
@@ -96,18 +92,46 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     store = Store(cfg.state_db)
     # Portable runtime (additive, separate DB, never blocks legacy)
-    portable_runtime = None
-    if _PORTABLE_AVAILABLE:
-        try:
-            portable_runtime = create_personal_platform_runtime(cfg.data_dir / "portable-runtime.db")
-        except Exception:
-            portable_runtime = None
+    if not _PORTABLE_AVAILABLE or create_personal_platform_runtime is None:
+        raise RuntimeError("portable runtime is required for the personal control-plane app")
+    try:
+        portable_runtime = create_personal_platform_runtime(cfg.data_dir / "portable-runtime.db")
+        # The personal runtime owns provider registration.  The legacy
+        # CodexRunner remains available only for compatibility commands;
+        # alert-driven repair execution uses this provider through the
+        # runtime's RealityBoundary.
+        from portable_runtime.providers.codex.provider import CodexProvider
+
+        portable_runtime.registry.register(
+            CodexProvider(
+                model=cfg.model,
+                cli=getattr(cfg, "codex_cli", None),
+                timeout_seconds=float(
+                    cfg.exec_timeout_seconds
+                    or cfg.per_repair_timeout_seconds
+                    or 900
+                ),
+            )
+        )
+    except Exception as exc:
+        logger.exception("portable runtime bootstrap failed")
+        raise RuntimeError("portable runtime bootstrap failed") from exc
     budget = Budget(store, cfg.daily_agent_budget, cfg.max_agent_calls_per_repair)
     approvals = ApprovalManager()
     notifier = Notifier(cfg)
     agent = CodexRunner(cfg)
     agent.attach_store(store)
-    service = RepairService(cfg, store, budget, agent, approvals, notifier)
+    if portable_runtime is not None:
+        store.attach_portable_store(portable_runtime.store, enable_read=True)
+    service = RepairService(
+        cfg,
+        store,
+        budget,
+        agent,
+        approvals,
+        notifier,
+        portable_runtime=portable_runtime,
+    )
     with suppress(ValueError):
         # skip if already registered (e.g. test app created twice)
         REGISTRY.register(ControlPlaneCollector(store, budget.remaining))
@@ -138,7 +162,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         now = int(time.time())
         keep_pending = {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
         resumed: list[str] = []
-        for row in store.list_repairs(limit=1_000):
+        for row in store.list_repairs_with_fallback(limit=1_000):
             if row["status"] in keep_pending:
                 resumed.append(row["id"])
                 continue
@@ -418,7 +442,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     "attempt": row["attempt"],
                     "result": row["result"],
                 }
-                for row in store.list_repairs(limit=20)
+                for row in store.list_repairs_with_fallback(limit=20)
             ],
             "candidates": [
                 {
@@ -442,33 +466,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not await valid_alertmanager_key(x_control_plane_key, authorization):
             AUTH_FAILURES.labels(reason="invalid_key", endpoint="/v1/alerts/alertmanager").inc()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        result = await service.ingest(payload)
-        # Dual-write to portable Runtime (additive, best-effort, section 31)
-        if _PORTABLE_AVAILABLE and portable_runtime is not None:
-            try:
-                trigger = AlertmanagerTrigger()
-                for alert in payload.alerts:
-                    raw = alert.model_dump(mode="json", by_alias=True) if hasattr(alert, "model_dump") else {}
-                    try:
-                        import datetime
-                        import uuid
-
-                        from portable_runtime.triggers.base import TriggerEvent
-                        evt = TriggerEvent(
-                            id=f"evt_{uuid.uuid4().hex[:8]}",
-                            source="alertmanager",
-                            kind=str(getattr(alert, "labels", {}).get("alertname", "alert") if hasattr(alert, "labels") else "alert"),  # noqa: E501
-                            payload=raw,
-                            occurred_at=datetime.datetime.now(datetime.UTC),
-                        )
-                        fields = trigger.to_work_fields(evt)
-                        portable_runtime.create_work(**fields)
-                    except Exception:  # noqa: S112
-                        continue
-            except Exception:
-                import logging
-                logging.getLogger(__name__).debug("portable dual_write failed", exc_info=True)
-        return result
+        # Canonical Work/Run materialisation happens inside RepairService
+        # before the legacy SQLite compatibility projection.  There is no
+        # best-effort second write here anymore.
+        return await service.ingest(payload)
 
     @app.post("/v1/approvals/{ref_id}/decision")
     async def approval_decision(
@@ -507,7 +508,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not candidate["verifier_ids"]:
             return ApprovalDecisionResponse(accepted=False, message="Candidate has no verifier")
         source_repair_id = str(candidate["source_repair_id"] or "")
-        source_repair = store.get_repair(source_repair_id) if source_repair_id else None
+        source_repair = store.get_repair_with_fallback(source_repair_id) if source_repair_id else None
         if source_repair is None or source_repair["status"] != "closed":
             return ApprovalDecisionResponse(
                 accepted=False,
@@ -588,7 +589,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     "updated_at": row["updated_at"],
                     "result": row["result"],
                 }
-                for row in store.list_repairs(limit=20)
+                for row in store.list_repairs_with_fallback(limit=20)
             ],
             "server_time": now,
         }

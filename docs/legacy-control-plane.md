@@ -1,21 +1,38 @@
 > [!WARNING]
-> Legacy control_plane package is deprecated. Portable Runtime (`portable_runtime`) is now the primary runtime. This package will be archived after §64 replacement test passes. New code must use `portable_runtime`.
+> Legacy `control_plane` is no longer a production entrypoint. Portable
+> Runtime (`portable_runtime`) owns the personal-platform entrypoint; this
+> package remains only as the private profile implementation until its
+> internals are physically absorbed.
 
-> **Migration path**: writes stay on legacy repair rows → `dual_write_repair` mirrors to `Work/Run/Event` → readers switch to `portable_runtime` via `compat/import_legacy_repair` + `dual_write`; delete legacy only after §64 passes.
+> **Migration path**: Alertmanager/task input first materialises canonical
+> `Work/Run` in Portable Runtime; the legacy repair row is then maintained as
+> a compatibility projection.  The legacy package remains only for the HTTP,
+> Feishu and Windows deployment surface behind the Portable Runtime profile
+> entrypoint.
 
 # Legacy control plane
 
 The `control_plane` package is retained as the **personal-platform** profile (`D:\agent\control-plane`).
 
-- It still serves the Windows Task Scheduler / PowerShell / VBS wrappers under `scripts/` until `deployments/windows-personal-platform` is cut over.
+- The Windows Task Scheduler / PowerShell / VBS wrappers under `scripts/` now
+  launch `portable_runtime.deployment.personal_platform`.
 - It exposes the same HTTP surface (`/healthz`, `/live`, `/ready`, `/v1/...` legacy) and Feishu `/cp` commands via `compat/legacy_control_plane.py`.
 - New code must not import `control_plane` from `core/`; the only allowed bridge is `compat` (data-only, `import_legacy_repair`).
 
-Migration is additive:
+The authority path is now:
 
 ```
-legacy repair row (writes) -> dual_write_repair -> Work/Run/Event (reads switch before writes stop)
+Alertmanager / task
+  -> Portable Work/Run
+  -> personal-owner policy + AuthorizationGrant
+  -> RealityBoundary
+  -> CodexProvider(code.edit)
+  -> legacy repair projection + independent verifier
 ```
 
-Do not delete the legacy profile before the replacement test (§64) passes.
+`dual_write_repair` remains the idempotent importer for restart recovery and
+historical rows.  The old `python -m control_plane` entrypoint is intentionally
+removed.  Keep the profile implementation until the Windows `/live` `/ready`
+replacement test (§64B) and one full recovery cycle are recorded; removing the
+implementation itself is a separate source extraction.
 

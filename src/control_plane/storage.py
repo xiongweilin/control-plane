@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -289,6 +290,80 @@ class Store:
                 f"UPDATE repairs SET {', '.join(columns)} WHERE id=?",  # noqa: S608
                 values,
             )
+        # Keep the legacy row as a compatibility projection of canonical
+        # Work/Run state.  This is deliberately best-effort for old databases
+        # that have no attached portable store; the canonical app path always
+        # attaches one during bootstrap.
+        self._sync_portable_repair_status(repair_id, status, fields)
+
+    def _sync_portable_repair_status(
+        self, repair_id: str, status: str, fields: dict[str, Any]
+    ) -> None:
+        portable = self._portable_store
+        if portable is None:
+            return
+        try:
+            work = portable.get_work(f"work_legacy_{repair_id}")
+            run = portable.get_run(f"run_legacy_{repair_id}")
+            if work is None and run is None:
+                return
+            work_status = {
+                "queued": "open",
+                "diagnosing": "running",
+                "proposing": "running",
+                "staged": "waiting",
+                "applying": "running",
+                "verified": "waiting",
+                "recovering": "waiting",
+                "needs_approval": "waiting",
+                "closed": "completed",
+                "rolled_back": "completed",
+                "failed": "failed",
+                "escalated": "blocked",
+                "interrupted": "waiting",
+                "timed_out": "failed",
+            }.get(status, "running")
+            run_status = {
+                "queued": "queued",
+                "diagnosing": "running",
+                "proposing": "running",
+                "staged": "waiting",
+                "applying": "running",
+                "verified": "waiting",
+                "recovering": "waiting",
+                "needs_approval": "waiting",
+                "closed": "succeeded",
+                "rolled_back": "succeeded",
+                "failed": "failed",
+                "escalated": "failed",
+                "interrupted": "interrupted",
+                "timed_out": "failed",
+            }.get(status, "running")
+            now = datetime.now(UTC)
+            if work is not None:
+                metadata = dict(work.metadata)
+                metadata.update({"legacy_status": status, **fields})
+                portable.save_work(
+                    work.model_copy(
+                        update={
+                            "status": work_status,
+                            "metadata": metadata,
+                            "updated_at": now,
+                        }
+                    )
+                )
+            if run is not None:
+                metadata = dict(run.metadata)
+                metadata.update({"legacy_status": status, **fields})
+                update: dict[str, Any] = {"status": run_status, "metadata": metadata}
+                if status in {"closed", "rolled_back", "failed", "escalated", "timed_out"}:
+                    update["ended_at"] = now
+                portable.save_run(run.model_copy(update=update))
+        except Exception:
+            # A projection failure must remain visible in the legacy path's
+            # logs/metrics without making the already-committed transition
+            # disappear.
+            return
 
     def increment_agent_calls(self, repair_id: str, amount: int = 1) -> None:
         with self._lock:
@@ -766,12 +841,33 @@ class Store:
         if work is None:
             return None
         meta = getattr(work, "metadata", {}) or {}
+        legacy_status = str(meta.get("legacy_status", "") or "")
+        if not legacy_status:
+            legacy_status = {
+                "open": "queued",
+                "ready": "queued",
+                "running": "applying",
+                "waiting": "needs_approval",
+                "blocked": "escalated",
+                "completed": "closed",
+                "failed": "failed",
+                "cancelled": "rolled_back",
+            }.get(str(getattr(work, "status", "open")), "queued")
+        created_at = getattr(work, "created_at", None)
+        updated_at = getattr(work, "updated_at", None) or created_at
         return {
             "id": repair_id,
             "fingerprint": str(meta.get("legacy_fingerprint", "")),
             "payload_json": str(getattr(work, "description", "") or ""),
-            "status": str(getattr(work, "status", "open")),
-            "attempt": 1,
+            "status": legacy_status,
+            "attempt": int(meta.get("attempt", 1) or 1),
+            "agent_call_count": int(meta.get("agent_call_count", 0) or 0),
+            "created_at": int(created_at.timestamp()) if created_at is not None else 0,
+            "updated_at": int(updated_at.timestamp()) if updated_at is not None else 0,
+            "finished_at": meta.get("finished_at"),
+            "result": meta.get("result"),
+            "error": meta.get("error"),
+            "error_class": str(meta.get("error_class", "")),
             "portable_work_id": str(getattr(work, "id", "")),
             "source": "portable",
         }
@@ -783,15 +879,10 @@ class Store:
             rid = str(getattr(w, "metadata", {}).get("legacy_repair_id", "") or getattr(w, "id", ""))
             if not rid.startswith("work_legacy_"):
                 rid = str(getattr(w, "id", ""))
-            out.append(
-                {
-                    "id": rid.replace("work_legacy_", ""),
-                    "portable_work_id": str(getattr(w, "id", "")),
-                    "status": str(getattr(w, "status", "")),
-                    "fingerprint": str(getattr(w, "metadata", {}).get("legacy_fingerprint", "")),
-                    "source": "portable",
-                }
-            )
+            repair_id = rid.replace("work_legacy_", "")
+            row = self.get_repair_via_portable(repair_id)
+            if row is not None:
+                out.append(row)
         return out
 
     def list_repairs_with_fallback(self, limit: int = 50) -> list[Any]:

@@ -91,3 +91,42 @@
 - Codex execution is physically capability-scoped: read/reason/diff capabilities use `read-only`; candidate edit/test capabilities use `workspace-write`; unknown capabilities fail closed. The legacy repair bridge now requests `code.edit` and passes the same ceiling to `CodexRunner` when supported.
 - Candidate promotion now requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource before changing the legacy playbook status.
 - This closes the capability contract leak but does not claim the separate §64B operational cutover; Windows launcher/service replacement remains a follow-up gate.
+
+## 2026-08-21: personal runtime authority cutover
+
+- Alert/task admission now materialises stable canonical `work_legacy_<id>` /
+  `run_legacy_<id>` records before inserting the legacy repair row.  The legacy
+  SQLite tables are compatibility projections; the portable store owns the
+  Work/Run status projection when attached.
+- Production `RepairService` receives the personal Runtime and invokes
+  `Runtime.capabilities` directly.  The real `code.edit` path therefore uses
+  the full `RealityBoundary` (qualification, personal policy, typed
+  AuthorizationGrant, procedure, reliability, precommit, provider call and
+  postcondition projection); `_LegacyRoutingBoundary` remains only for
+  callers that explicitly construct the compatibility service without a
+  Runtime.
+- Each local edit is bound to `actor_ref=personal-agent`,
+  `resource_ref=repo:<absolute-path>`, and `subject_version_refs=[git:<HEAD>]`.
+  The owner grant is version- and resource-scoped and cannot be reused for a
+  different checkout.
+- Digest/analysis prompts use `reason.generate` and the read-only Codex
+  sandbox; edit prompts use `code.edit` and `workspace-write`.  Unknown
+  `code.*` capabilities now fail closed as missing effect contracts.
+- Verification: `tests/test_personal_runtime_authority.py` proves the
+  canonical path reaches `RealityBoundary`, persists Work/Run and a scoped
+  grant, and rejects unknown `code.delete` as a read.
+- The coverage decline gate now measures both `control_plane` and
+  `portable_runtime`, so migration code cannot be hidden behind a legacy-only
+  coverage target.
+- The repository-side launcher switch is prepared; the machine-level
+  `/live` → `/ready` → Alertmanager → repair → approval → restart/recovery
+  drill is recorded after the pushed entrypoint is started.
+
+## 2026-08-21: personal-platform entrypoint cutover
+
+- Windows launchers now execute
+  `portable_runtime.deployment.personal_platform`; the old
+  `python -m control_plane` executable path was removed.
+- The personal HTTP/Feishu/Prometheus implementation remains under
+  `control_plane` as an internal profile module, while its public executable
+  ownership belongs to Portable Runtime deployment.

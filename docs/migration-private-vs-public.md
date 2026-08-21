@@ -12,7 +12,12 @@ Private repo `ratiolin/control-plane` and public library `ratiolin/portable-runt
 | Integrations | `scripts/`, `deployments/windows-personal-platform` (Windows Scheduler, VBS) | `examples/echo-provider` only |
 | Code | `src/portable_runtime` (same core) | `src/portable_runtime` (same core) |
 
-No code fork: both repos build `src/portable_runtime` as single-form package. Private repo does not include `src/control_plane`; legacy package was removed and history remains in Git.
+The public repository owns the provider-neutral `src/portable_runtime` core.
+The private repository vendors that core and adds `src/control_plane` as the
+personal-platform compatibility/deployment profile (Windows, Feishu,
+Prometheus and local policy). The private profile must not change the public
+`D:\agent\portable-runtime` tree; core changes are synced from public and
+private-only adapters stay outside the public package.
 
 ## How to keep in sync
 
