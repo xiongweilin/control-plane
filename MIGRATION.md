@@ -49,7 +49,7 @@ constructed compatibility callers.
 
 `src/portable_runtime` is synchronized from the public repository and the
 public source tree is read-only from this project. The provider-neutral
-semantic hardening delta was upstreamed to public commit `2bf0932` and the
+semantic hardening delta was upstreamed to public commit `dd887e4` and the
 private vendored tree was repinned to that commit. The remaining private
 provider difference is deployment-specific Windows boundary injection and is
 not a second semantic authority.
@@ -70,10 +70,15 @@ architecture decision.
 
 The provider-neutral procedure floors, explicit capability contracts,
 qualification Decision lookup, typed store access, and Codex sandbox mapping
-are now present in public `ratiolin/portable-runtime` at `2bf0932`. The private
+are now present in public `ratiolin/portable-runtime` at `dd887e4`. The private
 profile intentionally retains only the detached worktree and Windows
 credential/Docker environment boundary, which depends on this profile's
 filesystem and deployment policy and must not be moved into the public base.
+That boundary is now injected through the public provider's
+`ExecutionBoundary` protocol; `src/portable_runtime/providers/codex/provider.py`
+is byte-identical to the public provider, while
+`control_plane.codex_boundary.CodexExecutionBoundaryAdapter` supplies the
+private Windows implementation.
 
 ## Migration invariants
 
