@@ -59,7 +59,10 @@ def test_memory_store_crud():
     store.save_knowledge(ki)
     assert store.get_knowledge("k1") is not None
     assert len(store.list_knowledge("candidate")) == 1
-    assert promote(ki).status == "official"
+    with pytest.raises(ValueError, match="canonical KnowledgeProjection"):
+        promote(ki)
+    with pytest.raises(ValueError, match="legacy knowledge .* official promotion"):
+        store.save_knowledge(ki.model_copy(update={"status": "official"}))
     assert deprecate(ki).status == "deprecated"
     assert archive(ki).status == "archived"
     state = store.export_state()
