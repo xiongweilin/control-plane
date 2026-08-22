@@ -90,7 +90,7 @@ class ControlPlaneConfig:
     owner_principal: str = "human:owner"
     run_id: str = ""
 
-    gateway_base_url: str = "http://127.0.0.1:4001/v1"
+    gateway_base_url: str = "http://127.0.0.1:4101/v1"
     model: str = "opencode-go/deepseek-v4-flash"
     codex_cli: Path = field(default_factory=lambda: resolve_codex_cli())
     model_preflight_enabled: bool = True
