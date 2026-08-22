@@ -216,7 +216,7 @@ async def test_isolated_worktree_runs_agent_and_keeps_candidate(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_candidate_cleanup_dry_run_and_apply(tmp_path) -> None:
+async def test_candidate_cleanup_is_advisory_even_when_apply_requested(tmp_path) -> None:
     repo, executor, config = await _git_init(tmp_path)
     store = Store(config.state_db)
     service = _service(config, store, executor)
@@ -249,10 +249,11 @@ async def test_candidate_cleanup_dry_run_and_apply(tmp_path) -> None:
     assert "expired" in by_branch["fix/control-plane-repair-e1"]["reasons"]
 
     cleaned = await service.cleanup_candidate_branches([repo], apply=True)
-    assert all(entry["deleted"] for entry in cleaned)
+    assert cleaned
+    assert all(not entry["deleted"] for entry in cleaned)
+    assert all("owner-authorized" in entry["error"] for entry in cleaned)
     for branch in ("fix/control-plane-repair-m1", "fix/control-plane-repair-r1", "fix/control-plane-repair-e1"):
-        with pytest.raises(ToolError):
-            await executor.run(["git", "-C", repo, "rev-parse", "--verify", branch], timeout=30)
+        await executor.run(["git", "-C", repo, "rev-parse", "--verify", branch], timeout=30)
     await service.close()
     store.close()
 
@@ -264,7 +265,7 @@ async def test_candidate_cleanup_physical_boundary_rejects_checked_out_branch(tm
     service = _service(config, store, executor)
     branch = "fix/control-plane-repair-live"
     await executor.run(["git", "-C", repo, "checkout", "-q", "-b", branch], timeout=60)
-    with pytest.raises(ToolError, match="checked-out candidate"):
+    with pytest.raises(ToolError, match="deletion is disabled"):
         await service.physical_boundary.delete_candidate_branch(repo, branch, ["expired"])
     await service.close()
     store.close()

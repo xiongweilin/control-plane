@@ -302,14 +302,18 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         resume_tasks = [asyncio.create_task(service.resume_pending_approval(r)) for r in resumed]
         if cfg.candidate_cleanup_policy == "auto":
             try:
-                cleaned = await service.cleanup_candidate_branches(apply=True)
-                if cleaned:
+                # ``auto`` is retained as a compatibility setting but is now
+                # advisory-only.  Startup may enumerate retention candidates;
+                # it must never erase a branch without owner authorization and
+                # durable recovery evidence.
+                candidates = await service.cleanup_candidate_branches(apply=False)
+                if candidates:
                     logger.info(
-                        "auto candidate-branch cleanup removed %s stale branches",
-                        sum(1 for entry in cleaned if entry.get("deleted")),
+                        "candidate-branch cleanup is advisory-only; %s stale branches require owner review",
+                        len(candidates),
                     )
             except Exception:
-                logger.exception("auto candidate-branch cleanup failed")
+                logger.exception("candidate-branch advisory scan failed")
         try:
             yield
         finally:
@@ -624,7 +628,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 validate_grant,
             )
             from portable_runtime.records.knowledge import KnowledgeProjection, promote_to_official
-            from portable_runtime.records.models import Assertion, ChangeObjectRecord
+            from portable_runtime.records.models import Assertion, ChangeObjectRecord, Derivation
+            from portable_runtime.records.relations import RecordRelation
 
             source_work = portable_runtime.store.get_work(f"work_legacy_{source_repair_id}")
             source_metadata = getattr(source_work, "metadata", {}) if source_work is not None else {}
@@ -830,6 +835,84 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         message="Portable approval assertion cannot be persisted",
                     )
                 save_record(approval_assertion)
+            # The approval assertion is governance evidence, not an epistemic
+            # judgment.  Public Runtime validation requires a separate
+            # supported judgment bound to the current verification assertion,
+            # plus a Derivation that names the judgment, evidence and scope.
+            judgment_id = f"record_candidate_{candidate_id}_judgment"
+            judgment = record_getter(judgment_id) if callable(record_getter) else None
+            if judgment is None:
+                judgment = Assertion(
+                    id=judgment_id,
+                    kind="claim",
+                    statement=f"Deterministic verification supports candidate {candidate_id}",
+                    lifecycle_status="current",
+                    epistemic_status="supported",
+                    source_refs=[verification.id],
+                    metadata={
+                        "qualification_kind": "epistemic-judgment",
+                        "epistemic_role": "judgment",
+                        "judgment_for_refs": [verification.id],
+                        "candidate_id": candidate_id,
+                    },
+                )
+                save_record = getattr(portable_runtime.store, "save_record", None)
+                if not callable(save_record):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Portable epistemic judgment cannot be persisted",
+                    )
+                save_record(judgment)
+            derivation_id = f"record_candidate_{candidate_id}_derivation"
+            derivation = record_getter(derivation_id) if callable(record_getter) else None
+            if derivation is None:
+                derivation = Derivation(
+                    id=derivation_id,
+                    premise_refs=[judgment.id],
+                    evidence_refs=[evidence.id],
+                    rule_or_method_refs=["control-plane.deterministic-verifier"],
+                    conclusion_ref=verification.id,
+                    lifecycle_status="current",
+                    metadata={
+                        "qualification_kind": "candidate-promotion-derivation",
+                        "scope_version_refs": [version_record.id],
+                        "candidate_id": candidate_id,
+                    },
+                )
+                save_record = getattr(portable_runtime.store, "save_record", None)
+                if not callable(save_record):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Portable verification derivation cannot be persisted",
+                    )
+                save_record(derivation)
+            derivation_relation_id = f"relation_candidate_{candidate_id}_derivation"
+            derivation_relation = (
+                relation_getter(derivation_relation_id)
+                if callable(relation_getter)
+                else None
+            )
+            if derivation_relation is None:
+                derivation_relation = RecordRelation(
+                    id=derivation_relation_id,
+                    relation_type="derived-from",
+                    subject_ref=verification.id,
+                    object_ref=derivation.id,
+                    scope={
+                        "work_id": source_work.id,
+                        "run_id": source_run.id,
+                        "scope_version_ref": version_record.id,
+                    },
+                    created_by="control-plane.deterministic-verifier",
+                    metadata={"qualification_kind": "candidate-promotion-derivation"},
+                )
+                save_relation = getattr(portable_runtime.store, "save_relation", None)
+                if not callable(save_relation):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Portable verification derivation relation cannot be persisted",
+                    )
+                save_relation(derivation_relation)
             projection_getter = getattr(portable_runtime.store, "get_knowledge_projection", None)
             projection = projection_getter(projection_id) if callable(projection_getter) else None
             if projection is None:
@@ -846,7 +929,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     },
                     environment_bindings={"candidate_version": version_ref},
                     reopen_conditions=[str(candidate["reopen_conditions"] or "")],
-                    epistemic_judgment_refs=[approval_assertion.id],
+                    epistemic_judgment_refs=[judgment.id],
                     authorization_refs=[grant.id],
                     scope_version_refs=[version_record.id],
                     lifecycle_status="candidate",

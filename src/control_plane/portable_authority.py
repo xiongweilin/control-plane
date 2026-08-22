@@ -1035,17 +1035,71 @@ class PortableRuntimeAuthority:
         self,
         repair_id: str,
         *,
-        passed: bool,
-        summary: str,
+        report: Any | None = None,
+        # ``passed`` remains accepted only as a compatibility cross-check; it
+        # is never allowed to mint a proof on its own.  Callers must provide a
+        # typed VerificationReport whose checks and evidence establish the
+        # proposition being recorded.
+        passed: bool | None = None,
+        summary: str = "",
         evidence_refs: list[str] | None = None,
         verifier_ref: str = "control-plane.deterministic-verifier",
     ) -> list[str]:
-        """Persist deterministic verifier output before canonical closure."""
+        """Persist a typed deterministic verifier report before closure.
 
+        A boolean such as ``passed=True`` is an execution/control-flow fact,
+        not a verification judgment.  Requiring the concrete
+        :class:`VerificationReport` here prevents the private adapter from
+        minting a terminal proof when a caller only has a provider status or a
+        hand-written flag.  The report's checks are copied into the durable
+        EvidenceArtifact and the derived result is cross-checked against any
+        legacy ``passed`` argument.
+        """
+
+        from .verifier import VerificationReport
+
+        if not isinstance(report, VerificationReport):
+            raise ValueError("record_verification requires a typed VerificationReport")
+        if report.repair_id != repair_id:
+            raise ValueError("verification report repair_id does not match target repair")
+        derived_passed = report.all_passed
+        if passed is not None and bool(passed) != derived_passed:
+            raise ValueError("passed flag does not match typed VerificationReport")
+        passed = derived_passed
+        summary = summary or report.summary
+        if not report.checks:
+            raise ValueError("verification report must contain at least one deterministic check")
         work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
         run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
         if work is None or run is None:
             return []
+        from portable_runtime.workflows.completion import CompletionAuthority
+
+        required_fn = getattr(CompletionAuthority, "required_obligation_refs", None)
+        required_obligations = set(required_fn(work)) if callable(required_fn) else set()
+        obligation_refs = [
+            str(ref).strip()
+            for ref in report.obligation_refs
+            if isinstance(ref, str) and ref.strip()
+        ]
+        if passed and not required_obligations.issubset(obligation_refs):
+            missing = sorted(required_obligations.difference(obligation_refs))
+            raise ValueError(
+                "typed verification report does not cover required obligations: "
+                + ", ".join(missing)
+            )
+        if passed and not any(check.evidence_ref for check in report.checks) and not evidence_refs:
+            raise ValueError("typed verification report requires durable evidence references")
+        report_checks = [
+            {
+                "name": check.name,
+                "passed": bool(check.passed),
+                "message": check.message[:2_000],
+                "evidence_ref": check.evidence_ref,
+            }
+            for check in report.checks
+        ]
+
         token = self._stable_token(f"verification:{repair_id}:{summary}")
         version_refs = list(work.metadata.get("subject_version_refs", []))
         verification_scope = work.metadata.get("verification_scope")
@@ -1064,6 +1118,9 @@ class PortableRuntimeAuthority:
             "acceptance_criteria": acceptance_criteria,
             "criteria_digest": criteria_digest,
             "verifier_ref": verifier_ref,
+            "proof_basis": "typed-verification-report",
+            "checks": report_checks,
+            "obligation_refs": obligation_refs,
         }
         verification = self._record(
             BaseRecord(
@@ -1080,6 +1137,9 @@ class PortableRuntimeAuthority:
                     "summary": summary[:4_000],
                     "verification_result": verification_result,
                     "proof_kind": "closed-verification",
+                    "proof_basis": "typed-verification-report",
+                    "checks": report_checks,
+                    "obligation_refs": obligation_refs,
                 },
             )
         )
@@ -1103,6 +1163,9 @@ class PortableRuntimeAuthority:
                     "verification_scope": verification_scope,
                     "work_version": work_version,
                     "acceptance_criteria": acceptance_criteria,
+                    "proof_basis": "typed-verification-report",
+                    "checks": report_checks,
+                    "obligation_refs": obligation_refs,
                 },
             )
         )

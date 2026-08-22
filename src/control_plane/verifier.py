@@ -22,6 +22,9 @@ class CheckResult:
 class VerificationReport:
     repair_id: str
     checks: list[CheckResult] = field(default_factory=list)
+    # Explicit obligation identifiers covered by this report.  A terminal
+    # proof may not infer coverage from a provider's boolean result.
+    obligation_refs: list[str] = field(default_factory=list)
     @property
     def all_passed(self) -> bool:
         return bool(self.checks) and all(check.passed for check in self.checks)
