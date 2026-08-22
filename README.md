@@ -13,12 +13,12 @@ is vendored from `ratiolin/portable-runtime`.
 | Control Plane schema | `official-1.0.0` |
 | Portable Runtime milestone | `R2.0` |
 | Runtime protocol | `2.0` |
-| Portable Runtime pin | `73411d7` |
+| Portable Runtime pin | `8d67339` |
 | Personal profile | `P1.x` |
 
 `src/portable_runtime` follows the public pin as its base. The provider-neutral
 capability, procedure-profile, qualification, store, and Codex sandbox
-semantics are synchronized to public pin `73411d7`; the remaining private
+semantics are synchronized to public pin `8d67339`; the remaining private
 provider difference is the Windows execution boundary adapter.
 
 [![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
@@ -267,8 +267,8 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 
 ### Candidate branch cleanup
 
-- Read-only dry-run: `uv run python -m control_plane cleanup-candidates` (dry-run by default; `--apply` actually deletes), or `POST /v1/candidates/cleanup` (`{"apply": false}` default; `apply: true` deletes explicitly).
-- Enumerates merged / rejected (repair is rejected/rolled_back) / expired (older than `[candidates].retention_days`, internal field `candidate_retention_days`) branches; with `[candidates].cleanup_policy = "auto"` (internal field `candidate_cleanup_policy`) startup auto-cleans, `manual` (default) does not auto-delete.
+- Candidate cleanup is advisory-only: `uv run python -m control_plane cleanup-candidates` (and `POST /v1/candidates/cleanup`) enumerates merged / rejected (repair is rejected/rolled_back) / expired (older than `[candidates].retention_days`, internal field `candidate_retention_days`) branches.  `--apply` and `{"apply": true}` are retained for compatibility but fail closed and never delete; a separate owner-authorized recovery workflow with durable evidence is required.
+- `[candidates].cleanup_policy = "auto"` (internal field `candidate_cleanup_policy`) only performs the same startup advisory scan.  It no longer authorizes autonomous deletion; `manual` remains the default.
 
 ### Mutual exclusion, classification, and budget
 

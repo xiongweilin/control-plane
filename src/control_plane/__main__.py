@@ -45,10 +45,17 @@ def _run_cli_cleanup(config: ControlPlaneConfig, apply: bool) -> int:
         print(
             f"{entry['repo']}: {entry['branch']} "
             f"age={entry['age_days']}d reasons={','.join(str(r) for r in entry['reasons'])} "
-            f"deleted={entry.get('deleted', False)}"
+            f"deleted={entry.get('deleted', False)} "
+            f"error={entry.get('error', '')}"
         )
     print(f"total={len(branches)} apply={apply}")
     store.close()
+    # ``--apply`` is intentionally a fail-closed compatibility request: stale
+    # branches are reported but never deleted without a separate owner-
+    # authorized recovery workflow.  Surface that refusal to automation with
+    # a non-zero exit rather than pretending the request was applied.
+    if apply and any(not bool(entry.get("deleted")) for entry in branches):
+        return 2
     return 0
 
 
@@ -77,7 +84,7 @@ def main() -> None:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="cleanup-candidates: actually delete stale branches (default is dry-run)",
+        help="cleanup-candidates: request deletion (currently fail-closed; advisory only)",
     )
     args = parser.parse_args()
 

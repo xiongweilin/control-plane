@@ -65,7 +65,7 @@ from .tools import (
     resolve_repo,
     validate_url,
 )
-from .verifier import Verifier
+from .verifier import CheckResult, VerificationReport, Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -1547,7 +1547,7 @@ class RepairService:
         if self.portable_authority is not None:
             verification_refs = self.portable_authority.record_verification(
                 repair_id,
-                passed=True,
+                report=report,
                 summary=report.summary,
                 evidence_refs=[check.evidence_ref for check in report.checks if check.evidence_ref],
             )
@@ -1617,9 +1617,13 @@ class RepairService:
         reconciliation_required = self._is_reconciliation_required(error_text)
         if self.portable_authority is not None:
             if verification_failure:
+                failure_report = VerificationReport(
+                    repair_id=repair_id,
+                    checks=[CheckResult("verification_failure", False, error_text)],
+                )
                 verification_refs = self.portable_authority.record_verification(
                     repair_id,
-                    passed=False,
+                    report=failure_report,
                     summary=error_text,
                 )
                 self.portable_authority.finalize_repair(
@@ -2791,19 +2795,23 @@ class RepairService:
         *,
         apply: bool = False,
     ) -> list[dict[str, Any]]:
-        """List stale candidate branches; delete only when ``apply=True`` is explicit."""
+        """List stale candidate branches; destructive cleanup is fail-closed.
+
+        ``apply`` remains in the compatibility API so old callers do not
+        silently change meaning, but no branch is deleted.  A stale/rejected
+        branch is only a retention suggestion; deletion requires a separate
+        owner-authorized recovery workflow and durable evidence, neither of
+        which this advisory endpoint can mint.
+        """
         branches = await self.list_candidate_branches_for_cleanup(repos)
         if not apply:
             return branches
         for entry in branches:
-            try:
-                await self.physical_boundary.delete_candidate_branch(
-                    entry["repo"], entry["branch"], list(entry.get("reasons", []))
-                )
-                entry["deleted"] = True
-            except ToolError as exc:
-                entry["deleted"] = False
-                entry["error"] = str(exc)[:500]
+            entry["deleted"] = False
+            entry["error"] = (
+                "candidate branch deletion is disabled; owner-authorized "
+                "recovery evidence is required"
+            )
         return branches
 
     def _dependency_scope_detected(self, diff_stat: str, summary: str) -> bool:
