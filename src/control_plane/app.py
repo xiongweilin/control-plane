@@ -616,9 +616,14 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         # portable knowledge projection becomes official first; the legacy
         # playbook row is updated only after that canonical transition succeeds.
         if _PORTABLE_AVAILABLE and portable_runtime is not None:
-            from portable_runtime.records.authorization import record_human_approval
+            from portable_runtime.records.authorization import (
+                CanonicalAuthorizationRequest,
+                is_authorized_for,
+                record_human_approval,
+                validate_grant,
+            )
             from portable_runtime.records.knowledge import KnowledgeProjection, promote_to_official
-            from portable_runtime.records.models import EvidenceArtifact
+            from portable_runtime.records.models import Assertion, ChangeObjectRecord
 
             source_work = portable_runtime.store.get_work(f"work_legacy_{source_repair_id}")
             source_metadata = getattr(source_work, "metadata", {}) if source_work is not None else {}
@@ -700,10 +705,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 )
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
             # Official projections require every scope/version proof to
-            # resolve in the canonical graph.  Keep the external candidate
-            # version as metadata on a local evidence record so promotion
-            # remains traceable without treating a bare string as proof.
-            version_record_id = f"record_candidate_{candidate_id}_version"
+            # resolve to a typed canonical object.  A candidate version is a
+            # ChangeObject (not an EvidenceArtifact), and the human approval
+            # is represented by an Assertion (not a core Decision) so the
+            # projection fields retain their semantic contracts.
+            version_record_id = f"record_candidate_{candidate_id}_scope"
             version_record_getter = getattr(portable_runtime.store, "get_record", None)
             version_record = (
                 version_record_getter(version_record_id)
@@ -711,10 +717,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 else None
             )
             if version_record is None:
-                version_record = EvidenceArtifact(
+                version_record = ChangeObjectRecord(
                     id=version_record_id,
-                    uri=version_ref,
                     source_refs=[source_work.id],
+                    object_type="knowledge-candidate",
+                    current_version_ref=version_ref,
                     metadata={
                         "qualification_kind": "candidate-version",
                         "subject_version_refs": [version_ref],
@@ -747,6 +754,46 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     accepted=False,
                     message="Portable authorization record was not persisted",
                 )
+            promotion_request = CanonicalAuthorizationRequest(
+                capability="knowledge.promote",
+                actor_ref=f"control-plane:candidate:{candidate_id}",
+                resource_ref=f"candidate:{candidate_id}",
+                subject_version_refs=[version_ref],
+                effect_class="write-local",
+            )
+            if validate_grant(grant) or not is_authorized_for(promotion_request, grant):
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Portable promotion grant does not authorize this candidate action",
+                )
+            approval_assertion_id = f"record_candidate_{candidate_id}_approval"
+            approval_assertion = (
+                record_getter(approval_assertion_id)
+                if callable(record_getter)
+                else None
+            )
+            if approval_assertion is None:
+                approval_assertion = Assertion(
+                    id=approval_assertion_id,
+                    kind="claim",
+                    statement=f"Human owner approved promotion of candidate {candidate_id}",
+                    lifecycle_status="current",
+                    epistemic_status="supported",
+                    source_refs=[decision.id],
+                    metadata={
+                        "qualification_kind": "human-approval",
+                        "decision_ref": decision.id,
+                        "authorization_ref": grant.id,
+                        "candidate_id": candidate_id,
+                    },
+                )
+                save_record = getattr(portable_runtime.store, "save_record", None)
+                if not callable(save_record):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Portable approval assertion cannot be persisted",
+                    )
+                save_record(approval_assertion)
             projection_id = f"knowledge_candidate_{candidate_id}"
             projection_getter = getattr(portable_runtime.store, "get_knowledge_projection", None)
             projection = projection_getter(projection_id) if callable(projection_getter) else None
@@ -757,14 +804,14 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     title=str(candidate["pattern"]),
                     source_work_refs=[f"work_legacy_{source_repair_id}"],
                     current_assertion_refs=[verification.id],
-                    evidence_summary_refs=[evidence.id, relation.id],
+                    evidence_summary_refs=[evidence.id],
                     validity_scope={
                         "pattern": str(candidate["pattern"]),
                         "scope": str(candidate["scope"]),
                     },
                     environment_bindings={"candidate_version": version_ref},
                     reopen_conditions=[str(candidate["reopen_conditions"] or "")],
-                    epistemic_judgment_refs=[decision.id],
+                    epistemic_judgment_refs=[approval_assertion.id],
                     authorization_refs=[grant.id],
                     scope_version_refs=[version_record.id],
                     lifecycle_status="candidate",
