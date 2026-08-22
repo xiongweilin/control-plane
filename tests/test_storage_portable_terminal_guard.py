@@ -57,11 +57,14 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
                         "result": "pass",
                         "work_id": work.id,
                         "run_id": run.id,
-                    }
+                    },
+                    "verification_scope": {},
+                    "work_version": 1,
+                    "acceptance_criteria": [],
                 },
             )
         )
-        with portable.terminal_completion(["proof-r2"]):
+        with portable.terminal_completion(["proof-r2"], work=work, run=run):
             portable.save_work(work)
             portable.save_run(run)
         legacy.attach_portable_store(portable, enable_read=True)
