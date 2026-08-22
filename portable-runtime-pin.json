@@ -1,8 +1,8 @@
 {
   "repository": "ratiolin/portable-runtime",
-  "commit": "23571498d8556e4700593d33a0dec290b41a29b7",
+  "commit": "2dae8b9a069c4c7699e9f714a91315bc1ca257d2",
   "scope": "src/portable_runtime",
   "tree_algorithm": "sha256-path-and-content-v1",
-  "tree_sha256": "aa35f86e6b0ae44dc0593ca8e4e3a96b2695d05a4c6ee4bca0e2c9ed7c6b8ddf",
+  "tree_sha256": "e378db2dea3b42b0514edbcf11f2c90b09a37c46f8742490a66da80e9100e1cd",
   "line_endings": "lf"
 }
