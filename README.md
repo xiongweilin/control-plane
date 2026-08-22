@@ -321,11 +321,11 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 
 ### Model-gateway diagnostic client network boundary
 
-- `gateway_base_url` (default `http://127.0.0.1:4001/v1`) is the probe target for model-source diagnosis (LiteLLM `GET /v1/models`), not a routing config for `codex exec`. Only loopback is supported; non-loopback addresses are rejected at startup (ConfigurationError). Every request carries `X-Request-Id` for tracing, and exception messages include the request id. The old `opencodex_base_url`/`opencodex_api_key` fields are no longer read.
+- `gateway_base_url` (default `http://127.0.0.1:4101/v1`) is the probe target for model-source diagnosis (LiteLLM `GET /v1/models`), not a routing config for `codex exec`. Only loopback is supported; non-loopback addresses are rejected at startup (ConfigurationError). Every request carries `X-Request-Id` for tracing, and exception messages include the request id. The old `opencodex_base_url`/`opencodex_api_key` fields are no longer read.
 
 ### Model-source connectivity and drift
 
-- `check_model_sources()` runs a minimal connectivity regression over three sources: the Codex CLI (`--version`), the local model gateway (LiteLLM 4001, `GET /v1/models`), and the default model (whether `config.model` is in the list); results are published as `control_plane_model_connectivity{source}` (source=cli/gateway/model).
+- `check_model_sources()` runs a minimal connectivity regression over three sources: the Codex CLI (`--version`), the local model gateway (LiteLLM 4101, `GET /v1/models`), and the default model (whether `config.model` is in the list); results are published as `control_plane_model_connectivity{source}` (source=cli/gateway/model).
 - `check_model_drift()` compares the model list with the `models:baseline` baseline read-only; on drift it updates the baseline and notifies (`control_plane_model_drift`).
 - Startup preflight `startup_model_preflight()` (`model_preflight_enabled` default on): a missing default model or unreachable gateway sends a warning notification ("LiteLLM gateway unreachable") without blocking the service.
 

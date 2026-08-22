@@ -54,7 +54,7 @@ class AgentResult:
 
 
 class GatewayClient:
-    """Minimal Responses API client for the local model gateway (LiteLLM 4001)."""
+    """Minimal Responses API client for the local model gateway (LiteLLM 4101)."""
 
     def __init__(
         self,

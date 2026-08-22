@@ -3384,7 +3384,7 @@ class RepairService:
         """Minimal connectivity regression over the three model sources.
 
         Sources: (1) the Codex CLI itself, (2) the local model gateway
-        (LiteLLM 4001), (3) the configured default model present in the
+        (LiteLLM 4101), (3) the configured default model present in the
         gateway model list.
         Read-only; never modifies runtime state. Results are also published to
         the ``control_plane_model_connectivity`` gauge.

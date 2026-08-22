@@ -147,7 +147,7 @@ async def test_list_models_ok_and_unreachable() -> None:
 def test_loopback_network_boundary_validation() -> None:
     from control_plane.config import ConfigurationError, _validate_gateway_network
 
-    _validate_gateway_network("http://127.0.0.1:4001/v1")
-    _validate_gateway_network("http://localhost:4001/v1")
+    _validate_gateway_network("http://127.0.0.1:4101/v1")
+    _validate_gateway_network("http://localhost:4101/v1")
     with pytest.raises(ConfigurationError, match="loopback"):
-        _validate_gateway_network("http://10.0.0.5:4001/v1")
+        _validate_gateway_network("http://10.0.0.5:4101/v1")

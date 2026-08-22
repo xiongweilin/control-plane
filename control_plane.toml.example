@@ -10,9 +10,9 @@ port = 18083
 owner_principal = "human:owner"
 
 [agent]
-# 本机模型网关（LiteLLM 4001）的模型清单诊断端点；OpenCodex 已退役（2026-08-11），
+# 本机模型网关（LiteLLM 4101）的模型清单诊断端点；OpenCodex 已退役（2026-08-11），
 # 旧字段名 opencodex_base_url 不再读取，10100 不再是活动入口。
-gateway_base_url = "http://127.0.0.1:4001/v1"
+gateway_base_url = "http://127.0.0.1:4101/v1"
 model = "gpt-5.6-luna"
 # Codex CLI 入口（scoop shim）；缺省时按 PATH 解析 codex（启动预检拒绝缺失）。
 # codex_cli = "C:\\Users\\metra\\scoop\\shims\\codex.cmd"
