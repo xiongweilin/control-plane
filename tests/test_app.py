@@ -145,11 +145,13 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
         payload_json="{}",
         attempt=1,
     )
+    authority.set_verification_obligations("repair-1", ["verify.container"])
     verification_refs = authority.record_verification(
         "repair-1",
         report=VerificationReport(
             repair_id="repair-1",
             checks=[CheckResult("container_status", True, "container verifier passed", "container_status")],
+            obligation_refs=["verify.container"],
         ),
         summary="container verifier passed",
         evidence_refs=["container_status"],

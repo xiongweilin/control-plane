@@ -1031,6 +1031,30 @@ class PortableRuntimeAuthority:
         payload = json.dumps(criteria, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def set_verification_obligations(self, repair_id: str, obligations: list[str]) -> None:
+        """Persist the exact deterministic obligations configured for a repair.
+
+        Legacy repairs are projected before their alert-specific verifier is
+        assembled.  The verifier therefore records the concrete obligation
+        set before a terminal proof is attempted.  This explicit declaration
+        prevents the portable built-in defaults from being silently widened or
+        narrowed by a later boolean result.
+        """
+
+        refs = list(dict.fromkeys(str(ref).strip() for ref in obligations if str(ref).strip()))
+        if not refs:
+            raise ValueError("verification obligations must contain at least one non-empty reference")
+        work = self.runtime.store.get_work(f"work_legacy_{repair_id}")
+        run = self.runtime.store.get_run(f"run_legacy_{repair_id}")
+        if work is None or run is None:
+            raise RuntimeError(f"verification obligations require canonical Work/Run for {repair_id}")
+        work_metadata = dict(work.metadata)
+        run_metadata = dict(run.metadata)
+        work_metadata["verification_obligations"] = refs
+        run_metadata["verification_obligations"] = refs
+        self.runtime.store.save_work(work.model_copy(update={"metadata": work_metadata, "updated_at": utcnow()}))
+        self.runtime.store.save_run(run.model_copy(update={"metadata": run_metadata}))
+
     def record_verification(
         self,
         repair_id: str,
@@ -1056,7 +1080,7 @@ class PortableRuntimeAuthority:
         legacy ``passed`` argument.
         """
 
-        from .verifier import VerificationReport
+        from .verifier import VerificationReport, obligation_refs_for_checks
 
         if not isinstance(report, VerificationReport):
             raise ValueError("record_verification requires a typed VerificationReport")
@@ -1075,13 +1099,21 @@ class PortableRuntimeAuthority:
             return []
         from portable_runtime.workflows.completion import CompletionAuthority
 
-        required_fn = getattr(CompletionAuthority, "required_obligation_refs", None)
-        required_obligations = set(required_fn(work)) if callable(required_fn) else set()
-        obligation_refs = [
+        declared_refs = [
             str(ref).strip()
             for ref in report.obligation_refs
             if isinstance(ref, str) and ref.strip()
         ]
+        derived_refs = obligation_refs_for_checks(report.checks)
+        if declared_refs and not set(derived_refs).issubset(declared_refs):
+            missing = sorted(set(derived_refs).difference(declared_refs))
+            raise ValueError(
+                "typed verification report omits obligations for checks: "
+                + ", ".join(missing)
+            )
+        obligation_refs = list(dict.fromkeys(declared_refs or derived_refs))
+        required_fn = getattr(CompletionAuthority, "required_obligation_refs", None)
+        required_obligations = set(required_fn(work)) if callable(required_fn) else set()
         if passed and not required_obligations.issubset(obligation_refs):
             missing = sorted(required_obligations.difference(obligation_refs))
             raise ValueError(
@@ -1096,6 +1128,7 @@ class PortableRuntimeAuthority:
                 "passed": bool(check.passed),
                 "message": check.message[:2_000],
                 "evidence_ref": check.evidence_ref,
+                "obligation_ref": obligation_refs_for_checks([check]),
             }
             for check in report.checks
         ]

@@ -32,6 +32,40 @@ class VerificationReport:
     def summary(self) -> str:
         lines = [f"{check.name}: {'PASS' if check.passed else 'FAIL'} - {check.message}" for check in self.checks]
         return "\n".join(lines)
+
+
+def obligation_ref_for_check(name: str) -> str:
+    """Map one deterministic check to its canonical proof obligation.
+
+    The private verifier has deployment-specific check labels, while the
+    portable terminal authority consumes stable obligation identifiers.  Keep
+    this mapping narrow and deterministic so a report cannot claim the whole
+    required set merely because one check passed.
+    """
+
+    normalized = str(name).strip()
+    if normalized == "container_status":
+        return "verify.container"
+    if normalized.startswith("probe:"):
+        return "verify.http"
+    if normalized.startswith("promql:"):
+        return "verify.promql"
+    if normalized.startswith("git:") or normalized == "git_diff_guard":
+        return "verify.git_diff"
+    if normalized.startswith("logs:"):
+        return "verify.logs"
+    if normalized.startswith("tests:"):
+        return "verify.tests"
+    # Unknown check names are still explicit obligations.  This is safer than
+    # silently dropping a custom deterministic verifier from terminal
+    # coverage, and keeps compatibility tests auditable.
+    return normalized or "deterministic-verification"
+
+
+def obligation_refs_for_checks(checks: list[CheckResult]) -> list[str]:
+    """Return unique obligations in check order, without broadening scope."""
+
+    return list(dict.fromkeys(obligation_ref_for_check(check.name) for check in checks))
 FORBIDDEN_DIFF_PATTERNS = re.compile(
     r"(verifier\.py|alert\.rules\.yml|prometheus\.yml|alertmanager\.yml|"
     r"permission|acl|rbac|firewall|control-plane\.toml|AGENTS\.md|control-plane/|"
