@@ -13,12 +13,12 @@ is vendored from `ratiolin/portable-runtime`.
 | Control Plane schema | `official-1.0.0` |
 | Portable Runtime milestone | `R2.0` |
 | Runtime protocol | `2.0` |
-| Portable Runtime pin | `804ac7a` |
+| Portable Runtime pin | `53a7d90` |
 | Personal profile | `P1.x` |
 
 `src/portable_runtime` follows the public pin as its base. The provider-neutral
 capability, procedure-profile, qualification, store, and Codex sandbox
-semantics are synchronized to public pin `804ac7a`; the remaining private
+semantics are synchronized to public pin `53a7d90`; the remaining private
 provider difference is the Windows execution boundary adapter.
 
 [![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)

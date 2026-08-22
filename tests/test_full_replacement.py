@@ -488,7 +488,10 @@ def test_review_workflow_stranger_acceptance() -> None:
         assert not wf.accepts(other)
 
         status = await wf.run(ctx, work, run)
-        assert status == "succeeded"
+        # Strict capability qualification rejects an unregistered capability;
+        # a stranger workflow cannot turn an unqualified provider result into
+        # a successful execution claim.
+        assert status == "failed"
 
     asyncio.run(scenario())
 
