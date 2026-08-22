@@ -49,7 +49,7 @@ constructed compatibility callers.
 
 `src/portable_runtime` is synchronized from the public repository and the
 public source tree is read-only from this project. The provider-neutral
-semantic hardening delta is pinned to public commit `f20cb87` and the private
+semantic hardening delta is pinned to public commit `2dae8b9` and the private
 vendored tree is checked against that exact commit in CI. The machine-readable
 `portable-runtime-pin.json` records the commit and normalized provider-neutral
 tree digest; `scripts/verify_portable_runtime_pin.py` rejects stale, missing,
@@ -73,7 +73,7 @@ architecture decision.
 
 The provider-neutral procedure floors, explicit capability contracts,
 qualification Decision lookup, typed store access, and Codex sandbox mapping
-are now present in public `ratiolin/portable-runtime` at `f20cb87`. The private
+are now present in public `ratiolin/portable-runtime` at `2dae8b9`. The private
 profile intentionally retains only the detached worktree and Windows
 credential/Docker environment boundary, which depends on this profile's
 filesystem and deployment policy and must not be moved into the public base.
