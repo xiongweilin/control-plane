@@ -65,7 +65,7 @@ from .tools import (
     resolve_repo,
     validate_url,
 )
-from .verifier import CheckResult, VerificationReport, Verifier
+from .verifier import CheckResult, VerificationReport, Verifier, obligation_refs_for_checks
 
 logger = logging.getLogger(__name__)
 
@@ -2996,12 +2996,23 @@ class RepairService:
             after = json.loads(row["after_json"]) if row["after_json"] else {}
             if row["tool"] == "codex_agent" and after.get("branch"):
                 tool_results["repos"].append((row["target"], after["branch"]))
-        return await verifier.verify_repair(
+        report = await verifier.verify_repair(
             repair_id=repair_id,
             alert=alert.model_dump(mode="json"),
             actions=actions,
             tool_results=tool_results,
         )
+        # Carry the exact per-check obligation projection into the typed
+        # report.  The portable authority will persist this declaration on
+        # Work/Run before terminal proof validation; it must never infer a
+        # complete built-in obligation set from one provider boolean.
+        report.obligation_refs = obligation_refs_for_checks(report.checks)
+        if self.portable_authority is not None and report.obligation_refs:
+            self.portable_authority.set_verification_obligations(
+                repair_id,
+                report.obligation_refs,
+            )
+        return report
 
     async def _check_containers(self, projects: list[str]) -> tuple[bool, str, str]:
         failures: list[str] = []

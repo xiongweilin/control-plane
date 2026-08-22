@@ -107,11 +107,13 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert context.work_id == "work_legacy_repair-authority-1"
     assert runtime.store.get_work("work_legacy_repair-authority-1").status == "waiting"
     assert runtime.store.get_run("run_legacy_repair-authority-1").status == "waiting"
+    authority.set_verification_obligations("repair-authority-1", ["deterministic"])
     verification_refs = authority.record_verification(
         "repair-authority-1",
         report=VerificationReport(
             repair_id="repair-authority-1",
             checks=[CheckResult("deterministic", True, "verification passed", "artifact:portable-test")],
+            obligation_refs=["deterministic"],
         ),
         summary="verification passed",
         evidence_refs=["artifact:portable-test"],
@@ -165,12 +167,72 @@ async def test_finalize_repair_rejects_bare_verified_flag(tmp_path: Path) -> Non
             report=VerificationReport(
                 repair_id="repair-authority-bare-proof",
                 checks=[CheckResult("provider_status", True, "provider said it passed")],
+                obligation_refs=["provider_status", "verify.http", "verify.git_diff"],
             ),
         )
     work = runtime.store.get_work("work_legacy_repair-authority-bare-proof")
     run = runtime.store.get_run("run_legacy_repair-authority-bare-proof")
     assert work is not None and work.status == "running"
     assert run is not None and run.status == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_partial_verification_persistence_cannot_close_terminal_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling-proof persistence failure must leave the repair recoverable."""
+
+    store = InMemoryStateStore()
+    registry = ProviderRegistry()
+    registry.register(FakeCodexProvider())
+    runtime = Runtime(store=store, registry=registry)
+
+    async def resolve_version(repo: str) -> str:
+        return "abc123"
+
+    authority = PortableRuntimeAuthority(runtime, version_resolver=resolve_version)
+    await authority.prepare_code_edit(
+        repair_id="repair-partial-proof",
+        repo=str(tmp_path),
+        prompt="make the local repair",
+    )
+    authority.set_verification_obligations(
+        "repair-partial-proof",
+        ["verify.http", "verify.git_diff"],
+    )
+
+    original_save_record = runtime.store.save_record
+
+    def fail_evidence_persisted(record):
+        if getattr(record, "record_type", None) == "EvidenceArtifact":
+            raise RuntimeError("simulated sibling proof persistence failure")
+        return original_save_record(record)
+
+    monkeypatch.setattr(runtime.store, "save_record", fail_evidence_persisted)
+    with pytest.raises(RuntimeError, match="sibling proof persistence"):
+        authority.record_verification(
+            "repair-partial-proof",
+            report=VerificationReport(
+                repair_id="repair-partial-proof",
+                checks=[
+                    CheckResult("probe:http", True, "http passed", "http-proof"),
+                    CheckResult("git_diff_guard", True, "diff passed", "git-proof"),
+                ],
+                obligation_refs=["verify.http", "verify.git_diff"],
+            ),
+            evidence_refs=["http-proof", "git-proof"],
+        )
+
+    work = runtime.store.get_work("work_legacy_repair-partial-proof")
+    run = runtime.store.get_run("run_legacy_repair-partial-proof")
+    assert work is not None and work.status != "completed"
+    assert run is not None and run.status != "succeeded"
+    assert not [
+        record
+        for record in runtime.store.list_records("EvidenceArtifact")
+        if getattr(record, "metadata", {}).get("proof_kind") == "closed-verification"
+    ]
 
 
 @pytest.mark.asyncio
