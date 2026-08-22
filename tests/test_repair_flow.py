@@ -970,7 +970,7 @@ async def test_run_digest_drops_candidate(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_repair_flow_with_approval(tmp_path) -> None:
+async def test_repair_flow_with_approval_fails_closed_without_portable_runtime(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -1002,16 +1002,12 @@ async def test_repair_flow_with_approval(tmp_path) -> None:
     await approvals.decide(repair_id, "approve")
     for _ in range(200):
         row = store.get_repair(repair_id)
-        if row["status"] == "closed":
+        if row["status"] == "failed":
             break
         await asyncio.sleep(0.05)
-    assert store.get_repair(repair_id)["status"] == "closed"
-
-    candidates = store.list_candidates("candidate")
-    assert len(candidates) == 1
-    assert candidates[0]["pattern"] == "HighCPU|dify|*"
+    assert store.get_repair(repair_id)["status"] == "failed"
     assert store.list_actions(repair_id)[0]["tool"] == "codex_agent"
-    assert any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
+    assert not any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
     await service.close()
     store.close()
 
