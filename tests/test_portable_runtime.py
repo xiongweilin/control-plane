@@ -99,7 +99,11 @@ def test_legacy_repair_adapter_keeps_stable_mapping() -> None:
     )
     assert work.id == "work_legacy_repair-1"
     assert run.id == "run_legacy_repair-1"
-    assert run.status == "succeeded"
+    # A legacy ``closed`` flag is provenance only; terminal success requires
+    # a typed Work/Run-bound completion proof.
+    assert work.status == "waiting"
+    assert run.status == "waiting"
+    assert work.metadata["legacy_terminal_status"] == "closed"
 
 
 def test_filesystem_artifact_store_is_content_addressed_and_scoped(tmp_path: Path) -> None:
