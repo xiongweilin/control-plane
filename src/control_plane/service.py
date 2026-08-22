@@ -38,7 +38,7 @@ from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_patt
 from .approvals import ApprovalManager
 from .budget import Budget
 from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionResult
-from .config import ControlPlaneConfig, canonical_human_principal
+from .config import PROJECT_ROOT, ControlPlaneConfig, canonical_human_principal
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
 from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
@@ -766,11 +766,35 @@ class RepairService:
             await self._notify("warning", "控制平面已暂停，告警未处理", f"{alertname}: {self._describe(alert)}")
             return {"paused": 1}
 
+        now = int(time.time())
+
+        # Alerts without a project/repo target are not safe for automatic
+        # repair.  The historical fallback was the non-Git compose umbrella
+        # (D:\\infrastructure\\compose), producing misleading ``not a git
+        # repository`` failures; ContainerRestartStorm and ControlPlane*
+        # self-alerts both followed that path.  Keep them visible, but require
+        # an operator to provide a concrete target before running an agent.
+        if self._is_unscoped_alert(alert):
+            pending_raw = self.store.get_setting(f"pending:{fingerprint}")
+            try:
+                pending_at = int(pending_raw or 0)
+            except ValueError:
+                pending_at = 0
+            if pending_at and now - pending_at < 600:
+                return {"pending": 1}
+            self.store.set_setting(f"pending:{fingerprint}", str(now))
+            await self._notify(
+                "warning",
+                f"控制平面自告警待人工处理：{alertname}",
+                f"{self._describe(alert)}\n"
+                "该告警没有 project/repo 目标，自动修复已抑制；请按 runbook 人工处理。",
+            )
+            return {"pending": 1}
+
         existing = known
         if existing and self.store.get_repair_state_for_fingerprint(fingerprint) == "in_progress":
             return {"deduplicated": 1}
 
-        now = int(time.time())
         latest = self._latest_finished_repair(fingerprint)
         if latest is not None:
             finished_at = int(latest["finished_at"] or 0)
@@ -1458,13 +1482,34 @@ class RepairService:
         if not self.config.scan_enabled:
             return
         while True:
+            now = dt.datetime.now().astimezone()
+            if self._scan_due(now):
+                try:
+                    differences = await self.run_env_scan()
+                    logger.info("env scan finished with %s differences", len(differences))
+                except Exception:
+                    logger.exception("daily env scan failed")
             await self._sleep_until_time(self.config.scan_time, fallback=(6, 0))
-            try:
-                differences = await self.run_env_scan()
-                logger.info("env scan finished with %s differences", len(differences))
-            except Exception:
-                logger.exception("daily env scan failed")
-            await asyncio.sleep(86_400)
+
+    def _scan_due(self, now: dt.datetime) -> bool:
+        """Return whether today's scan instant has passed without success.
+
+        This catch-up check runs before sleeping, so a process started after
+        06:00 performs the missed scan immediately.  A successful scan already
+        recorded at/after today's scheduled instant suppresses duplicate work.
+        """
+        try:
+            hour, minute = (int(part) for part in self.config.scan_time.split(":", 1))
+        except (ValueError, AttributeError):
+            hour, minute = 6, 0
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now < target:
+            return False
+        try:
+            last_ts = int(self.store.get_setting("scan:last_ts", "0") or 0)
+        except ValueError:
+            last_ts = 0
+        return last_ts < int(target.timestamp())
 
     async def _sleep_until_time(self, time_spec: str, fallback: tuple[int, int]) -> None:
         try:
@@ -1959,6 +2004,11 @@ class RepairService:
         return "\n".join(lines)
 
     async def _pick_repo(self, alert: Alert) -> str:
+        if self._is_unscoped_control_plane_alert(alert):
+            # Explicit/manual control-plane work has a real Git target.  The
+            # automatic ingestion path is gated above, so this branch cannot
+            # create a self-repair loop while avoiding the old non-Git root.
+            return str(PROJECT_ROOT)
         project = alert.labels.get("project", "")
         resolved = self._resolve_project(project)
         if resolved in self.config.allowed_auto_projects:
@@ -1968,6 +2018,10 @@ class RepairService:
             if await self._path_exists(candidate):
                 return candidate
         repo = alert.labels.get("repo", "")
+        if not project and not repo:
+            raise ToolError(
+                "alert has no project/repo target; automatic repository selection is disabled"
+            )
         if repo:
             try:
                 return resolve_repo(
@@ -1980,8 +2034,24 @@ class RepairService:
                 CONTROLLED_IGNORES.labels(site="repo_fallback").inc()
         for root in self.config.allowed_repo_roots:
             if await self._path_exists(root):
-                return root
+                try:
+                    inside = await self.executor.run(
+                        ["git", "-C", root, "rev-parse", "--is-inside-work-tree"],
+                        timeout=30,
+                    )
+                except ToolError:
+                    continue
+                if inside.strip().lower() == "true":
+                    return root
         return self.config.allowed_repo_roots[0]
+
+    @staticmethod
+    def _is_unscoped_alert(alert: Alert) -> bool:
+        return not alert.labels.get("project", "").strip() and not alert.labels.get("repo", "").strip()
+
+    @staticmethod
+    def _is_unscoped_control_plane_alert(alert: Alert) -> bool:
+        return alert.labels.get("alertname", "").startswith("ControlPlane") and RepairService._is_unscoped_alert(alert)
 
     def _resolve_project(self, project: str) -> str:
         # dify 的 Compose 项目曾以 `-p docker` 运行（项目名 docker，卷 docker_dify_*）；
