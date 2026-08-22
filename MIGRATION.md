@@ -118,16 +118,18 @@ private Windows implementation.
 
 ## Repository governance
 
-The source workflows define the checks that must be required on protected
-`main` branches. GitHub repository settings remain the authoritative owner of
-that policy and must require, at minimum:
+Governance is intentionally asymmetric between the public base and the private
+profile:
 
-- `portable-runtime`: `CI / lint-and-test` and `CI / strict-conformance`;
-- `control-plane`: `CI / lint-and-test` and `CI / windows-native`.
+- `portable-runtime`: `main` must be protected and require `CI / lint-and-test`
+  plus `CI / strict-conformance`.
+- `control-plane`: this is an experimental/private profile. Its CI jobs and
+  vendor verifier are synchronization and experiment evidence; this profile
+  does not require branch protection or required checks on `main`.
 
-The SonarCloud job remains an additional main-branch quality signal. A local
-green workflow is not treated as branch protection; changes to required checks
-must be made in the repository settings and then verified with the GitHub API.
+For the public base, the SonarCloud job remains an additional main-branch
+quality signal. Private-profile CI and vendor verification remain evidence for
+safe synchronization and do not create a second branch-governance standard.
 
 ## Historical notes
 
