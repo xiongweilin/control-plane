@@ -482,9 +482,26 @@ class PersonalOperationsProvider:
     async def _git_rollback(self, request: CapabilityRequest) -> str:
         repo = self._required(request, "repo")
         branch = self._required(request, "branch")
-        self._journal[request.id].metadata.update({"repo": repo, "branch": branch})
-        await self.executor.run(["git", "-C", repo, "checkout", "-q", "main"], timeout=120)
-        return await self.executor.run(["git", "-C", repo, "branch", "-D", branch], timeout=120)
+        self._journal[request.id].metadata.update(
+            {
+                "repo": repo,
+                "branch": branch,
+                "mutation": "candidate-branch-delete",
+                "recovery_required": True,
+            }
+        )
+        # Candidate branch deletion is a persistent, destructive mutation.  It
+        # is not a reversible rollback and this compatibility provider has no
+        # owner-authorized recovery record or pre-delete commit evidence.  Do
+        # not let the legacy fallback turn a typed ``git.rollback`` request
+        # into an unmediated ``git branch -D``.  The dedicated
+        # GitPhysicalBoundary exposes the same fail-closed advisory path; an
+        # owner-authorized recovery workflow may be added later without
+        # widening this provider's authority.
+        raise ToolError(
+            "candidate branch deletion is disabled; use the owner-authorized "
+            "recovery workflow with durable pre-delete evidence"
+        )
 
     async def _docker(self, request: CapabilityRequest) -> str:
         project = str(request.parameters.get("project", ""))
