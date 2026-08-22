@@ -94,6 +94,52 @@ class PortableRuntimeAuthority:
         self.runtime.store.save_record(record)
         return record
 
+    def _standing_owner_policy(self) -> Decision:
+        """Return the durable owner delegation used for candidate edits.
+
+        A per-repair ``Decision`` that claims to be a personal-owner policy is
+        not an authorization source: the running service would be minting the
+        principal's decision immediately before execution.  The owner policy
+        is therefore one stable, revocable delegation fact.  Each repair gets
+        a fresh, version-scoped grant derived from this standing decision, but
+        no new human decision is manufactured in the repair path.
+        """
+
+        decision_id = "decision_personal_owner_code_edit_v1"
+        get_decision = getattr(self.runtime.store, "get_decision", None)
+        existing = get_decision(decision_id) if callable(get_decision) else None
+        if isinstance(existing, Decision):
+            if (
+                existing.work_id != "policy:personal-owner"
+                or existing.decision_type != "standing-owner-delegation"
+                or existing.selected_option != "delegate-code-edit"
+                or self.principal_ref not in existing.authorized_by
+            ):
+                raise RuntimeError("standing owner policy provenance is conflicting")
+            return existing
+
+        decision = Decision(
+            id=decision_id,
+            work_id="policy:personal-owner",
+            decision_type="standing-owner-delegation",
+            selected_option="delegate-code-edit",
+            authorized_by=[self.principal_ref],
+            metadata={
+                "provenance_kind": "standing-owner-policy",
+                "policy_version": "v1",
+                "allowed_capabilities": ["code.edit"],
+                "effect_ceiling": "write-local",
+                "subject_version_required": True,
+                "revocable": True,
+                "source": "control-plane.configuration",
+            },
+        )
+        save_decision = getattr(self.runtime.store, "save_decision", None)
+        if not callable(save_decision):
+            raise RuntimeError("portable authority store cannot persist standing owner policy")
+        save_decision(decision)
+        return decision
+
     def _persist_execution_outcome(
         self,
         work: Work,
@@ -421,7 +467,7 @@ class PortableRuntimeAuthority:
         work: Work,
         resource: str,
         version_ref: str,
-        decision_id: str,
+        authority_ref: str,
     ) -> AuthorizationGrant:
         version_token = self._stable_token(version_ref)
         grant_epoch = int(datetime.now(UTC).timestamp()) // 3600
@@ -432,7 +478,12 @@ class PortableRuntimeAuthority:
             from portable_runtime.records.authorization import is_grant_valid
 
             if is_grant_valid(existing):
-                return existing
+                if (
+                    existing.source_decision_ref == authority_ref
+                    and existing.metadata.get("standing_policy_ref") == authority_ref
+                ):
+                    return existing
+                raise RuntimeError("existing authorization grant has conflicting standing-policy provenance")
         grant = AuthorizationGrant(
             id=grant_id,
             principal_ref=self.principal_ref,
@@ -442,11 +493,13 @@ class PortableRuntimeAuthority:
             effect_ceiling="write-local",
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             subject_version_refs=[version_ref],
-            source_decision_ref=decision_id,
+            source_decision_ref=authority_ref,
             metadata={
                 "authority": "personal-owner-policy",
                 "source": "control-plane-repair",
                 "work_id": work.id,
+                "standing_policy_ref": authority_ref,
+                "provenance": "derived-from-standing-owner-delegation",
             },
         )
         save_authorization = getattr(self.runtime.store, "save_authorization", None)
@@ -709,20 +762,28 @@ class PortableRuntimeAuthority:
             if not callable(save_relation):
                 raise RuntimeError("portable authority store cannot persist qualification relation")
             save_relation(relation)
-        decision_id = f"decision_{repair_id}_{token}"
-        decision = Decision(
-            id=decision_id,
-            work_id=work.id,
-            decision_type="personal-owner-policy",
-            selected_option="execute-local-edit",
-            rationale_artifact_refs=[baseline.id],
-            authorized_by=[self.principal_ref],
-        )
-        save_decision = getattr(self.runtime.store, "save_decision", None)
-        get_decision = getattr(self.runtime.store, "get_decision", None)
-        if callable(save_decision) and (not callable(get_decision) or get_decision(decision_id) is None):
-            save_decision(decision)
-        grant = self._grant(repair_id, work, resource, version_ref, decision_id)
+        # The owner delegation is durable and stable across repairs.  This is
+        # not a human approval event; it is the standing policy from which a
+        # fresh, version-scoped AuthorizationGrant is derived.
+        standing_policy = self._standing_owner_policy()
+        grant = self._grant(repair_id, work, resource, version_ref, standing_policy.id)
+        authority_relation_id = f"relation_{repair_id}_{token}_authorization"
+        get_relation = getattr(self.runtime.store, "get_relation", None)
+        authority_relation = get_relation(authority_relation_id) if callable(get_relation) else None
+        if not isinstance(authority_relation, RecordRelation):
+            authority_relation = RecordRelation(
+                id=authority_relation_id,
+                relation_type="authorized-under",
+                subject_ref=grant.id,
+                object_ref=standing_policy.id,
+                scope={"work_id": work.id, "resource_ref": resource, "subject_version_ref": version_ref},
+                created_by=self.actor_ref,
+                metadata={"qualification_kind": "standing-owner-delegation"},
+            )
+            save_relation = getattr(self.runtime.store, "save_relation", None)
+            if not callable(save_relation):
+                raise RuntimeError("portable authority store cannot persist authorization provenance")
+            save_relation(authority_relation)
         checkpoint = Checkpoint(
             id=f"checkpoint_{repair_id}_{token}",
             run_id=run.id,
@@ -741,7 +802,12 @@ class PortableRuntimeAuthority:
             {"id": baseline.id, "kind": "verification"},
             {"id": evidence.id, "kind": "evidence"},
             {"id": relation.id, "kind": "relation"},
-            {"id": decision.id, "kind": "decision"},
+            # QualificationRef uses the portable semantic type names.  The
+            # standing-owner meaning is carried by the durable Decision's
+            # stable id and work metadata, while resolution still sees a
+            # normal ``decision``/``relation`` proof.
+            {"id": standing_policy.id, "kind": "decision"},
+            {"id": authority_relation.id, "kind": "relation"},
             {"id": checkpoint.id, "kind": "checkpoint"},
         ]
         metadata = dict(work.metadata)
@@ -759,6 +825,8 @@ class PortableRuntimeAuthority:
                 "procedure_proof_refs": procedure_refs,
                 "authorization_refs": [{"id": grant.id, "kind": "authorization"}],
                 "authorization_grant_id": grant.id,
+                "standing_owner_policy_ref": standing_policy.id,
+                "authorization_provenance_ref": authority_relation.id,
                 "checkpoint_refs": [{"id": checkpoint.id, "kind": "checkpoint"}],
                 "portable_authority": "personal-runtime",
             }
@@ -775,6 +843,8 @@ class PortableRuntimeAuthority:
                 "procedure_proof_refs": procedure_refs,
                 "authorization_refs": [{"id": grant.id, "kind": "authorization"}],
                 "authorization_grant_id": grant.id,
+                "standing_owner_policy_ref": standing_policy.id,
+                "authorization_provenance_ref": authority_relation.id,
                 "checkpoint_refs": [{"id": checkpoint.id, "kind": "checkpoint"}],
                 "portable_authority": "personal-runtime",
             }

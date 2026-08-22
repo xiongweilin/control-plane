@@ -172,8 +172,8 @@ def test_verifier_fallback_returns_the_fallback_service(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_service_repair_flow_still_green_via_capability(tmp_path) -> None:
-    """Old repair_flow behavior baseline preserved but via CapabilityService."""
+async def test_legacy_repair_flow_fails_closed_without_portable_runtime(tmp_path) -> None:
+    """Compatibility construction cannot invoke a provider outside RealityBoundary."""
     config = _config(tmp_path)
     store = Store(config.state_db)
     executor = FakeExecutor(branch_exists=False)
@@ -184,18 +184,18 @@ async def test_service_repair_flow_still_green_via_capability(tmp_path) -> None:
     resp = await service.ingest(payload)
     # Should be accepted via capability path
     assert resp.accepted == 1
-    # Wait for repair to close
+    # Wait for the disabled compatibility path to surface its bounded failure.
     for _ in range(200):
         rows = store.list_repairs()
         if rows and rows[0]["status"] in {"closed", "failed"}:
             break
         await asyncio.sleep(0.05)
     rows = store.list_repairs()
-    assert rows and rows[0]["status"] == "closed"
-    # Ensure capability was actually invoked (adapter incremented calls)
-    assert agent.calls >= 1
-    # Ensure the result is not self-certified: verification evidence exists via deterministic checks (container_status)
-    # The repair should have created an action and verification should have run
+    assert rows and rows[0]["status"] == "failed"
+    assert "routing seam" in str(rows[0]["error"] or rows[0]["result"])
+    # The adapter remains discoverable for migration diagnostics, but it is
+    # never reached by the fail-closed compatibility boundary.
+    assert agent.calls == 0
     await service.close()
     store.close()
 
