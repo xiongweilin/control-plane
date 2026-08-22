@@ -44,6 +44,7 @@ line-length = 120
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/verify_portable_runtime_pin.py" = ["S603", "S607"]
 # The vendored conformance suite is copied from portable-runtime and carries
 # intentionally long fixtures, import-order probes, and security-test literals.
 "tests/*" = ["S101", "S108", "S105", "S106", "E501", "B017", "N817", "B011", "F841", "S311", "S112", "E702", "E701", "E401", "E402", "I001", "F401", "N806", "SIM110", "N814", "N812"]
