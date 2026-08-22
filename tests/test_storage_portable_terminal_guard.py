@@ -45,8 +45,9 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
             status="succeeded",
             metadata={"_completion_proof_refs": ["proof-r2"]},
         )
-        portable.save_work(work)
-        portable.save_run(run)
+        with portable.terminal_completion():
+            portable.save_work(work)
+            portable.save_run(run)
         legacy.attach_portable_store(portable, enable_read=True)
         legacy.create_repair("r2", "fp-r2", "{}")
 

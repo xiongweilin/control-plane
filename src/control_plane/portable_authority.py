@@ -144,13 +144,15 @@ class PortableRuntimeAuthority:
             run_status = "waiting"
             run_update: dict[str, Any] = {"status": run_status, "metadata": run_metadata}
         else:
-            work_status = "failed"
-            run_status = "failed"
-            run_update = {
-                "status": run_status,
-                "metadata": run_metadata,
-                "ended_at": now,
-            }
+            # Provider failure is an execution fact, not a license for this
+            # adapter to write terminal Work/Run states.  Keep the canonical
+            # pair recoverable and let a typed failure/recovery authority own
+            # any future terminal transition.
+            work_status = "waiting"
+            run_status = "waiting"
+            run_metadata["execution_terminal_authority"] = "pending-failure-authority"
+            work_metadata["execution_terminal_authority"] = "pending-failure-authority"
+            run_update = {"status": run_status, "metadata": run_metadata}
         self.runtime.store.save_work(
             work.model_copy(update={"status": work_status, "metadata": work_metadata, "updated_at": now})
         )
@@ -909,8 +911,10 @@ class PortableRuntimeAuthority:
         legacy caller, but it is never authority.  A successful finalization
         must provide durable proof records bound to this exact Work/Run,
         subject versions, verification scope and acceptance criteria.  The
-        portable ``CompletionAuthority`` owns the terminal Run transition;
-        this adapter only projects that decision to Work and the legacy row.
+        portable ``CompletionAuthority`` owns the paired terminal Work/Run
+        transition; this adapter only prepares non-terminal metadata and then
+        delegates the closure.  A failing verifier remains non-terminal in
+        the canonical runtime until a typed failure/recovery authority exists.
         """
 
         work_id = f"work_legacy_{repair_id}"
@@ -964,58 +968,57 @@ class PortableRuntimeAuthority:
             if str(result.get("criteria_digest", "")) != criteria_digest:
                 raise ValueError(f"repair finalization proof {ref!r} has an incompatible acceptance-criteria scope")
 
-        if verified:
-            # The shared portable authority is the only owner allowed to
-            # transition a Run to ``succeeded``.  It resolves each proof from
-            # the durable semantic store and rejects provider/status hints.
-            from portable_runtime.workflows.completion import CompletionAuthority
-
-            # ``verification_refs`` is a complete provenance bundle (assertion,
-            # evidence and relation).  The portable completion primitive only
-            # consumes durable typed records, so pass the EvidenceArtifact
-            # proof(s) while retaining the complete bundle on Work/Run.
-            completion_refs = [
-                str(ref)
-                for ref in refs
-                if getattr(self.runtime.store.get_record(str(ref)), "record_type", None)
-                == "EvidenceArtifact"
-            ]
-            if not completion_refs:
-                raise ValueError("repair finalization requires a typed EvidenceArtifact proof")
-            CompletionAuthority(self.runtime.store).authorize(
-                work=work,
-                run=run,
-                verification_refs=completion_refs,
-            )
-        else:
-            # A failing typed verification is still a durable terminal fact,
-            # but it is not authorized by the success CompletionAuthority.
-            self.runtime.store.save_run(
-                run.model_copy(update={"status": "failed", "ended_at": now})
-            )
         work_metadata = dict(work.metadata)
-        work_metadata.update({"verification_refs": refs, "verification_summary": summary, "verified": verified})
-        run_metadata = dict(run.metadata)
-        run_metadata.update({"verification_refs": refs, "verification_summary": summary, "verified": verified})
-        self.runtime.store.save_work(
-            work.model_copy(
-                update={
-                    "status": "completed" if verified else "failed",
-                    "metadata": work_metadata,
-                    "updated_at": now,
-                }
-            )
+        work_metadata.update(
+            {
+                "verification_refs": refs,
+                "verification_summary": summary,
+                "verified": verified,
+                "verification_terminal_authority": "portable-completion"
+                if verified
+                else "pending-failure-authority",
+            }
         )
-        final_run = self.runtime.store.get_run(run.id)
-        if final_run is None:
-            raise RuntimeError("portable completion authority did not persist the canonical Run")
-        self.runtime.store.save_run(
-            final_run.model_copy(
-                update={
-                    "metadata": run_metadata,
-                    "ended_at": now,
-                }
-            )
+        run_metadata = dict(run.metadata)
+        run_metadata.update(
+            {
+                "verification_refs": refs,
+                "verification_summary": summary,
+                "verified": verified,
+                "verification_terminal_authority": "portable-completion"
+                if verified
+                else "pending-failure-authority",
+            }
+        )
+        prepared_work = work.model_copy(update={"metadata": work_metadata, "updated_at": now})
+        prepared_run = run.model_copy(update={"metadata": run_metadata})
+        # Preserve the current non-terminal state while attaching the full
+        # provenance bundle.  Only CompletionAuthority may write the paired
+        # terminal Work/Run records.
+        with self.runtime.store.transaction():
+            self.runtime.store.save_work(prepared_work)
+            self.runtime.store.save_run(prepared_run)
+
+        if not verified:
+            return
+
+        from portable_runtime.workflows.completion import CompletionAuthority
+
+        # The refs form a complete provenance bundle. CompletionAuthority
+        # consumes only typed EvidenceArtifact proofs and atomically commits
+        # Work=completed with Run=succeeded.
+        completion_refs = [
+            str(ref)
+            for ref in refs
+            if getattr(self.runtime.store.get_record(str(ref)), "record_type", None)
+            == "EvidenceArtifact"
+        ]
+        if not completion_refs:
+            raise ValueError("repair finalization requires a typed EvidenceArtifact proof")
+        CompletionAuthority(self.runtime.store).authorize(
+            work=prepared_work,
+            run=prepared_run,
+            verification_refs=completion_refs,
         )
 
     @staticmethod
