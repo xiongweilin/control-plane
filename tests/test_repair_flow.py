@@ -384,7 +384,8 @@ async def test_policy_manual_pending_then_run(tmp_path) -> None:
             break
         await asyncio.sleep(0.05)
     rows = store.list_repairs()
-    assert rows and rows[0]["status"] == "closed"
+    assert rows and rows[0]["status"] == "failed"
+    assert "routing seam" in str(rows[0]["error"] or rows[0]["result"])
     await service.close()
     store.close()
 
@@ -550,11 +551,10 @@ async def test_dispatch_task_exit_zero_without_result_artifact_stays_recovering(
         await asyncio.sleep(0.05)
     row = store.get_repair(task_id)
     assert row is not None
-    # A successful Codex process is only an execution outcome.  Without a
-    # readable, run-associated result artifact the generic task cannot claim
-    # independent verification or close.
-    assert row["status"] == "recovering"
-    assert row["result"]
+    # Without a portable Runtime the compatibility path is disabled before
+    # provider invocation.  A task cannot claim execution or verification.
+    assert row["status"] == "failed"
+    assert "routing seam" in str(row["error"] or row["result"])
     await service.close()
     store.close()
 
@@ -958,10 +958,12 @@ async def test_run_digest_drops_candidate(tmp_path) -> None:
         now + 86400 * 90, "archive", "", "env change", "repair-2",
     )
     message = await service.run_digest()
-    assert "归档 1 条" in message
-    assert "cand-y" in message
+    # Digest execution also uses the provider boundary; a service constructed
+    # without a portable Runtime must fail closed instead of invoking the
+    # legacy runner directly.
+    assert message == "整理失败"
     statuses = {row["id"]: row["status"] for row in store.list_candidates()}
-    assert statuses["cand-x"] == "archived"
+    assert statuses["cand-x"] == "candidate"
     assert statuses["cand-y"] == "candidate"
     await service.close()
     store.close()
@@ -1100,7 +1102,7 @@ async def test_reject_closes_repair_without_candidate(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_operations_only_repair_closes_without_approval(tmp_path) -> None:
+async def test_operations_only_repair_fails_closed_without_portable_runtime(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -1125,10 +1127,12 @@ async def test_operations_only_repair_closes_without_approval(tmp_path) -> None:
     assert response.accepted == 1
     repair_id = store.list_repairs()[0]["id"]
     for _ in range(200):
-        if store.get_repair(repair_id)["status"] == "closed":
+        if store.get_repair(repair_id)["status"] in {"closed", "failed"}:
             break
         await asyncio.sleep(0.05)
-    assert store.get_repair(repair_id)["status"] == "closed"
-    assert len(store.list_candidates("candidate")) == 1
+    assert store.get_repair(repair_id)["status"] == "failed"
+    assert "routing seam" in str(
+        store.get_repair(repair_id)["error"] or store.get_repair(repair_id)["result"]
+    )
     await service.close()
     store.close()
