@@ -19,7 +19,7 @@ from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResu
 from portable_runtime.core.models import Artifact, Checkpoint, Decision, Run, Work, utcnow
 from portable_runtime.core.runtime import Runtime
 from portable_runtime.records.authorization import AuthorizationGrant
-from portable_runtime.records.models import BaseRecord
+from portable_runtime.records.models import BaseRecord, EvidenceArtifact
 from portable_runtime.records.relations import RecordRelation
 from portable_runtime.stores.migration import dual_write_repair
 
@@ -955,8 +955,10 @@ class PortableRuntimeAuthority:
             actual_versions = result.get("subject_version_refs")
             if actual_versions != expected_versions:
                 raise ValueError(f"repair finalization proof {ref!r} has an incompatible subject version scope")
-            expected_scope = str(work.metadata.get("verification_scope") or work.kind)
-            if str(result.get("scope", "")) != expected_scope:
+            expected_scope = work.metadata.get("verification_scope")
+            if not isinstance(expected_scope, dict):
+                expected_scope = {"work_kind": work.kind, "workflow_id": run.workflow_id}
+            if result.get("scope") != expected_scope:
                 raise ValueError(f"repair finalization proof {ref!r} has an incompatible verification scope")
             criteria_digest = self._verification_criteria_digest(work)
             if str(result.get("criteria_digest", "")) != criteria_digest:
@@ -1043,7 +1045,11 @@ class PortableRuntimeAuthority:
             return []
         token = self._stable_token(f"verification:{repair_id}:{summary}")
         version_refs = list(work.metadata.get("subject_version_refs", []))
-        verification_scope = str(work.metadata.get("verification_scope") or work.kind)
+        verification_scope = work.metadata.get("verification_scope")
+        if not isinstance(verification_scope, dict):
+            verification_scope = {"work_kind": work.kind, "workflow_id": run.workflow_id}
+        work_version = work.metadata.get("work_version", work.metadata.get("task_version", 1))
+        acceptance_criteria = list(work.acceptance_criteria)
         criteria_digest = self._verification_criteria_digest(work)
         verification_result = {
             "result": "pass" if passed else "fail",
@@ -1051,6 +1057,8 @@ class PortableRuntimeAuthority:
             "run_id": run.id,
             "scope": verification_scope,
             "subject_version_refs": version_refs,
+            "work_version": work_version,
+            "acceptance_criteria": acceptance_criteria,
             "criteria_digest": criteria_digest,
             "verifier_ref": verifier_ref,
         }
@@ -1073,8 +1081,9 @@ class PortableRuntimeAuthority:
             )
         )
         evidence = self._record(
-            BaseRecord(
+            EvidenceArtifact(
                 id=f"record_{repair_id}_{token}_verification_evidence",
+                kind="closed-verification",
                 record_type="EvidenceArtifact",
                 lifecycle_status="current",
                 metadata={
@@ -1086,6 +1095,11 @@ class PortableRuntimeAuthority:
                     "summary": summary[:4_000],
                     "verification_result": verification_result,
                     "proof_kind": "closed-verification",
+                    "work_id": work.id,
+                    "run_id": run.id,
+                    "verification_scope": verification_scope,
+                    "work_version": work_version,
+                    "acceptance_criteria": acceptance_criteria,
                 },
             )
         )
@@ -1114,6 +1128,8 @@ class PortableRuntimeAuthority:
                 "verification_refs": refs,
                 "verification_status": verification_status,
                 "verification_summary": summary[:4_000],
+                "verification_scope": verification_scope,
+                "work_version": work_version,
             }
         )
         run_metadata = dict(run.metadata)
@@ -1122,6 +1138,8 @@ class PortableRuntimeAuthority:
                 "verification_refs": refs,
                 "verification_status": verification_status,
                 "verification_summary": summary[:4_000],
+                "verification_scope": verification_scope,
+                "work_version": work_version,
             }
         )
         self.runtime.store.save_work(work.model_copy(update={"metadata": work_metadata, "updated_at": utcnow()}))
