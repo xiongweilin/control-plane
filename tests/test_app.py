@@ -175,6 +175,12 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
         grant.principal_ref == "human:configured-owner"
         for grant in portable_store.list_authorizations()
     )
+    uses = portable_store.list_authorization_uses()
+    assert len(uses) == 1
+    assert uses[0].capability == "knowledge.promote"
+    assert uses[0].actor_ref == "control-plane:candidate:cand-1"
+    assert uses[0].resource_ref == "candidate:cand-1"
+    assert uses[0].effect_class == "write-local"
     assert portable_store.export_state()["decision"]
     projection = portable_store.get_knowledge_projection("knowledge_candidate_cand-1")
     assert projection is not None

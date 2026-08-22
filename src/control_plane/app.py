@@ -618,6 +618,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if _PORTABLE_AVAILABLE and portable_runtime is not None:
             from portable_runtime.records.authorization import (
                 CanonicalAuthorizationRequest,
+                create_authorization_use,
                 is_authorized_for,
                 record_human_approval,
                 validate_grant,
@@ -762,11 +763,45 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 subject_version_refs=[projection_id, f"{projection_id}:v1"],
                 effect_class="write-local",
             )
+            # Candidate promotion is a fixed local write operation.  Do not
+            # let a generic approval helper's unconstrained grant or the
+            # candidate metadata choose the capability/resource/effect.  The
+            # grant and its typed AuthorizationUse are the durable, at-time
+            # proof consumed by the canonical graph validator after the grant
+            # eventually expires or is revoked.
+            grant = grant.model_copy(
+                update={
+                    "allowed_capabilities": ["knowledge.promote"],
+                    "resource_scope": [f"candidate:{candidate_id}"],
+                    "effect_ceiling": "write-local",
+                }
+            )
+            save_authorization = getattr(portable_runtime.store, "save_authorization", None)
+            if not callable(save_authorization):
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Portable authorization store cannot persist fixed promotion grant",
+                )
+            save_authorization(grant)
             if validate_grant(grant) or not is_authorized_for(promotion_request, grant):
                 return ApprovalDecisionResponse(
                     accepted=False,
                     message="Portable promotion grant does not authorize this candidate action",
                 )
+            try:
+                authorization_use = create_authorization_use(grant, promotion_request)
+            except ValueError as exc:
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message=f"Portable promotion authorization proof rejected: {exc}",
+                )
+            save_authorization_use = getattr(portable_runtime.store, "save_authorization_use", None)
+            if not callable(save_authorization_use):
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Portable authorization-use store is unavailable",
+                )
+            save_authorization_use(authorization_use)
             approval_assertion_id = f"record_candidate_{candidate_id}_approval"
             approval_assertion = (
                 record_getter(approval_assertion_id)
@@ -819,11 +854,26 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         "legacy_candidate_id": candidate_id,
                         "source_repair_id": source_repair_id,
                         "tool_sequence": str(candidate["tool_sequence"]),
-                        "promotion_capability": "knowledge.promote",
                         "actor_ref": f"control-plane:candidate:{candidate_id}",
                         "resource_ref": f"candidate:{candidate_id}",
                         "effect_class": "write-local",
+                        "authorization_use_ref": authorization_use.id,
                     },
+                )
+            else:
+                # Repeated promotion requests must refresh the fixed action
+                # proof rather than trusting stale candidate metadata.
+                projection = projection.model_copy(
+                    update={
+                        "authorization_refs": [grant.id],
+                        "metadata": {
+                            **dict(projection.metadata),
+                            "actor_ref": f"control-plane:candidate:{candidate_id}",
+                            "resource_ref": f"candidate:{candidate_id}",
+                            "effect_class": "write-local",
+                            "authorization_use_ref": authorization_use.id,
+                        },
+                    }
                 )
             try:
                 official = promote_to_official(projection)
