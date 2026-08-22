@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 import time
 from dataclasses import replace
 
@@ -12,8 +13,8 @@ from control_plane.alerts import alert_fingerprint
 from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.codex_runner import CodexSessionResult
-from control_plane.config import ControlPlaneConfig
-from control_plane.models import AlertmanagerPayload
+from control_plane.config import PROJECT_ROOT, ControlPlaneConfig
+from control_plane.models import Alert, AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairService
 from control_plane.storage import Store
@@ -771,6 +772,89 @@ async def test_resolve_project_maps_legacy_docker_alias(tmp_path) -> None:
     assert service._resolve_project("dify") == "dify"
     assert service._resolve_project("observability") == "observability"
     assert service._resolve_project("") == ""
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_unscoped_control_plane_alert_uses_control_plane_git_repo(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+    )
+    alert = Alert.model_validate(
+        {
+            "status": "firing",
+            "labels": {"alertname": "ControlPlaneDailyScanStale"},
+            "annotations": {},
+            "startsAt": "2026-08-22T00:00:00Z",
+            "endsAt": None,
+            "fingerprint": "cp-scan-stale",
+        }
+    )
+    assert service._is_unscoped_control_plane_alert(alert)
+    assert await service._pick_repo(alert) == str(PROJECT_ROOT)
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_unscoped_alert_is_not_auto_repaired_to_compose_root(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+    )
+    alert = Alert.model_validate(
+        {
+            "status": "firing",
+            "labels": {"alertname": "ContainerRestartStorm"},
+            "annotations": {},
+            "startsAt": "2026-08-22T00:00:00Z",
+            "endsAt": None,
+            "fingerprint": "container-storm",
+        }
+    )
+    assert service._is_unscoped_alert(alert)
+    with pytest.raises(ToolError, match="no project/repo target"):
+        await service._pick_repo(alert)
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_due_catches_up_after_missed_schedule(tmp_path) -> None:
+    from datetime import datetime
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+    )
+    now = datetime(2026, 8, 22, 14, 0, tzinfo=UTC)
+    store.set_setting("scan:last_ts", str(int(datetime(2026, 8, 21, 22, 0, tzinfo=now.tzinfo).timestamp())))
+    assert service._scan_due(now)
+    store.set_setting("scan:last_ts", str(int(datetime(2026, 8, 22, 6, 1, tzinfo=now.tzinfo).timestamp())))
+    assert not service._scan_due(now)
     await service.close()
     store.close()
 
