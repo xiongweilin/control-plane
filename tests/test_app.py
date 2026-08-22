@@ -150,6 +150,11 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
         summary="container verifier passed",
         evidence_refs=["container_status"],
     )
+    canonical_work = authority.runtime.store.get_work("work_legacy_repair-1")
+    canonical_run = authority.runtime.store.get_run("run_legacy_repair-1")
+    assert canonical_work is not None and canonical_run is not None
+    authority.runtime.store.save_work(canonical_work.model_copy(update={"status": "waiting"}))
+    authority.runtime.store.save_run(canonical_run.model_copy(update={"status": "waiting"}))
     authority.finalize_repair(
         "repair-1",
         verified=True,
