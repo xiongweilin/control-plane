@@ -106,13 +106,53 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert context.work_id == "work_legacy_repair-authority-1"
     assert runtime.store.get_work("work_legacy_repair-authority-1").status == "waiting"
     assert runtime.store.get_run("run_legacy_repair-authority-1").status == "waiting"
-    authority.finalize_repair("repair-authority-1", verified=True, summary="verification passed")
+    verification_refs = authority.record_verification(
+        "repair-authority-1",
+        passed=True,
+        summary="verification passed",
+        evidence_refs=["artifact:portable-test"],
+    )
+    authority.finalize_repair(
+        "repair-authority-1",
+        verified=True,
+        verification_refs=verification_refs,
+        summary="verification passed",
+    )
     assert runtime.store.get_work("work_legacy_repair-authority-1").status == "completed"
     assert runtime.store.get_run("run_legacy_repair-authority-1").status == "succeeded"
     grants = runtime.store.list_authorizations()
     assert len(grants) == 1
     assert grants[0].grantee_ref == "personal-agent"
     assert grants[0].subject_version_refs == ["git:abc123"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_repair_rejects_bare_verified_flag(tmp_path: Path) -> None:
+    store = InMemoryStateStore()
+    registry = ProviderRegistry()
+    registry.register(FakeCodexProvider())
+    runtime = Runtime(store=store, registry=registry)
+
+    async def resolve_version(repo: str) -> str:
+        return "abc123"
+
+    authority = PortableRuntimeAuthority(runtime, version_resolver=resolve_version)
+    await authority.prepare_code_edit(
+        repair_id="repair-authority-bare-proof",
+        repo=str(tmp_path),
+        prompt="make the local repair",
+    )
+
+    with pytest.raises(ValueError, match="durable verification proof refs"):
+        authority.finalize_repair(
+            "repair-authority-bare-proof",
+            verified=True,
+            summary="provider said it passed",
+        )
+    work = runtime.store.get_work("work_legacy_repair-authority-bare-proof")
+    run = runtime.store.get_run("run_legacy_repair-authority-bare-proof")
+    assert work is not None and work.status == "running"
+    assert run is not None and run.status == "waiting"
 
 
 @pytest.mark.asyncio
