@@ -4,6 +4,7 @@ from pathlib import Path
 
 from control_plane.storage import Store
 from portable_runtime.core.models import Run, Work
+from portable_runtime.records.models import EvidenceArtifact
 from portable_runtime.stores.memory import InMemoryStateStore
 
 
@@ -45,7 +46,22 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
             status="succeeded",
             metadata={"_completion_proof_refs": ["proof-r2"]},
         )
-        with portable.terminal_completion():
+        portable.save_record(
+            EvidenceArtifact(
+                id="proof-r2",
+                kind="closed-verification",
+                metadata={
+                    "work_id": work.id,
+                    "run_id": run.id,
+                    "verification_result": {
+                        "result": "pass",
+                        "work_id": work.id,
+                        "run_id": run.id,
+                    }
+                },
+            )
+        )
+        with portable.terminal_completion(["proof-r2"]):
             portable.save_work(work)
             portable.save_run(run)
         legacy.attach_portable_store(portable, enable_read=True)
