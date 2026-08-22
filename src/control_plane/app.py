@@ -941,6 +941,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         "resource_ref": f"candidate:{candidate_id}",
                         "effect_class": "write-local",
                         "authorization_use_ref": authorization_use.id,
+                        "promotion_capability": "knowledge.promote",
                     },
                 )
             else:
