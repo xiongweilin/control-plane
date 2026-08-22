@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 
 from prometheus_client import Counter, Gauge
-from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from .runtime import current_run_id
 from .state_machine import QUIESCENT_STATES, RECOVERABLE_STATES
@@ -73,6 +73,31 @@ class ControlPlaneCollector:
         for status, count in sorted(status_counts.items()):
             repairs.add_metric([status], count)
         yield repairs
+
+        # ``control_plane_repairs_total`` is a status snapshot (a gauge): a
+        # repair can move between non-terminal states, so applying
+        # ``increase()`` to it is semantically incorrect.  Expose the
+        # terminal failed count separately as a monotonic counter for trend
+        # alerts while retaining the snapshot metric for dashboards.
+        failed_total_value = self._store.get_setting("metrics:repairs_failed_total", "")
+        try:
+            failed_count = max(
+                int(failed_total_value or 0), status_counts.get("failed", 0)
+            )
+        except ValueError:
+            failed_count = status_counts.get("failed", 0)
+        # A one-time bootstrap also repairs old databases that predate the
+        # persisted event counter; later status transitions update this value
+        # transactionally in Store.set_repair_status.
+        if not failed_total_value or str(failed_count) != failed_total_value:
+            self._store.set_setting("metrics:repairs_failed_total", str(failed_count))
+        failed_total = CounterMetricFamily(
+            "control_plane_repairs_failed_total",
+            "Cumulative number of repairs that ended in failed status",
+            labels=["status"],
+        )
+        failed_total.add_metric(["failed"], failed_count)
+        yield failed_total
 
         yield GaugeMetricFamily(
             "control_plane_repairs_active",

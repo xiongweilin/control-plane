@@ -148,7 +148,13 @@ async def test_dirty_worktree_policy_reject_blocks_agent(tmp_path) -> None:
     alert = Alert.model_validate(
         {
             "status": "firing",
-            "labels": {"alertname": "HighCPU", "instance": "node1"},
+                "labels": {
+                    "alertname": "HighCPU",
+                    "instance": "node1",
+                    # The alert target is explicit so repository selection
+                    # reaches the dirty-worktree policy under test.
+                    "repo": str(repo),
+                },
             "annotations": {},
             "startsAt": "2026-08-06T00:00:00Z",
             "endsAt": None,

@@ -9,6 +9,7 @@ def test_collector_emits_metrics(tmp_path) -> None:
     collector = ControlPlaneCollector(store, budget_remaining=lambda: 5)
     families = {f.name: f for f in collector.collect()}
     assert "control_plane_repairs_total" in families
+    assert "control_plane_repairs_failed" in families
     assert "control_plane_repairs_active" in families
     assert "control_plane_repairs_recoverable" in families
     assert "control_plane_candidates" in families
@@ -47,4 +48,16 @@ def test_collector_active_excludes_quiescent_states(tmp_path) -> None:
     recoverable = families["control_plane_repairs_recoverable"]
     labels = {s.labels["status"] for s in recoverable.samples}
     assert labels == {RepairState.INTERRUPTED.value}
+    store.close()
+
+
+def test_collector_failed_counter_counts_terminal_failures(tmp_path) -> None:
+    from control_plane.state_machine import RepairState
+
+    store = Store(tmp_path / "cp.db")
+    store.create_repair("r-failed", "fp-failed", "{}")
+    store.set_repair_status("r-failed", RepairState.FAILED.value)
+    collector = ControlPlaneCollector(store, budget_remaining=lambda: 5)
+    family = next(f for f in collector.collect() if f.name == "control_plane_repairs_failed")
+    assert list(family.samples)[0].value == 1
     store.close()

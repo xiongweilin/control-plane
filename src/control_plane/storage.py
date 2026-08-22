@@ -292,6 +292,29 @@ class Store:
             values.append(value)
         values.append(repair_id)
         with self._lock:
+            previous = self._connection.execute(
+                "SELECT status FROM repairs WHERE id=?", (repair_id,)
+            ).fetchone()
+            if status == "failed" and previous is not None and previous["status"] != "failed":
+                existing = self._connection.execute(
+                    "SELECT value FROM settings WHERE key=?",
+                    ("metrics:repairs_failed_total",),
+                ).fetchone()
+                current_rows = self._connection.execute(
+                    "SELECT COUNT(*) FROM repairs WHERE status='failed'"
+                ).fetchone()
+                try:
+                    baseline = max(
+                        int(existing["value"]) if existing else 0,
+                        int(current_rows[0]) if current_rows else 0,
+                    )
+                except (TypeError, ValueError):
+                    baseline = int(current_rows[0]) if current_rows else 0
+                self._connection.execute(
+                    "INSERT INTO settings(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("metrics:repairs_failed_total", str(baseline + 1)),
+                )
             self._connection.execute(
                 f"UPDATE repairs SET {', '.join(columns)} WHERE id=?",  # noqa: S608
                 values,
