@@ -340,6 +340,31 @@ class Store:
             "timed_out": "failed",
         }.get(status, "running")
         now = datetime.now(UTC)
+
+        # The portable runtime is the authority for canonical terminal
+        # transitions.  Legacy status writes are only a compatibility
+        # projection and must never manufacture ``Work=completed`` /
+        # ``Run=succeeded`` (or any other terminal pair) by directly calling
+        # ``save_work``/``save_run``.  This matters during recovery: a legacy
+        # row may be marked failed/interrupted while the canonical Work/Run
+        # is still waiting for a typed verifier or reconciliation fact.
+        terminal_work = work_status in {"completed", "failed", "cancelled", "archived"}
+        terminal_run = run_status in {"succeeded", "failed", "cancelled"}
+        if terminal_work or terminal_run:
+            canonical_terminal = (
+                (work is None or getattr(work, "status", "") in {"completed", "failed", "cancelled", "archived"})
+                and (run is None or getattr(run, "status", "") in {"succeeded", "failed", "cancelled"})
+            )
+            if not canonical_terminal:
+                # Keep the canonical state untouched.  The caller still
+                # persists the legacy projection below, so this path remains
+                # idempotent and observable without weakening portable
+                # authority.
+                return True
+            # An already-terminal canonical pair was committed by its
+            # authority.  Do not rewrite it from a legacy status projection;
+            # this preserves proof metadata and completion provenance.
+            return True
         if work is not None:
             metadata = dict(work.metadata)
             metadata.update({"legacy_status": status, **fields})
