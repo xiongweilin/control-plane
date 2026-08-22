@@ -49,9 +49,12 @@ constructed compatibility callers.
 
 `src/portable_runtime` is synchronized from the public repository and the
 public source tree is read-only from this project. The provider-neutral
-semantic hardening delta was upstreamed to public commit `f20cb87` and the
-private vendored tree was repinned to that commit. The remaining private
-provider difference is deployment-specific Windows boundary injection and is
+semantic hardening delta is pinned to public commit `f20cb87` and the private
+vendored tree is checked against that exact commit in CI. The machine-readable
+`portable-runtime-pin.json` records the commit and normalized provider-neutral
+tree digest; `scripts/verify_portable_runtime_pin.py` rejects stale, missing,
+extra, or modified vendored files. The remaining private provider difference
+is deployment-specific Windows boundary injection and is
 not a second semantic authority.
 
 The private repository currently builds both packages so the personal profile
@@ -109,8 +112,22 @@ private Windows implementation.
 - `mypy src`
 - `scripts/check_portable_core_imports.py`
 - full `pytest` suite and coverage regression gate over both packages;
-- public-base cleanliness and pin verification;
+- public-base cleanliness and pin verification (`portable-runtime-pin.json`;
+  CI fetches the exact public commit before running the verifier);
 - production `/live` and `/ready` after launcher changes.
+
+## Repository governance
+
+The source workflows define the checks that must be required on protected
+`main` branches. GitHub repository settings remain the authoritative owner of
+that policy and must require, at minimum:
+
+- `portable-runtime`: `CI / lint-and-test` and `CI / strict-conformance`;
+- `control-plane`: `CI / lint-and-test` and `CI / windows-native`.
+
+The SonarCloud job remains an additional main-branch quality signal. A local
+green workflow is not treated as branch protection; changes to required checks
+must be made in the repository settings and then verified with the GitHub API.
 
 ## Historical notes
 
