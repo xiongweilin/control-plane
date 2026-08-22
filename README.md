@@ -225,11 +225,15 @@ Config: `digest_enabled`, `digest_time`, `digest_max_candidates`.
 
 The control plane automatically runs one environment self-check daily at 06:00 (`POST /v1/scan` can trigger manually):
 
+- If the process starts after the configured time and today's scan has not completed, it performs a one-time catch-up scan before waiting for the next scheduled instant.
+
 - Local: free space on C:/D drives, Docker containers unhealthy/restarting, Prometheus readiness and firing alerts;
 - Cloud (via `ssh metratio`): disk usage, certificate days-to-expiry, webhook-relay state, SSH firewall rules (should allow only Tailscale sources), gateway-nginx running state, pending security-update count;
 - Silent when no differences (log only); pushes one Feishu summary when there are differences.
 
 Config: `scan_enabled`, `scan_time`, `scan_disk_free_gb_min`, `scan_cloud_free_gb_min`, `scan_cert_days_warn`.
+
+Alerts without an explicit `project` or `repo` target (including control-plane self-alerts) remain visible but are held for manual handling; automatic repair never guesses a repository from a non-Git compose umbrella. `control_plane_repairs_total{status}` is a status snapshot gauge, while failure-trend alerts use the persisted monotonic `control_plane_repairs_failed_total{status="failed"}` counter.
 
 The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `control_plane.toml`); Docker containers reach it via `host.docker.internal`; it is not exposed to the LAN.
 
