@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 # profile intentionally ships the vendored runtime alongside control_plane so a
 # Windows installation is reproducible, but the vendored tree is not a second
 # authority.  Provider-neutral capability, procedure, qualification, store,
-# and Codex sandbox semantics follow public portable-runtime pin d470624;
+# and Codex sandbox semantics follow public portable-runtime pin 73411d7;
 # private Windows execution-boundary code remains an adapter in control_plane.
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]

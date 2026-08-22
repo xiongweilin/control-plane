@@ -6,6 +6,7 @@ from control_plane.storage import Store
 from portable_runtime.core.models import Run, Work
 from portable_runtime.records.models import EvidenceArtifact
 from portable_runtime.stores.memory import InMemoryStateStore
+from portable_runtime.workflows.completion import CompletionAuthority
 
 
 def test_legacy_terminal_projection_does_not_close_canonical_pair(tmp_path: Path) -> None:
@@ -37,14 +38,12 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
         work = Work(
             id="work_legacy_r2",
             title="repair",
-            status="completed",
-            metadata={"_completion_proof_refs": ["proof-r2"]},
+            status="waiting",
         )
         run = Run(
             id="run_legacy_r2",
             work_id=work.id,
-            status="succeeded",
-            metadata={"_completion_proof_refs": ["proof-r2"]},
+            status="waiting",
         )
         portable.save_record(
             EvidenceArtifact(
@@ -64,9 +63,13 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
                 },
             )
         )
-        with portable.terminal_completion(["proof-r2"], work=work, run=run):
-            portable.save_work(work)
-            portable.save_run(run)
+        portable.save_work(work)
+        portable.save_run(run)
+        CompletionAuthority(portable).authorize(
+            work=work,
+            run=run,
+            verification_refs=["proof-r2"],
+        )
         legacy.attach_portable_store(portable, enable_read=True)
         legacy.create_repair("r2", "fp-r2", "{}")
 
