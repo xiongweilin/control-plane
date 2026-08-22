@@ -34,6 +34,7 @@ from .models import (
     TaskRequest,
 )
 from .notify import Notifier
+from .portable_authority import PortableRuntimeAuthority
 from .runtime import (
     acquire_single_instance,
     bootstrap,
@@ -655,6 +656,41 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 return ApprovalDecisionResponse(
                     accepted=False,
                     message="Canonical verification evidence is missing; complete deterministic verification first",
+                )
+            source_run = portable_runtime.store.get_run(f"run_legacy_{source_repair_id}")
+            if source_run is None:
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Canonical verification Run is missing; refusing promotion",
+                )
+            expected_versions = list(source_metadata.get("subject_version_refs", []))
+            expected_scope = str(source_metadata.get("verification_scope") or source_work.kind)
+            expected_criteria_digest = PortableRuntimeAuthority._verification_criteria_digest(source_work)
+            for candidate_proof in (verification, evidence):
+                proof_metadata = getattr(candidate_proof, "metadata", {})
+                proof_result = proof_metadata.get("verification_result")
+                if (
+                    not isinstance(proof_result, dict)
+                    or proof_result.get("result") != "pass"
+                    or proof_result.get("work_id") != source_work.id
+                    or proof_result.get("run_id") != source_run.id
+                    or proof_result.get("scope") != expected_scope
+                    or proof_result.get("subject_version_refs") != expected_versions
+                    or proof_result.get("criteria_digest") != expected_criteria_digest
+                ):
+                    return ApprovalDecisionResponse(
+                        accepted=False,
+                        message="Canonical verification proof is not bound to Work/Run scope, version, and criteria",
+                    )
+            if (
+                getattr(relation, "subject_ref", None) != evidence.id
+                or getattr(relation, "object_ref", None) != verification.id
+                or getattr(relation, "scope", {}).get("work_id") != source_work.id
+                or getattr(relation, "scope", {}).get("run_id") != source_run.id
+            ):
+                return ApprovalDecisionResponse(
+                    accepted=False,
+                    message="Canonical verification relation is not bound to the source Work/Run",
                 )
             version_ref = f"candidate:{candidate_id}:{candidate['updated_at']}"
             # Official projections require every scope/version proof to

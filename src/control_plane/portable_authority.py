@@ -903,7 +903,15 @@ class PortableRuntimeAuthority:
         verification_refs: list[str] | None = None,
         summary: str = "",
     ) -> None:
-        """Close canonical Work/Run only after deterministic verification."""
+        """Close canonical Work/Run only through typed verification proofs.
+
+        ``verified`` is retained as a compatibility discriminator for the
+        legacy caller, but it is never authority.  A successful finalization
+        must provide durable proof records bound to this exact Work/Run,
+        subject versions, verification scope and acceptance criteria.  The
+        portable ``CompletionAuthority`` owns the terminal Run transition;
+        this adapter only projects that decision to Work and the legacy row.
+        """
 
         work_id = f"work_legacy_{repair_id}"
         run_id = f"run_legacy_{repair_id}"
@@ -917,6 +925,72 @@ class PortableRuntimeAuthority:
             if verification_refs is not None
             else work.metadata.get("verification_refs", [])
         )
+        if not refs:
+            raise ValueError("repair finalization requires durable verification proof refs")
+
+        proof_result = "pass" if verified else "fail"
+        for ref in refs:
+            record = self.runtime.store.get_record(str(ref))
+            relation_getter = getattr(self.runtime.store, "get_relation", None)
+            relation = relation_getter(str(ref)) if callable(relation_getter) else None
+            if record is None and relation is not None:
+                if (
+                    getattr(relation, "relation_type", None) != "validated-under"
+                    or getattr(relation, "scope", {}).get("work_id") != work.id
+                    or getattr(relation, "scope", {}).get("run_id") != run.id
+                ):
+                    raise ValueError(f"repair finalization relation proof {ref!r} is not bound to this Work/Run")
+                continue
+            if record is None:
+                raise ValueError(f"repair finalization proof {ref!r} is not durable")
+            metadata = getattr(record, "metadata", {})
+            result = metadata.get("verification_result") if isinstance(metadata, dict) else None
+            if not isinstance(result, dict) or str(result.get("result", "")).lower() != proof_result:
+                raise ValueError(
+                    f"repair finalization proof {ref!r} does not contain an explicit {proof_result} result"
+                )
+            if str(result.get("work_id", "")) != work.id or str(result.get("run_id", "")) != run.id:
+                raise ValueError(f"repair finalization proof {ref!r} is bound to a different Work/Run")
+            expected_versions = list(work.metadata.get("subject_version_refs", []))
+            actual_versions = result.get("subject_version_refs")
+            if actual_versions != expected_versions:
+                raise ValueError(f"repair finalization proof {ref!r} has an incompatible subject version scope")
+            expected_scope = str(work.metadata.get("verification_scope") or work.kind)
+            if str(result.get("scope", "")) != expected_scope:
+                raise ValueError(f"repair finalization proof {ref!r} has an incompatible verification scope")
+            criteria_digest = self._verification_criteria_digest(work)
+            if str(result.get("criteria_digest", "")) != criteria_digest:
+                raise ValueError(f"repair finalization proof {ref!r} has an incompatible acceptance-criteria scope")
+
+        if verified:
+            # The shared portable authority is the only owner allowed to
+            # transition a Run to ``succeeded``.  It resolves each proof from
+            # the durable semantic store and rejects provider/status hints.
+            from portable_runtime.workflows.completion import CompletionAuthority
+
+            # ``verification_refs`` is a complete provenance bundle (assertion,
+            # evidence and relation).  The portable completion primitive only
+            # consumes durable typed records, so pass the EvidenceArtifact
+            # proof(s) while retaining the complete bundle on Work/Run.
+            completion_refs = [
+                str(ref)
+                for ref in refs
+                if getattr(self.runtime.store.get_record(str(ref)), "record_type", None)
+                == "EvidenceArtifact"
+            ]
+            if not completion_refs:
+                raise ValueError("repair finalization requires a typed EvidenceArtifact proof")
+            CompletionAuthority(self.runtime.store).authorize(
+                work=work,
+                run=run,
+                verification_refs=completion_refs,
+            )
+        else:
+            # A failing typed verification is still a durable terminal fact,
+            # but it is not authorized by the success CompletionAuthority.
+            self.runtime.store.save_run(
+                run.model_copy(update={"status": "failed", "ended_at": now})
+            )
         work_metadata = dict(work.metadata)
         work_metadata.update({"verification_refs": refs, "verification_summary": summary, "verified": verified})
         run_metadata = dict(run.metadata)
@@ -930,15 +1004,27 @@ class PortableRuntimeAuthority:
                 }
             )
         )
+        final_run = self.runtime.store.get_run(run.id)
+        if final_run is None:
+            raise RuntimeError("portable completion authority did not persist the canonical Run")
         self.runtime.store.save_run(
-            run.model_copy(
+            final_run.model_copy(
                 update={
-                    "status": "succeeded" if verified else "failed",
                     "metadata": run_metadata,
                     "ended_at": now,
                 }
             )
         )
+
+    @staticmethod
+    def _verification_criteria_digest(work: Work) -> str:
+        """Return a stable digest for the Work's acceptance criteria."""
+
+        import json
+
+        criteria = work.acceptance_criteria or ["deterministic-verification"]
+        payload = json.dumps(criteria, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def record_verification(
         self,
@@ -957,6 +1043,17 @@ class PortableRuntimeAuthority:
             return []
         token = self._stable_token(f"verification:{repair_id}:{summary}")
         version_refs = list(work.metadata.get("subject_version_refs", []))
+        verification_scope = str(work.metadata.get("verification_scope") or work.kind)
+        criteria_digest = self._verification_criteria_digest(work)
+        verification_result = {
+            "result": "pass" if passed else "fail",
+            "work_id": work.id,
+            "run_id": run.id,
+            "scope": verification_scope,
+            "subject_version_refs": version_refs,
+            "criteria_digest": criteria_digest,
+            "verifier_ref": verifier_ref,
+        }
         verification = self._record(
             BaseRecord(
                 id=f"record_{repair_id}_{token}_verification",
@@ -970,6 +1067,8 @@ class PortableRuntimeAuthority:
                     "subject_version_refs": version_refs,
                     "verifier_ref": verifier_ref,
                     "summary": summary[:4_000],
+                    "verification_result": verification_result,
+                    "proof_kind": "closed-verification",
                 },
             )
         )
@@ -985,6 +1084,8 @@ class PortableRuntimeAuthority:
                     "verifier_ref": verifier_ref,
                     "evidence_refs": list(evidence_refs or []),
                     "summary": summary[:4_000],
+                    "verification_result": verification_result,
+                    "proof_kind": "closed-verification",
                 },
             )
         )
