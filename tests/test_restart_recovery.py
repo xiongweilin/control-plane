@@ -203,7 +203,7 @@ async def test_resume_pending_approval_does_not_reopen_recovering(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_resume_pending_approval_approve_finishes_repair(tmp_path) -> None:
+async def test_resume_pending_approval_approve_fails_closed_without_portable_runtime(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "repos").mkdir(parents=True, exist_ok=True)
     store = Store(config.state_db)
@@ -225,8 +225,8 @@ async def test_resume_pending_approval_approve_finishes_repair(tmp_path) -> None
     await service.approvals.decide(repair_id, "approve")
     await asyncio.wait_for(resume_task, timeout=10)
     row = store.get_repair(repair_id)
-    assert row["status"] == "closed"
-    assert any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
+    assert row["status"] == "failed"
+    assert not any("merge --ff-only" in " ".join(args) for args, _ in executor.calls)
     # approval decision persisted for audit
     assert store.get_approval("repair", repair_id, "approve") is not None
     await service.close()
