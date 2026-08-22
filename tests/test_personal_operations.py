@@ -68,6 +68,31 @@ async def test_personal_git_provider_is_separate_from_codex(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_git_rollback_rejects_unmediated_candidate_branch_deletion(tmp_path: Path) -> None:
+    """The compatibility provider must never delete a persistent branch directly."""
+
+    executor = FakeExecutor()
+    provider = PersonalOperationsProvider(ControlPlaneConfig(), executor)  # type: ignore[arg-type]
+    request = CapabilityRequest(
+        id="req-git-rollback",
+        capability="git.rollback",
+        resource_ref=f"repo:{tmp_path}",
+        actor_ref="control-plane:compatibility",
+        subject_version_refs=["git:abc123"],
+        effect_class="write-local",
+        parameters={"repo": str(tmp_path), "branch": "candidate"},
+    )
+
+    result = await provider.invoke(request, InvocationContext(runtime_id="test"))
+
+    assert result.status == "failed"
+    assert "candidate branch deletion is disabled" in result.message
+    assert executor.calls == []
+    assert result.metadata["mutation"] == "candidate-branch-delete"
+    assert result.metadata["recovery_required"] is True
+
+
+@pytest.mark.asyncio
 async def test_personal_docker_provider_rejects_non_allowlisted_project(tmp_path: Path) -> None:
     executor = FakeExecutor()
     config = ControlPlaneConfig(project_dirs={"dify": str(tmp_path)})

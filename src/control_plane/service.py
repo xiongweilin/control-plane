@@ -2235,7 +2235,10 @@ class RepairService:
             )
             reconciliation_required = await self._rollback(None, repair_id)
             if reconciliation_required:
-                message = "rollback outcome is unknown; reconciliation is required [reconciliation-required]"
+                message = (
+                    "rollback did not complete; reconciliation or owner-authorized recovery is required "
+                    "[reconciliation-required]"
+                )
                 if self.portable_authority is not None:
                     self.portable_authority.mark_reconciliation_required(repair_id, message)
                 self.store.set_repair_status(
@@ -3220,10 +3223,14 @@ class RepairService:
                         instruction=f"rollback candidate branch {branch}",
                     )
                     if result.status != "succeeded":
-                        if result.status == "unknown":
-                            reconciliation_required = True
+                        # A failed or unknown rollback is never evidence that
+                        # the candidate branch was removed.  Keep the repair
+                        # recoverable instead of promoting the legacy row to
+                        # ROLLED_BACK on a refused/blocked mutation.
+                        reconciliation_required = True
                         logger.warning("portable candidate rollback failed for %s: %s", row["id"], result.message)
                 except ToolError:
+                    reconciliation_required = True
                     logger.warning("candidate branch cleanup failed for %s", row["id"])
         resolved_project = self._resolve_project(project)
         if resolved_project in self.config.allowed_auto_projects:
@@ -3241,10 +3248,10 @@ class RepairService:
                     instruction=f"restart allowlisted compose project {resolved_project}",
                 )
                 if result.status != "succeeded":
-                    if result.status == "unknown":
-                        reconciliation_required = True
+                    reconciliation_required = True
                     logger.warning("portable rollback restart failed for project %s: %s", project, result.message)
             except (ToolError, RuntimeError):
+                reconciliation_required = True
                 logger.warning("rollback restart failed for project %s", project)
         return reconciliation_required
 
