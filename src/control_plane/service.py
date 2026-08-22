@@ -26,7 +26,6 @@ from prometheus_client import Counter
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
-    InvocationContext,
     ProviderDescriptor,
     ProviderHealth,
 )
@@ -548,11 +547,13 @@ class RepairService:
         subject_version_refs: list[str] | None = None,
         instruction: str = "",
     ) -> CapabilityResult:
-        """Route Git/Docker effects through the typed personal provider.
+        """Route Git/Docker effects through the portable Runtime authority.
 
-        Production uses the portable Runtime authority. The direct provider
-        fallback exists only for legacy service instances used by compatibility
-        tests and callers that do not construct a Runtime at all.
+        Compatibility service instances that were constructed without a
+        portable Runtime must fail closed.  In particular, they must never
+        call ``PersonalOperationsProvider.invoke``: that provider owns real
+        Git/Docker effects and invoking it here would bypass the Runtime's
+        RealityBoundary, authorization and recovery gates.
         """
 
         if self.portable_authority is not None:
@@ -565,22 +566,21 @@ class RepairService:
                 subject_version_refs=subject_version_refs,
                 instruction=instruction,
             )
-        request = CapabilityRequest(
-            id=f"compat-{repair_id}-{capability.replace('.', '-')}-{uuid.uuid4().hex[:8]}",
-            capability=capability,
-            instruction=instruction or capability,
-            parameters=parameters,
-            resource_ref=resource_ref,
-            subject_version_refs=list(subject_version_refs or []),
-            actor_ref="control-plane:compatibility",
-            effect_class=effect_class,  # type: ignore[arg-type]
-            idempotency_key=f"compat:{repair_id}:{capability}",
-            work_id=repair_id,
-            run_id=self.run_id,
-        )
-        return await self.personal_operations.invoke(
-            request,
-            InvocationContext(runtime_id=self.run_id, work_id=repair_id, run_id=self.run_id),
+        return CapabilityResult(
+            request_id=f"compat-{repair_id}-{capability.replace('.', '-')}",
+            provider_id="",
+            status="unavailable",
+            message=(
+                "legacy personal-operation path is disabled; Git/Docker effects "
+                "require portable Runtime RealityBoundary"
+            ),
+            error={
+                "code": "LegacyRoutingDisabled",
+                "message": (
+                    "migrate this compatibility caller to a portable Runtime; "
+                    "the pre-V2 personal-operation path cannot invoke providers"
+                ),
+            },
         )
 
     async def _invoke_codex_via_capability(

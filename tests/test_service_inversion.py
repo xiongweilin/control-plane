@@ -201,6 +201,55 @@ async def test_legacy_repair_flow_fails_closed_without_portable_runtime(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "capability",
+    ["git.merge", "git.push", "git.rollback", "docker.restart", "docker.compose.up"],
+)
+async def test_personal_effect_compatibility_path_never_invokes_provider(
+    tmp_path, monkeypatch, capability: str
+) -> None:
+    """All personal Git/Docker effects fail closed without Portable Runtime."""
+
+    config = _config(tmp_path)
+    store = Store(config.state_db)
+    service = RepairService(
+        config,
+        store,
+        Budget(store, 100, 8),
+        FakeCodexRunner(),
+        ApprovalManager(),
+        Notifier(config),
+        executor=FakeExecutor(),
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        ),
+    )
+    invoked = 0
+
+    async def forbidden_invoke(*args, **kwargs):
+        nonlocal invoked
+        invoked += 1
+        raise AssertionError("personal provider must not be invoked without Portable Runtime")
+
+    monkeypatch.setattr(service.personal_operations, "invoke", forbidden_invoke)
+
+    result = await service._invoke_personal_operation(
+        repair_id="repair-compatibility",
+        capability=capability,
+        resource_ref="repo:dify",
+        parameters={"repo": str(tmp_path / "repos" / "dify")},
+        effect_class="write-local",
+    )
+
+    assert result.status == "unavailable"
+    assert result.error is not None
+    assert result.error["code"] == "LegacyRoutingDisabled"
+    assert invoked == 0
+    await service.close()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_verifier_legacy_facade_routes_via_capabilities(tmp_path) -> None:
     """Verifier facade now calls six verify.* capabilities, output remains Evidence."""
     # Build a verifier capability service with fake providers
