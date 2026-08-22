@@ -2,15 +2,14 @@
 
 The portable runtime owns semantic authority and the typed personal providers
 own business-visible Git effects.  A few operations are execution scaffolding
-needed to keep an Agent session isolated (worktree creation/removal, branch
-restoration, and stale candidate cleanup).  They still mutate the local Git
-state, so they live behind this small, fail-closed boundary rather than being
-scattered through orchestration code.
+needed to keep an Agent session isolated (worktree creation/removal and branch
+restoration).  Candidate-branch cleanup is deliberately advisory-only: stale
+enumeration is safe, but deletion requires a separate owner-authorized
+recovery workflow and is rejected by this boundary.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from .config import ControlPlaneConfig
@@ -98,33 +97,21 @@ class GitPhysicalBoundary:
         branch: str,
         reasons: list[str],
     ) -> None:
-        """Delete a revalidated stale candidate branch behind a physical guard."""
+        """Reject autonomous candidate deletion.
 
-        canonical = self.canonical_repo(repo)
-        prefix = self.config.candidate_branch_prefix
-        suffix = branch[len(prefix) :] if branch.startswith(prefix) else ""
-        if not suffix or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", suffix):
-            raise ToolError(f"candidate branch is outside the allowlist: {branch}")
-        if not reasons:
-            raise ToolError(f"candidate branch has no stale reason: {branch}")
-        current = await self.executor.run(
-            ["git", "-C", canonical, "branch", "--show-current"],
-            timeout=30,
-        )
-        if current.strip() == branch:
-            raise ToolError(f"refusing to delete the checked-out candidate branch: {branch}")
-        await self.assert_clean(canonical)
-        worktrees = await self.executor.run(
-            ["git", "-C", canonical, "worktree", "list", "--porcelain"],
-            timeout=60,
-        )
-        if any(line.strip() == f"branch refs/heads/{branch}" for line in worktrees.splitlines()):
-            raise ToolError(f"refusing to delete a branch used by another worktree: {branch}")
-        await self.executor.run(
-            ["git", "-C", canonical, "show-ref", "--verify", f"refs/heads/{branch}"],
-            timeout=30,
-        )
-        await self.executor.run(
-            ["git", "-C", canonical, "branch", "-D", branch],
-            timeout=60,
+        A stale branch is a recovery/retention fact, not proof that deletion is
+        authorized.  The old implementation performed a destructive ``git
+        branch -D`` after local shape checks, which still let CLI ``--apply``
+        and startup ``cleanup_policy=auto`` erase a branch without an owner
+        decision or durable recovery record.  Candidate cleanup is therefore
+        advisory-only until a separate owner-authorized recovery workflow is
+        implemented.  Keeping the method as an explicit rejection preserves a
+        narrow physical boundary for callers and makes accidental re-enablement
+        fail closed.
+        """
+
+        del repo, branch, reasons
+        raise ToolError(
+            "candidate branch deletion is disabled; enumerate the stale branch "
+            "and use an owner-authorized recovery workflow with durable evidence"
         )

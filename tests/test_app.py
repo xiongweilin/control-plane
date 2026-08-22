@@ -9,6 +9,7 @@ from control_plane.app import create_app
 from control_plane.config import ControlPlaneConfig
 from control_plane.models import AlertResponse
 from control_plane.storage import Store
+from control_plane.verifier import CheckResult, VerificationReport
 
 
 def _config(tmp_path) -> ControlPlaneConfig:
@@ -146,7 +147,10 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
     )
     verification_refs = authority.record_verification(
         "repair-1",
-        passed=True,
+        report=VerificationReport(
+            repair_id="repair-1",
+            checks=[CheckResult("container_status", True, "container verifier passed", "container_status")],
+        ),
         summary="container verifier passed",
         evidence_refs=["container_status"],
     )
@@ -171,6 +175,19 @@ def test_candidate_promotion_requires_approval_record(tmp_path) -> None:
     assert store.get_candidate("cand-1")["status"] == "official"
     portable_store = app.state.portable_runtime.store
     assert portable_store.list_authorizations()
+    projection = portable_store.get_knowledge_projection("knowledge_candidate_cand-1")
+    assert projection is not None and projection.lifecycle_status == "official"
+    assert projection.epistemic_judgment_refs
+    judgment = portable_store.get_record(projection.epistemic_judgment_refs[0])
+    assert judgment is not None
+    assert judgment.metadata.get("epistemic_role") == "judgment"
+    assert judgment.metadata.get("judgment_for_refs") == projection.current_assertion_refs
+    derivations = [
+        record
+        for record in portable_store.list_records("Derivation")
+        if record.id.startswith("record_candidate_cand-1_derivation")
+    ]
+    assert derivations and derivations[0].conclusion_ref in projection.current_assertion_refs
     assert all(
         grant.principal_ref == "human:configured-owner"
         for grant in portable_store.list_authorizations()

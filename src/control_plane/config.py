@@ -130,7 +130,9 @@ class ControlPlaneConfig:
     # ---- candidate branches (batch2 item 9) ----
     candidate_branch_prefix: str = "fix/control-plane-"
     candidate_retention_days: int = 14
-    candidate_cleanup_policy: str = "manual"  # manual | auto; default keeps branches
+    # ``auto`` is a legacy compatibility value; startup scans candidates but
+    # deletion is always advisory-only and fail-closed.
+    candidate_cleanup_policy: str = "manual"  # manual | auto(advisory); default keeps branches
 
     # ---- dirty worktree policy (batch2 item 8) ----
     dirty_worktree_policy: str = "reject"  # reject | isolate

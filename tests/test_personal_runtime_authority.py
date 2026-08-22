@@ -12,6 +12,7 @@ from control_plane.notify import Notifier
 from control_plane.portable_authority import PortableRuntimeAuthority
 from control_plane.service import RepairService
 from control_plane.storage import Store
+from control_plane.verifier import CheckResult, VerificationReport
 from portable_runtime.core.boundary import RealityBoundary
 from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult, ProviderDescriptor, ProviderHealth
 from portable_runtime.core.capability_contract import (
@@ -108,7 +109,10 @@ async def test_personal_authority_uses_full_reality_boundary_and_versioned_grant
     assert runtime.store.get_run("run_legacy_repair-authority-1").status == "waiting"
     verification_refs = authority.record_verification(
         "repair-authority-1",
-        passed=True,
+        report=VerificationReport(
+            repair_id="repair-authority-1",
+            checks=[CheckResult("deterministic", True, "verification passed", "artifact:portable-test")],
+        ),
         summary="verification passed",
         evidence_refs=["artifact:portable-test"],
     )
@@ -148,6 +152,20 @@ async def test_finalize_repair_rejects_bare_verified_flag(tmp_path: Path) -> Non
             "repair-authority-bare-proof",
             verified=True,
             summary="provider said it passed",
+        )
+    with pytest.raises(ValueError, match="typed VerificationReport"):
+        authority.record_verification(
+            "repair-authority-bare-proof",
+            passed=True,
+            summary="provider said it passed",
+        )
+    with pytest.raises(ValueError, match="durable evidence references"):
+        authority.record_verification(
+            "repair-authority-bare-proof",
+            report=VerificationReport(
+                repair_id="repair-authority-bare-proof",
+                checks=[CheckResult("provider_status", True, "provider said it passed")],
+            ),
         )
     work = runtime.store.get_work("work_legacy_repair-authority-bare-proof")
     run = runtime.store.get_run("run_legacy_repair-authority-bare-proof")
