@@ -664,7 +664,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     message="Canonical verification Run is missing; refusing promotion",
                 )
             expected_versions = list(source_metadata.get("subject_version_refs", []))
-            expected_scope = str(source_metadata.get("verification_scope") or source_work.kind)
+            expected_scope = source_metadata.get("verification_scope")
+            if not isinstance(expected_scope, dict):
+                expected_scope = {"work_kind": source_work.kind, "workflow_id": source_run.workflow_id}
+            expected_work_version = source_metadata.get("work_version", source_metadata.get("task_version", 1))
+            expected_acceptance_criteria = list(source_work.acceptance_criteria)
             expected_criteria_digest = PortableRuntimeAuthority._verification_criteria_digest(source_work)
             for candidate_proof in (verification, evidence):
                 proof_metadata = getattr(candidate_proof, "metadata", {})
@@ -676,6 +680,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     or proof_result.get("run_id") != source_run.id
                     or proof_result.get("scope") != expected_scope
                     or proof_result.get("subject_version_refs") != expected_versions
+                    or proof_result.get("work_version") != expected_work_version
+                    or proof_result.get("acceptance_criteria") != expected_acceptance_criteria
                     or proof_result.get("criteria_digest") != expected_criteria_digest
                 ):
                     return ApprovalDecisionResponse(
