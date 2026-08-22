@@ -157,19 +157,19 @@ class _LegacyCodexRunnerAdapter:
 
 
 class _LegacyRoutingBoundary:
-    """Legacy compat seam for the deprecated repair path (S45 / ADR-0013).
+    """Fail-closed placeholder for the removed legacy routing seam.
 
-    The portable V2 CapabilityService routes every invocation through the
-    RealityBoundary governance gates (fencing, procedure, authorization,
-    effect contracts).  The legacy ``control_plane`` repair flow predates
-    those gates and keeps its own lifecycle (repairs/verifier/approvals), so
-    it routes through this seam with the pre-V2 semantics: registry
-    discovery, health filter, deterministic routing, then provider
-    invocation.
+    The old implementation selected a provider and called ``invoke`` without
+    the portable runtime's fencing, procedure, authorization, effect-contract
+    or result-projection gates.  Keeping that implementation constructible
+    would leave an authority bypass available to compatibility callers.  The
+    class remains as a small shape-compatible boundary so old dependency
+    injection code fails with a typed result instead of taking a side effect.
 
-    Only the deprecated legacy path uses this boundary.  The portable
-    Runtime (dual-write Work/Run, workflows) always uses the full
-    RealityBoundary, keeping the portable core authoritative.
+    Production execution is available only through ``Runtime.capabilities``
+    and its ``RealityBoundary``.  A caller that still has this compatibility
+    service must migrate to a real ``Runtime``; it cannot opt back into the
+    removed pre-V2 semantics.
     """
 
     def __init__(
@@ -190,41 +190,22 @@ class _LegacyRoutingBoundary:
         *,
         capability_service: Any | None = None,
     ) -> CapabilityResult:
-        try:
-            descriptors = self.registry.descriptors_for(
-                request.capability, request.excluded_provider_ids
-            )
-            healthy: list[ProviderDescriptor] = []
-            for descriptor in descriptors:
-                with suppress(Exception):
-                    health = await self.registry.health(descriptor.id)
-                    if health.available:
-                        healthy.append(descriptor)
-            selected = await self.routing.select(request, healthy)
-            if selected is None:
-                return CapabilityResult(
-                    request_id=request.id,
-                    provider_id="",
-                    status="failed",
-                    error={
-                        "type": "no_eligible_provider",
-                        "message": f"no eligible provider for {request.capability}",
-                    },
-                )
-            provider = self.registry.get(selected.id)
-            context = InvocationContext(
-                runtime_id=self.runtime_id,
-                work_id=request.work_id,
-                run_id=request.run_id,
-            )
-            return await provider.invoke(request, context)
-        except Exception as exc:
-            return CapabilityResult(
-                request_id=request.id,
-                provider_id="",
-                status="failed",
-                error={"type": type(exc).__name__, "message": str(exc)[:2000]},
-            )
+        return CapabilityResult(
+            request_id=request.id,
+            provider_id="",
+            status="unavailable",
+            message=(
+                "legacy routing boundary is disabled; provider invocation "
+                "requires portable Runtime RealityBoundary"
+            ),
+            error={
+                "code": "LegacyRoutingDisabled",
+                "message": (
+                    "migrate this compatibility caller to a portable Runtime; "
+                    "the pre-V2 routing seam cannot invoke providers"
+                ),
+            },
+        )
 
 
 def _build_capability_service_for_runner(runner, provider_id="codex-legacy-adapter"):
