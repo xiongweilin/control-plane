@@ -214,8 +214,9 @@ def test_steps_endpoint():
 # /v1/knowledge negative filtering
 def test_knowledge_and_negative():
     client, _runtime, store = _client()
-    # positive knowledge
-    k1 = KnowledgeItem(kind="doc", title="positive", content_ref="ref1", status="official", evidence_refs=["ev1"], metadata={})
+    # Positive legacy compatibility item (legacy official promotion is now
+    # rejected; canonical KnowledgeProjection owns official status).
+    k1 = KnowledgeItem(kind="doc", title="positive", content_ref="ref1", status="candidate", evidence_refs=["ev1"], metadata={})
     k2 = KnowledgeItem(kind="doc", title="negative with counterexample", content_ref="ref2", status="candidate", evidence_refs=[], metadata={"counterexample_refs": ["counter1"]})
     k3 = KnowledgeItem(kind="doc", title="another negative", content_ref="ref3", status="candidate", metadata={"counterexample_refs": ["c2"]})
     store.save_knowledge(k1)
