@@ -735,6 +735,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         message="Portable candidate version record cannot be persisted",
                     )
                 save_record(version_record)
+            projection_id = f"knowledge_candidate_{candidate_id}"
             decision, grant = record_human_approval(
                 portable_runtime.store,
                 # The API key authenticates the configured owner.  ``decided_by``
@@ -743,7 +744,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 principal_ref=canonical_human_principal(cfg.owner_principal),
                 grantee_ref=f"control-plane:candidate:{candidate_id}",
                 allowed_capabilities=["knowledge.promote"],
-                subject_version_refs=[version_ref],
+                subject_version_refs=[projection_id, f"{projection_id}:v1"],
                 work_id=f"work_legacy_{source_repair_id}",
                 resource_scope=[f"candidate:{candidate_id}"],
                 ttl_seconds=3600,
@@ -758,7 +759,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 capability="knowledge.promote",
                 actor_ref=f"control-plane:candidate:{candidate_id}",
                 resource_ref=f"candidate:{candidate_id}",
-                subject_version_refs=[version_ref],
+                subject_version_refs=[projection_id, f"{projection_id}:v1"],
                 effect_class="write-local",
             )
             if validate_grant(grant) or not is_authorized_for(promotion_request, grant):
@@ -794,7 +795,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         message="Portable approval assertion cannot be persisted",
                     )
                 save_record(approval_assertion)
-            projection_id = f"knowledge_candidate_{candidate_id}"
             projection_getter = getattr(portable_runtime.store, "get_knowledge_projection", None)
             projection = projection_getter(projection_id) if callable(projection_getter) else None
             if projection is None:
@@ -819,6 +819,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         "legacy_candidate_id": candidate_id,
                         "source_repair_id": source_repair_id,
                         "tool_sequence": str(candidate["tool_sequence"]),
+                        "promotion_capability": "knowledge.promote",
+                        "actor_ref": f"control-plane:candidate:{candidate_id}",
+                        "resource_ref": f"candidate:{candidate_id}",
+                        "effect_class": "write-local",
                     },
                 )
             try:
