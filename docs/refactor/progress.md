@@ -72,13 +72,13 @@
   - `interactions/feishu/provider.py`：同 `S7487` 改为 `await asyncio.create_subprocess_exec`。
 - **Sonar 指标（2026-08-20T10:29:43Z 分析 `f718883e`）**：`coverage 90.9%` / `new_coverage 86.9%` / `bugs 0` / `vulnerabilities 0` / `code_smells 174` / `duplicated 2.1%`；Quality Gate 已 **OK**（`new_coverage 86.9%` ≥ 80，`coverage 90.9%`），此前 77.1 的缺口已通过 `sonar.coverage.exclusions` 排除低覆盖 wrapper（`policies`/`process`/`compat` 等）补齐，`new_reliability` 与 `new_security` 已从 ERROR 恢复为 OK。
 - **覆盖率说明**：`sonar.coverage.exclusions` 已排除 `src/control_plane/__main__.py`、`src/portable_runtime/config.py`/`runtime.py`/`core/*` 等纯模型/接口文件（`line-rate 0`），但 `api/cli`、`providers/codex`、`providers/verifiers` 等执行类仍计入，导致 `new_coverage` 略低于阈值。后续可通过为 `UppercaseProvider`/`ReviewWorkflow` 补充单测或为 `provider`/`verifier` 增加集成覆盖使 `new_coverage` 超 80，或在 SonarCloud 上为本项目创建阈值 75 的自定义 Quality Gate。
-- **GitHub CI**：当前 `ratiolin/control-plane` 未配置 `SONAR_TOKEN`，其 main-only `sonarcloud` Job 在无 secret 时按设计跳过；实际 SonarCloud 扫描由已配置 secret 的 public `ratiolin/portable-runtime` main CI 负责。私库本地扫描只使用 OS Keychain 登录态，凭证值不写入文档或日志。
+- **GitHub CI**：当前 `xiongweilin/control-plane` 未配置 `SONAR_TOKEN`，其 main-only `sonarcloud` Job 在无 secret 时按设计跳过；实际 SonarCloud 扫描由已配置 secret 的 public `xiongweilin/portable-runtime` main CI 负责。私库本地扫描只使用 OS Keychain 登录态，凭证值不写入文档或日志。
 - **待收口**：`new_coverage 77.1 → 80` 的 2.9 点缺口；`sonar.coverage.exclusions` 当前已较激进，不建议再扩大，建议以新增 `test_portable_runtime` 单测覆盖 `CodexProvider`/`Verifier` 提升。
 
 
 ## 2026-08-21: initial portable_runtime sync to 4de0284 (strict enforcement P1/P2)
 
-- 从 `ratiolin/portable-runtime` HEAD `4de0284` 全量同步 vendored `src/portable_runtime`（92 tracked 文件零偏差）；仅工具配置对齐（ruff per-file-ignores / mypy overrides）。
+- 从 `xiongweilin/portable-runtime` HEAD `4de0284` 全量同步 vendored `src/portable_runtime`（92 tracked 文件零偏差）；仅工具配置对齐（ruff per-file-ignores / mypy overrides）。
 - legacy 修复路径新增 `_LegacyRoutingBoundary` compat seam（保持 V2 前路由语义）；portable Runtime 路径保留完整 RealityBoundary。
 - `control_plane.tools` 补 `check_container_status` / `check_logs` 兼容函数（portable verifier fallback 导入契约）。
 - 门禁：ruff / mypy src / check_portable_core_imports 全绿；pytest 231 passed；coverage 75%（baseline 74.0）。
@@ -86,7 +86,7 @@
 
 ## 2026-08-21: strict runtime sync and capability sandbox closure
 
-- `src/portable_runtime` now follows `ratiolin/portable-runtime@6789a96`, adding the current Boundary stages/fencing, graph validation, authorization compatibility, reliability policy separation and version-axis cleanup.
+- `src/portable_runtime` now follows `xiongweilin/portable-runtime@6789a96`, adding the current Boundary stages/fencing, graph validation, authorization compatibility, reliability policy separation and version-axis cleanup.
 - Added upstream conformance coverage to the private profile: the full suite is now 480 passed.
 - Codex execution is physically capability-scoped: read/reason/diff capabilities use `read-only`; candidate edit/test capabilities use `workspace-write`; unknown capabilities fail closed. The legacy repair bridge now requests `code.edit` and passes the same ceiling to `CodexRunner` when supported.
 - Candidate promotion now requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource before changing the legacy playbook status.

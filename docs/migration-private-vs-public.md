@@ -1,6 +1,6 @@
 # Private vs Public
 
-Private repo `ratiolin/control-plane` and public library `ratiolin/portable-runtime` share the same `portable_runtime` core. Difference is private info only.
+Private repo `xiongweilin/control-plane` and public library `xiongweilin/portable-runtime` share the same `portable_runtime` core. Difference is private info only.
 
 ## Difference
 

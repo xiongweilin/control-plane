@@ -23,7 +23,7 @@ def _pin(root: Path, digest: str) -> None:
     (root / "portable-runtime-pin.json").write_text(
         json.dumps(
             {
-                "repository": "ratiolin/portable-runtime",
+                "repository": "xiongweilin/portable-runtime",
                 "commit": PIN,
                 "scope": "src/portable_runtime",
                 "tree_algorithm": "sha256-path-and-content-v1",
