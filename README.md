@@ -3,7 +3,7 @@
 Personal Platform Runtime Profile for `portable-runtime`. The repository
 keeps the Windows/Feishu/Prometheus integration and the legacy HTTP/CLI
 compatibility surface, while the portable Work/Run/Provider/Workflow runtime
-is vendored from `ratiolin/portable-runtime`.
+is vendored from `xiongweilin/portable-runtime`.
 
 ## Runtime identity
 
@@ -21,7 +21,7 @@ capability, procedure-profile, qualification, store, and Codex sandbox
 semantics are synchronized to public pin `2dae8b9`; the remaining private
 provider difference is the Windows execution boundary adapter.
 
-[![CI](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/ratiolin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
+[![CI](https://github.com/xiongweilin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/xiongweilin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 
 
 ## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)

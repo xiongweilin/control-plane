@@ -28,7 +28,7 @@ class FakePushExecutor:
         self.env_calls.append(env)
         joined = " ".join(args)
         if "remote get-url" in joined:
-            return "git@github.com:ratiolin/control-plane.git"
+            return "git@github.com:xiongweilin/control-plane.git"
         if "push" in joined:
             if self.fail_times > 0:
                 self.fail_times -= 1
@@ -62,7 +62,7 @@ async def test_push_falls_back_to_ssh_443() -> None:
     assert "ssh.github.com:443" in detail
     assert len(executor.calls) == 3  # push + get-url + fallback push
     fallback_call = executor.calls[-1][0]
-    assert "ssh://git@ssh.github.com:443/ratiolin/control-plane.git" in " ".join(fallback_call)
+    assert "ssh://git@ssh.github.com:443/xiongweilin/control-plane.git" in " ".join(fallback_call)
     env = executor.env_calls[-1]
     assert env is not None
     assert "GIT_SSH_COMMAND" in env
@@ -96,9 +96,9 @@ async def test_push_fallback_disabled() -> None:
 
 
 def test_remote_path_parsing() -> None:
-    assert _remote_path_from_url("git@github.com:ratiolin/control-plane.git") == "ratiolin/control-plane"
-    assert _remote_path_from_url("https://github.com/ratiolin/control-plane.git") == "ratiolin/control-plane"
-    assert _remote_path_from_url("https://github.com/ratiolin/control-plane") == "ratiolin/control-plane"
+    assert _remote_path_from_url("git@github.com:xiongweilin/control-plane.git") == "xiongweilin/control-plane"
+    assert _remote_path_from_url("https://github.com/xiongweilin/control-plane.git") == "xiongweilin/control-plane"
+    assert _remote_path_from_url("https://github.com/xiongweilin/control-plane") == "xiongweilin/control-plane"
     assert _remote_path_from_url("not a url") == ""
 
 

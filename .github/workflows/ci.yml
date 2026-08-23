@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           pin="$(python -c 'import json; print(json.load(open("portable-runtime-pin.json", encoding="utf-8"))["commit"])')"
-          git clone --filter=blob:none --no-checkout https://github.com/ratiolin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
           git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin "$pin"
           git -C "$RUNNER_TEMP/portable-runtime" checkout --detach "$pin"
           uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
