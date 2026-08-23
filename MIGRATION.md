@@ -5,9 +5,9 @@
 This is a deliberate two-project architecture, not a plan to archive
 `control-plane`:
 
-- Public `ratiolin/portable-runtime` owns the provider-neutral Work/Run,
+- Public `xiongweilin/portable-runtime` owns the provider-neutral Work/Run,
   capability, authorization, reliability and `RealityBoundary` semantics.
-- Private `ratiolin/control-plane` vendors that runtime as its base and adds
+- Private `xiongweilin/control-plane` vendors that runtime as its base and adds
   the personal Windows, Feishu, Prometheus, Alertmanager, Codex and legacy HTTP
   integration surface.
 - `python -m control_plane` remains the private production entrypoint.
@@ -73,7 +73,7 @@ architecture decision.
 
 The provider-neutral procedure floors, explicit capability contracts,
 qualification Decision lookup, typed store access, and Codex sandbox mapping
-are now present in public `ratiolin/portable-runtime` at `2dae8b9`. The private
+are now present in public `xiongweilin/portable-runtime` at `2dae8b9`. The private
 profile intentionally retains only the detached worktree and Windows
 credential/Docker environment boundary, which depends on this profile's
 filesystem and deployment policy and must not be moved into the public base.
