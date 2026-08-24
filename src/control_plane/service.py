@@ -36,6 +36,7 @@ from .advisories import fetch_security_advisories
 from .alerts import alert_fingerprint, fingerprint_from_labels, fingerprint_pattern
 from .approvals import ApprovalManager
 from .budget import Budget
+from .closure_authority import ClosureAuthority, RollbackExecutionReceipt
 from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionResult
 from .config import PROJECT_ROOT, ControlPlaneConfig, canonical_human_principal
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
@@ -260,6 +261,7 @@ class RepairService:
         # fallback never bypasses the production RealityBoundary.
         self.personal_operations = PersonalOperationsProvider(config, self.executor)
         self.portable_authority = None
+        self.closure_authority: ClosureAuthority | None = None
         if hasattr(self.executor, "attach_store"):
             self.executor.attach_store(store)
         if agent is not None and hasattr(agent, "attach_store"):
@@ -275,6 +277,7 @@ class RepairService:
                 legacy_store=store,
                 version_resolver=self._resolve_git_version_for_authority,
             )
+            self.closure_authority = ClosureAuthority(store, portable_runtime.store)
             self.capability_service = portable_runtime.capabilities
             self._provider_registry = portable_runtime.registry
         # Compatibility bridge: build CapabilityService if not supplied.
@@ -1557,7 +1560,7 @@ class RepairService:
         alert: Alert,
         proposal: dict[str, Any],
     ) -> None:
-        """Verify, settle candidate evidence and close a repaired alert."""
+        """Verify, establish authoritative closure, then run ancillary learning."""
         try:
             report = await asyncio.wait_for(
                 self._verify(self._tool_context(repair_id), repair_id, alert),
@@ -1570,41 +1573,52 @@ class RepairService:
             ) from exc
         if not report.all_passed:
             raise RuntimeError(f"Verification failed:\n{report.summary}")
-        if self.portable_authority is not None:
-            verification_refs = self.portable_authority.record_verification(
-                repair_id,
-                report=report,
-                summary=report.summary,
-                evidence_refs=[check.evidence_ref for check in report.checks if check.evidence_ref],
-            )
-            self.portable_authority.finalize_repair(
-                repair_id,
-                verified=True,
-                verification_refs=verification_refs,
-                summary=report.summary,
-            )
+        if self.portable_authority is None:
+            raise RuntimeError("successful repair requires portable completion authority")
+        verification_refs = self.portable_authority.record_verification(
+            repair_id,
+            report=report,
+            summary=report.summary,
+            evidence_refs=[check.evidence_ref for check in report.checks if check.evidence_ref],
+        )
+        self.portable_authority.finalize_repair(
+            repair_id,
+            verified=True,
+            verification_refs=verification_refs,
+            summary=report.summary,
+        )
         self._transition(repair_id, RepairState.VERIFIED)
-        await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
-        if self._alert_is_firing(fingerprint):
-            await self._create_candidate(self._tool_context(repair_id), repair_id, fingerprint, alert)
-        else:
-            await self._notify(
-                "info",
-                "告警已恢复，跳过候选沉淀",
-                f"repair_id={repair_id}\n告警在修复完成前已恢复，不沉淀候选经验。",
-            )
+        if self.closure_authority is None:
+            raise RuntimeError("successful repair requires ClosureAuthority")
+        self.closure_authority.close_restored(repair_id)
+
         branch = proposal.get("branch")
         rollback = (
             f"\n回滚：切回 main 并删除分支 {branch}"
             if branch and proposal.get("code_changed")
             else ""
         )
-        await self._notify(
-            "info",
-            f"修复完成：{alert.labels.get('alertname', 'unknown')}",
-            f"repair_id={repair_id}\n{report.summary}{rollback}",
-        )
-        self._transition(repair_id, RepairState.CLOSED, finished_at=int(time.time()), result=report.summary)
+        try:
+            await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
+            await self._notify(
+                "info",
+                f"修复完成：{alert.labels.get('alertname', 'unknown')}",
+                f"repair_id={repair_id}\n{report.summary}{rollback}",
+            )
+        except Exception:
+            logger.exception("completion notification failed after authoritative closure: %s", repair_id)
+
+        try:
+            if self._alert_is_firing(fingerprint):
+                await self._create_candidate(self._tool_context(repair_id), repair_id, fingerprint, alert)
+            else:
+                await self._notify(
+                    "info",
+                    "告警已恢复，跳过候选沉淀",
+                    f"repair_id={repair_id}\n告警在修复完成前已恢复，不沉淀候选经验。",
+                )
+        except Exception:
+            logger.exception("candidate sedimentation failed after authoritative closure: %s", repair_id)
 
     def _tool_context(self, repair_id: str) -> ToolContext:
         return ToolContext(
@@ -2284,8 +2298,8 @@ class RepairService:
                 action="rollback",
                 note=note,
             )
-            reconciliation_required = await self._rollback(None, repair_id)
-            if reconciliation_required:
+            receipts = await self._rollback(None, repair_id)
+            if not receipts or any(receipt.status != "succeeded" for receipt in receipts):
                 message = (
                     "rollback did not complete; reconciliation or owner-authorized recovery is required "
                     "[reconciliation-required]"
@@ -2300,16 +2314,23 @@ class RepairService:
                 )
                 await self._notify("warning", "回滚结果待确认", f"repair_id={repair_id}\n{message}")
                 raise RepairRejectedError()
-            self.store.set_repair_status(repair_id, RepairState.ROLLED_BACK.value, finished_at=int(time.time()))
+            if self.closure_authority is None:
+                raise RuntimeError("rollback disposition requires ClosureAuthority")
+            self.closure_authority.record_rolled_back(repair_id, receipts)
             await self._notify("warning", "修复已回滚", f"repair_id={repair_id}")
             raise RepairRejectedError()
         else:
-            self.store.set_repair_status(
+            await self._record_canonical_human_approval(
                 repair_id,
-                RepairState.CLOSED.value,
-                finished_at=int(time.time()),
-                result="rejected",
+                decided_by=decided_by,
+                principal_ref=self.config.owner_principal,
+                principal_source="control-plane-api-key",
+                action="reject",
+                note=note,
             )
+            if self.closure_authority is None:
+                raise RuntimeError("rejection disposition requires ClosureAuthority")
+            self.closure_authority.close_rejected(repair_id)
             await self._notify("info", "修复已被拒绝", f"repair_id={repair_id}")
             raise RepairRejectedError()
         write_evidence(
@@ -2613,13 +2634,9 @@ class RepairService:
         # process stopped.  We never infer success from APPLIED alone.
         if payload.get("kind") == "task":
             if self._task_result_already_verified(repair_id):
-                task_result = self._canonical_verification_summary(repair_id)
-                self.store.set_repair_status(
-                    repair_id,
-                    RepairState.CLOSED.value,
-                    finished_at=int(time.time()),
-                    result=task_result or "task result verified",
-                )
+                if self.closure_authority is None:
+                    raise RuntimeError("verified task recovery requires ClosureAuthority")
+                self.closure_authority.close_restored(repair_id)
             else:
                 self._keep_resumed_repair_recovering(
                     repair_id,
@@ -3259,8 +3276,10 @@ class RepairService:
             return True
         return int(time.time()) - last >= ttl
 
-    async def _rollback(self, ctx: ToolContext | None, repair_id: str) -> bool:
-        reconciliation_required = False
+    async def _rollback(
+        self, ctx: ToolContext | None, repair_id: str
+    ) -> list[RollbackExecutionReceipt]:
+        receipts: list[RollbackExecutionReceipt] = []
         try:
             repair_row = self.store.get_repair(repair_id)
             payload = json.loads(str(repair_row["payload_json"]) if repair_row is not None else "{}")
@@ -3268,37 +3287,42 @@ class RepairService:
         except (json.JSONDecodeError, TypeError):
             project = ""
         for row in reversed(self.store.list_actions(repair_id)):
-            tool = row["tool"]
-            if tool == "codex_agent":
-                after = json.loads(row["after_json"]) if row["after_json"] else {}
-                repo = row["target"]
-                branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
-                try:
-                    version = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
-                    result = await self._invoke_personal_operation(
-                        repair_id=repair_id,
+            if row["tool"] != "codex_agent":
+                continue
+            after = json.loads(row["after_json"]) if row["after_json"] else {}
+            repo = row["target"]
+            branch = after.get("branch", f"{self.config.candidate_branch_prefix}{repair_id}")
+            try:
+                version = (
+                    await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)
+                ).strip()
+                result = await self._invoke_personal_operation(
+                    repair_id=repair_id,
+                    capability="git.rollback",
+                    resource_ref=f"repo:{Path(repo).resolve()}",
+                    parameters={"repo": repo, "branch": branch},
+                    effect_class="write-local",
+                    subject_version_refs=[f"git:{version}"],
+                    instruction=f"rollback candidate branch {branch}",
+                )
+                receipts.append(
+                    RollbackExecutionReceipt(
                         capability="git.rollback",
-                        resource_ref=f"repo:{Path(repo).resolve()}",
-                        parameters={"repo": repo, "branch": branch},
-                        effect_class="write-local",
-                        subject_version_refs=[f"git:{version}"],
-                        instruction=f"rollback candidate branch {branch}",
+                        request_id=result.request_id,
+                        provider_id=result.provider_id,
+                        status=result.status,
                     )
-                    if result.status != "succeeded":
-                        # A failed or unknown rollback is never evidence that
-                        # the candidate branch was removed.  Keep the repair
-                        # recoverable instead of promoting the legacy row to
-                        # ROLLED_BACK on a refused/blocked mutation.
-                        reconciliation_required = True
-                        logger.warning("portable candidate rollback failed for %s: %s", row["id"], result.message)
-                except ToolError:
-                    reconciliation_required = True
-                    logger.warning("candidate branch cleanup failed for %s", row["id"])
+                )
+                if result.status != "succeeded":
+                    logger.warning("portable candidate rollback failed for %s: %s", row["id"], result.message)
+            except ToolError:
+                receipts.append(RollbackExecutionReceipt("git.rollback", "", "", "failed"))
+                logger.warning("candidate branch cleanup failed for %s", row["id"])
         resolved_project = self._resolve_project(project)
         if resolved_project in self.config.allowed_auto_projects:
             try:
                 project_dir = self.config.project_dirs.get(
-                    resolved_project, f"D:\\infrastructure\\compose\\{resolved_project}"
+                    resolved_project, f"D:\infrastructure\compose\{resolved_project}"
                 )
                 result = await self._invoke_personal_operation(
                     repair_id=repair_id,
@@ -3309,13 +3333,20 @@ class RepairService:
                     subject_version_refs=[f"repair:{repair_id}"],
                     instruction=f"restart allowlisted compose project {resolved_project}",
                 )
+                receipts.append(
+                    RollbackExecutionReceipt(
+                        capability="docker.restart",
+                        request_id=result.request_id,
+                        provider_id=result.provider_id,
+                        status=result.status,
+                    )
+                )
                 if result.status != "succeeded":
-                    reconciliation_required = True
                     logger.warning("portable rollback restart failed for project %s: %s", project, result.message)
             except (ToolError, RuntimeError):
-                reconciliation_required = True
+                receipts.append(RollbackExecutionReceipt("docker.restart", "", "", "failed"))
                 logger.warning("rollback restart failed for project %s", project)
-        return reconciliation_required
+        return receipts
 
     async def _create_candidate(
         self,

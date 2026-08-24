@@ -100,6 +100,7 @@ def test_set_repair_resolution_does_not_change_repair_state(tmp_path) -> None:
         "repair-3",
         resolution_kind=ResolutionKind.REJECTED,
         restoration_status=RestorationStatus.UNVERIFIED,
+        basis_refs=("basis-1",),
     )
     row = store.get_repair("repair-3")
     assert row is not None
@@ -124,6 +125,7 @@ def test_positive_resolution_fails_closed_without_verified_proof(
             "repair-4",
             resolution_kind=resolution_kind,
             restoration_status=RestorationStatus.UNVERIFIED,
+            basis_refs=("basis-1",),
             proof_refs=("proof-1",),
         )
     with pytest.raises(ValueError, match="restoration_status=verified requires restoration proof refs"):
@@ -131,6 +133,7 @@ def test_positive_resolution_fails_closed_without_verified_proof(
             "repair-4",
             resolution_kind=resolution_kind,
             restoration_status=RestorationStatus.VERIFIED,
+            basis_refs=("basis-1",),
         )
 
     row = store.get_repair("repair-4")
@@ -157,6 +160,7 @@ def test_evidence_bearing_restoration_requires_proof_refs(
             "repair-evidence",
             resolution_kind=resolution_kind,
             restoration_status=restoration_status,
+            basis_refs=("basis-1",),
         )
     row = store.get_repair("repair-evidence")
     assert row is not None
@@ -172,6 +176,7 @@ def test_non_restored_disposition_can_carry_verified_restoration_with_proof(tmp_
         "repair-independent",
         resolution_kind=ResolutionKind.REJECTED,
         restoration_status=RestorationStatus.VERIFIED,
+        basis_refs=("basis-1",),
         proof_refs=("proof-independent",),
     )
     row = store.get_repair("repair-independent")
@@ -189,6 +194,7 @@ def test_restored_verified_with_proof_refs_persists(tmp_path) -> None:
         "repair-5",
         resolution_kind=ResolutionKind.RESTORED,
         restoration_status=RestorationStatus.VERIFIED,
+        basis_refs=("basis-1",),
         proof_refs=("proof-a", "proof-a", "proof-b"),
     )
     row = store.get_repair("repair-5")
@@ -208,6 +214,7 @@ def test_reopen_initialization_is_idempotent_and_preserves_resolution(tmp_path) 
         "repair-6",
         resolution_kind=ResolutionKind.REJECTED,
         restoration_status=RestorationStatus.UNKNOWN,
+        basis_refs=("basis-1",),
         proof_refs=("observation-1",),
     )
     stored = store.get_repair("repair-6")
@@ -244,6 +251,7 @@ def test_resolution_write_never_touches_portable_store(tmp_path) -> None:
         "repair-7",
         resolution_kind=ResolutionKind.REJECTED,
         restoration_status=RestorationStatus.UNVERIFIED,
+        basis_refs=("basis-1",),
     )
     row = store.get_repair("repair-7")
     assert row is not None

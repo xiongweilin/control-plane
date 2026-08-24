@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -19,6 +19,7 @@ from .approvals import ApprovalManager
 from .audit import inspect_session_fields
 from .budget import Budget
 from .codex_runner import CodexRunner
+from .closure_authority import ClosureAuthorityError
 from .config import ControlPlaneConfig, canonical_human_principal
 from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
@@ -245,9 +246,26 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         expired = store.expire_candidates(int(time.time()))
         if expired:
             logger.info("expired %s candidates", expired)
+        projection_conflicts: set[str] = set()
+        if service.closure_authority is not None:
+            for row in store.list_repairs_with_fallback(limit=1_000):
+                repair_id = str(row["id"])
+                try:
+                    if service.closure_authority.reconcile_restored_projection(repair_id):
+                        logger.info("reconciled canonical terminal projection for %s", repair_id)
+                except ClosureAuthorityError:
+                    projection_conflicts.add(repair_id)
+                    logger.critical(
+                        "canonical/legacy closure integrity conflict for %s; preserving row for review",
+                        repair_id,
+                        exc_info=True,
+                    )
+
         now = int(time.time())
         keep_pending = {RepairState.NEEDS_APPROVAL.value, RepairState.RECOVERING.value}
         for row in store.list_repairs_with_fallback(limit=1_000):
+            if str(row["id"]) in projection_conflicts:
+                continue
             if row["status"] in keep_pending:
                 continue
             if row["status"] not in {"closed", "failed", "interrupted", "rolled_back"}:
