@@ -1208,7 +1208,6 @@ class PortableRuntimeAuthority:
                 "passed": bool(check.passed),
                 "message": check.message[:2_000],
                 "evidence_ref": check.evidence_ref,
-                "obligation_ref": obligation_refs_for_checks([check]),
             }
             for check in report.checks
         ]

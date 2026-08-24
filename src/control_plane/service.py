@@ -65,7 +65,7 @@ from .tools import (
     resolve_repo,
     validate_url,
 )
-from .verifier import CheckResult, VerificationReport, Verifier, obligation_refs_for_checks
+from .verifier import CheckResult, VerificationReport, Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -3070,11 +3070,8 @@ class RepairService:
             actions=actions,
             tool_results=tool_results,
         )
-        # Carry the exact per-check obligation projection into the typed
-        # report.  The portable authority will persist this declaration on
-        # Work/Run before terminal proof validation; it must never infer a
-        # complete built-in obligation set from one provider boolean.
-        report.obligation_refs = obligation_refs_for_checks(report.checks)
+        # Persist only the verifier-owned declaration. The service does not
+        # derive or widen check-to-obligation coverage.
         if self.portable_authority is not None and report.obligation_refs:
             self.portable_authority.set_verification_obligations(
                 repair_id,
