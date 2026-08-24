@@ -5,6 +5,7 @@ import datetime as dt
 from prometheus_client import Counter, Gauge
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
+from .outward_semantics import INTEGRITY_KINDS, integrity_violation_flags
 from .runtime import current_run_id
 from .state_machine import QUIESCENT_STATES, RECOVERABLE_STATES
 from .storage import Store
@@ -55,11 +56,21 @@ class ControlPlaneCollector:
         rows = self._store.list_repairs(limit=100_000)
         quiescent = {s.value for s in QUIESCENT_STATES}
         status_counts: dict[str, int] = {}
+        resolution_counts: dict[str, int] = {}
+        restoration_counts: dict[str, int] = {}
+        integrity_counts = dict.fromkeys(INTEGRITY_KINDS, 0)
         active = 0
         recoverable: dict[str, int] = {}
         for row in rows:
             status = row["status"]
             status_counts[status] = status_counts.get(status, 0) + 1
+            resolution = str(row["resolution_kind"] or "unresolved")
+            restoration = str(row["restoration_status"] or "unverified")
+            resolution_counts[resolution] = resolution_counts.get(resolution, 0) + 1
+            restoration_counts[restoration] = restoration_counts.get(restoration, 0) + 1
+            for kind, violated in integrity_violation_flags(row).items():
+                if violated:
+                    integrity_counts[kind] += 1
             if status not in quiescent:
                 active += 1
             elif status in {s.value for s in RECOVERABLE_STATES}:
@@ -112,6 +123,34 @@ class ControlPlaneCollector:
         for status, count in sorted(recoverable.items()):
             recoverable_gauge.add_metric([status], count)
         yield recoverable_gauge
+
+        by_resolution = GaugeMetricFamily(
+            "control_plane_repairs_by_resolution",
+            "Control-plane repair snapshot by persisted resolution kind",
+            labels=["resolution_kind"],
+        )
+        for resolution, count in sorted(resolution_counts.items()):
+            by_resolution.add_metric([resolution], count)
+        yield by_resolution
+
+        by_restoration = GaugeMetricFamily(
+            "control_plane_repairs_by_restoration",
+            "Control-plane repair snapshot by persisted restoration status",
+            labels=["restoration_status"],
+        )
+        for restoration, count in sorted(restoration_counts.items()):
+            by_restoration.add_metric([restoration], count)
+        yield by_restoration
+
+        semantic_integrity = GaugeMetricFamily(
+            "control_plane_semantic_integrity_violations",
+            "Current repair rows violating fixed outward semantic invariants",
+            labels=["kind"],
+        )
+        for kind in INTEGRITY_KINDS:
+            semantic_integrity.add_metric([kind], integrity_counts[kind])
+        yield semantic_integrity
+
         yield GaugeMetricFamily(
             "control_plane_candidates",
             "Candidate playbooks",
