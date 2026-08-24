@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from .repair_resolution import ResolutionKind, RestorationStatus
@@ -13,8 +14,22 @@ class ClosureAuthorityError(RuntimeError):
     """Raised when legacy case closure is not supported by canonical evidence."""
 
 
+@dataclass(frozen=True, slots=True)
+class RollbackExecutionReceipt:
+    """Typed execution fact consumed by rollback disposition.
+
+    This is not restoration proof. It records only which authorized rollback
+    operation ran and the Runtime result returned for that request.
+    """
+
+    capability: str
+    request_id: str
+    provider_id: str
+    status: str
+
+
 class ClosureAuthority:
-    """Own the legacy case-closure projection from canonical durable facts.
+    """Own legacy case-terminal disposition projection from durable facts.
 
     Portable CompletionAuthority remains the authority for objective/verification
     terminal success. This class never re-runs a verifier and never accepts caller-
@@ -107,17 +122,26 @@ class ClosureAuthority:
         return work, run, work_refs
 
     def _human_decision(self, repair_id: str, selected_option: str) -> Any:
-        work, _ = self._canonical_pair(repair_id)
-        metadata = getattr(work, "metadata", {})
-        decision_ref = (
-            str(metadata.get("human_approval_decision_ref", "")).strip()
-            if isinstance(metadata, dict)
-            else ""
-        ) or f"decision_{repair_id}_human_approval"
+        work, run = self._canonical_pair(repair_id)
+        work_meta = getattr(work, "metadata", {})
+        run_meta = getattr(run, "metadata", {})
+        if not isinstance(work_meta, dict) or not isinstance(run_meta, dict):
+            raise ClosureAuthorityError("canonical human-approval metadata is missing")
+
+        work_ref = str(work_meta.get("human_approval_decision_ref", "")).strip()
+        run_ref = str(run_meta.get("human_approval_decision_ref", "")).strip()
+        if not work_ref or work_ref != run_ref:
+            raise ClosureAuthorityError("Work/Run human Decision refs are missing or asymmetric")
+        if (
+            str(work_meta.get("human_approval_action", "")).strip() != selected_option
+            or str(run_meta.get("human_approval_action", "")).strip() != selected_option
+        ):
+            raise ClosureAuthorityError("Work/Run human approval action contradicts disposition")
+
         get_decision = getattr(self.portable_store, "get_decision", None)
         if not callable(get_decision):
             raise ClosureAuthorityError("portable store does not expose Decision reads")
-        decision = get_decision(decision_ref)
+        decision = get_decision(work_ref)
         if decision is None:
             raise ClosureAuthorityError("durable human Decision is missing")
         if getattr(decision, "decision_type", None) != "human-approval":
@@ -126,6 +150,8 @@ class ClosureAuthority:
             raise ClosureAuthorityError(
                 f"human Decision does not authorize disposition {selected_option!r}"
             )
+        if not list(getattr(decision, "authorized_by", []) or []):
+            raise ClosureAuthorityError("human Decision has no authorized principal")
         if getattr(decision, "work_id", None) != getattr(work, "id", None):
             raise ClosureAuthorityError("human Decision is not bound to the current repair Work")
         decision_meta = getattr(decision, "metadata", {})
@@ -182,24 +208,37 @@ class ClosureAuthority:
         """Project an already-accepted canonical terminal success into legacy closure."""
 
         work, run, proof_refs = self._terminal_restoration_bundle(repair_id)
+        expected_basis = [work.id, run.id]
         row = self._repair_row(repair_id)
         if row["status"] == RepairState.CLOSED.value:
             existing_proofs = self._row_refs(row, "restoration_proof_refs_json")
+            existing_basis = self._row_refs(row, "resolution_basis_refs_json")
             if (
                 row["resolution_kind"] == ResolutionKind.RESTORED.value
                 and row["restoration_status"] == RestorationStatus.VERIFIED.value
                 and existing_proofs == proof_refs
+                and existing_basis == expected_basis
             ):
                 return
             raise ClosureAuthorityError("closed repair contradicts canonical restored projection")
 
-        self.legacy_store.set_repair_resolution(
-            repair_id,
-            resolution_kind=ResolutionKind.RESTORED,
-            restoration_status=RestorationStatus.VERIFIED,
-            proof_refs=proof_refs,
-            basis_refs=(work.id, run.id),
-        )
+        if row["resolution_kind"] == ResolutionKind.RESTORED.value:
+            existing_proofs = self._row_refs(row, "restoration_proof_refs_json")
+            existing_basis = self._row_refs(row, "resolution_basis_refs_json")
+            if (
+                row["restoration_status"] != RestorationStatus.VERIFIED.value
+                or existing_proofs != proof_refs
+                or existing_basis != expected_basis
+            ):
+                raise ClosureAuthorityError("partial restored projection contradicts canonical terminal bundle")
+        else:
+            self.legacy_store.set_repair_resolution(
+                repair_id,
+                resolution_kind=ResolutionKind.RESTORED,
+                restoration_status=RestorationStatus.VERIFIED,
+                proof_refs=proof_refs,
+                basis_refs=tuple(expected_basis),
+            )
         metadata = getattr(work, "metadata", {})
         summary = str(metadata.get("verification_summary", "") if isinstance(metadata, dict) else "")
         self._close_legacy(repair_id, result=summary or "restoration verified")
@@ -209,32 +248,60 @@ class ClosureAuthority:
 
         decision = self._human_decision(repair_id, "reject")
         row = self._repair_row(repair_id)
+        expected_basis = [decision.id]
         if row["status"] == RepairState.CLOSED.value:
             basis = self._row_refs(row, "resolution_basis_refs_json")
-            if row["resolution_kind"] == ResolutionKind.REJECTED.value and decision.id in basis:
+            if row["resolution_kind"] == ResolutionKind.REJECTED.value and basis == expected_basis:
                 return
             raise ClosureAuthorityError("closed repair contradicts durable rejection Decision")
         self._set_resolution_preserving_restoration(
             repair_id,
             resolution_kind=ResolutionKind.REJECTED,
-            basis_refs=(decision.id,),
+            basis_refs=expected_basis,
         )
         self._close_legacy(repair_id, result="rejected")
 
-    def record_rolled_back(self, repair_id: str) -> None:
-        """Record rollback disposition without claiming that reality is restored."""
+    def record_rolled_back(
+        self,
+        repair_id: str,
+        executions: Iterable[RollbackExecutionReceipt],
+    ) -> None:
+        """Record rollback disposition only after authorized effects succeeded.
+
+        Human authorization proves the choice to roll back. Runtime execution
+        receipts prove only that the required rollback operations returned
+        ``succeeded``. Neither fact is promoted to restoration verification.
+        """
 
         decision = self._human_decision(repair_id, "rollback")
+        receipts = list(executions)
+        if not receipts:
+            raise ClosureAuthorityError("rollback disposition requires execution receipts")
+        request_ids: list[str] = []
+        for receipt in receipts:
+            if receipt.capability not in {"git.rollback", "docker.restart"}:
+                raise ClosureAuthorityError("rollback receipt has non-rollback capability")
+            if receipt.status != "succeeded":
+                raise ClosureAuthorityError("rollback disposition requires every execution to succeed")
+            request_id = receipt.request_id.strip()
+            provider_id = receipt.provider_id.strip()
+            if not request_id or not provider_id:
+                raise ClosureAuthorityError("rollback execution receipt is missing Runtime provenance")
+            if request_id in request_ids:
+                raise ClosureAuthorityError("rollback execution request ids must be unique")
+            request_ids.append(request_id)
+
+        expected_basis = [decision.id, *request_ids]
         row = self._repair_row(repair_id)
         if row["status"] == RepairState.ROLLED_BACK.value:
             basis = self._row_refs(row, "resolution_basis_refs_json")
-            if row["resolution_kind"] == ResolutionKind.ROLLED_BACK.value and decision.id in basis:
+            if row["resolution_kind"] == ResolutionKind.ROLLED_BACK.value and basis == expected_basis:
                 return
-            raise ClosureAuthorityError("rolled-back repair contradicts durable rollback Decision")
+            raise ClosureAuthorityError("rolled-back repair contradicts rollback execution basis")
         self._set_resolution_preserving_restoration(
             repair_id,
             resolution_kind=ResolutionKind.ROLLED_BACK,
-            basis_refs=(decision.id,),
+            basis_refs=expected_basis,
         )
         current = RepairState(str(row["status"]))
         try:
@@ -250,20 +317,38 @@ class ClosureAuthority:
         )
 
     def reconcile_restored_projection(self, repair_id: str) -> bool:
-        """Repair a missing private projection from an existing canonical terminal fact."""
+        """Repair only a current crash-window under-projection.
+
+        Historical ``CLOSED + UNRESOLVED`` rows are deliberately not upgraded:
+        C2 migrated those rows to unknown/unresolved because retrospective
+        evidence was not established at migration time.
+        """
 
         row = self._repair_row(repair_id)
-        if (
-            row["status"] == RepairState.CLOSED.value
-            and row["resolution_kind"] == ResolutionKind.RESTORED.value
-            and row["restoration_status"] == RestorationStatus.VERIFIED.value
-        ):
+        status = str(row["status"])
+        resolution = str(row["resolution_kind"])
+        restoration = str(row["restoration_status"])
+
+        if status == RepairState.CLOSED.value and resolution == ResolutionKind.UNRESOLVED.value:
             return False
-        if row["resolution_kind"] not in {
-            ResolutionKind.UNRESOLVED.value,
-            ResolutionKind.RESTORED.value,
-        }:
+
+        if status == RepairState.CLOSED.value:
+            if (
+                resolution == ResolutionKind.RESTORED.value
+                and restoration == RestorationStatus.VERIFIED.value
+            ):
+                work, run, proofs = self._terminal_restoration_bundle(repair_id)
+                if self._row_refs(row, "restoration_proof_refs_json") != proofs:
+                    raise ClosureAuthorityError("closed restored projection has stale proof lineage")
+                if self._row_refs(row, "resolution_basis_refs_json") != [work.id, run.id]:
+                    raise ClosureAuthorityError("closed restored projection has stale disposition basis")
             return False
+
+        if resolution not in {ResolutionKind.UNRESOLVED.value, ResolutionKind.RESTORED.value}:
+            return False
+        if resolution == ResolutionKind.RESTORED.value and restoration != RestorationStatus.VERIFIED.value:
+            raise ClosureAuthorityError("partial restored projection lacks verified restoration status")
+
         try:
             work, run = self._canonical_pair(repair_id)
         except ClosureAuthorityError:
