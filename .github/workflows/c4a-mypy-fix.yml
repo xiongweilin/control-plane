@@ -1,0 +1,48 @@
+name: C4a mypy scope fix
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c4a/verifier-obligation-owner
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - name: Rename fallback local only
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/control_plane/verifier.py")
+          text = path.read_text(encoding="utf-8-sig")
+          old = '''            checks = [CheckResult("minimum_evidence", False, "No deterministic verification was configured")]\n            return VerificationReport.from_checks(repair_id=repair_id, checks=checks)\n        checks: list[CheckResult] = []\n'''
+          new = '''            unavailable_checks = [\n                CheckResult("minimum_evidence", False, "No deterministic verification was configured")\n            ]\n            return VerificationReport.from_checks(\n                repair_id=repair_id, checks=unavailable_checks\n            )\n        checks: list[CheckResult] = []\n'''
+          if old not in text:
+              raise SystemExit("missing C4a mypy rename anchor")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Mechanical checks
+        run: |
+          uv run ruff check src/control_plane/verifier.py tests/test_c4a_obligation_projection.py
+          uv run mypy src
+          uv run python -m pytest tests/test_verifier.py tests/test_personal_runtime_authority.py tests/test_c4a_obligation_projection.py
+      - name: Commit clean mypy fix
+        shell: bash
+        run: |
+          git rm .github/workflows/c4a-mypy-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/control_plane/verifier.py
+          git commit -m "C4a: avoid verifier fallback local redefinition"
+          git push origin HEAD:c4a/verifier-obligation-owner
