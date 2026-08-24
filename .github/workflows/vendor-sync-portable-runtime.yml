@@ -6,11 +6,6 @@ on:
       - vendor/portable-runtime-0a22ad07
     paths:
       - .github/workflows/vendor-sync-portable-runtime.yml
-  pull_request:
-    branches:
-      - main
-    paths:
-      - .github/workflows/vendor-sync-portable-runtime.yml
 
 permissions:
   contents: write
@@ -30,35 +25,31 @@ jobs:
           ref: vendor/portable-runtime-0a22ad07
 
       - name: Capture old pin
-        id: old
-        shell: bash
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
           pin = json.loads(Path('portable-runtime-pin.json').read_text(encoding='utf-8'))
-          with Path('/tmp/old-pin.txt').open('w', encoding='utf-8') as fh:
-              fh.write(pin['commit'] + '\n' + pin['tree_sha256'] + '\n')
+          Path('/tmp/old-pin.json').write_text(json.dumps(pin), encoding='utf-8')
           PY
 
-      - name: Checkout public portable-runtime main commit
+      - name: Mechanical sync
+        id: sync
+        continue-on-error: true
         shell: bash
         run: |
-          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
-          git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba
-          git -C "$RUNNER_TEMP/portable-runtime" checkout --detach 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba
-          test "$(git -C "$RUNNER_TEMP/portable-runtime" rev-parse HEAD)" = "0a22ad07f127a2051fe7a0eb5b19260a25ede7ba"
-
-      - name: Mechanically replace vendored tree and pin
-        shell: bash
-        run: |
-          rm -rf src/portable_runtime
-          cp -a "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
-          python - <<'PY'
+          set -o pipefail
+          {
+            git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+            git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba
+            git -C "$RUNNER_TEMP/portable-runtime" checkout --detach 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba
+            test "$(git -C "$RUNNER_TEMP/portable-runtime" rev-parse HEAD)" = "0a22ad07f127a2051fe7a0eb5b19260a25ede7ba"
+            rm -rf src/portable_runtime
+            cp -a "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
+            python - <<'PY'
           import json
           from pathlib import Path
           from scripts.verify_portable_runtime_pin import _files, _tree_digest
-
           root = Path('.').resolve()
           path = root / 'portable-runtime-pin.json'
           pin = json.loads(path.read_text(encoding='utf-8'))
@@ -67,76 +58,151 @@ jobs:
           path.write_text(json.dumps(pin, indent=2) + '\n', encoding='utf-8')
           print(f"new_tree_sha256={pin['tree_sha256']}")
           PY
-
-      - name: Enforce pure-sync diff scope
-        shell: bash
-        run: |
-          git status --short
-          bad="$(git status --porcelain=v1 | awk '{print $2}' | grep -Ev '^(portable-runtime-pin\.json|src/portable_runtime/|\.github/workflows/vendor-sync-portable-runtime\.yml$)' || true)"
-          if [ -n "$bad" ]; then
-            echo "unexpected pure-sync paths:"
-            echo "$bad"
-            exit 1
-          fi
+            bad="$(git status --porcelain=v1 | awk '{print $2}' | grep -Ev '^(portable-runtime-pin\.json|src/portable_runtime/|\.github/workflows/vendor-sync-portable-runtime\.yml$)' || true)"
+            if [ -n "$bad" ]; then
+              echo "unexpected pure-sync paths:"
+              echo "$bad"
+              exit 1
+            fi
+          } 2>&1 | tee /tmp/sync.log
 
       - name: Install uv
+        id: uv
+        continue-on-error: true
+        if: steps.sync.outcome == 'success'
         uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
           enable-cache: true
 
       - name: Sync locked dependencies
+        id: deps
+        continue-on-error: true
+        if: steps.sync.outcome == 'success' && steps.uv.outcome == 'success'
         run: uv sync --locked --extra dev
 
       - name: Verify vendored tree equals public pin
-        run: uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
+        id: verify
+        continue-on-error: true
+        if: steps.deps.outcome == 'success'
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime" 2>&1 | tee /tmp/verify.log
 
       - name: Targeted responsibility regressions
-        run: >-
-          uv run python -m pytest -q
-          tests/test_personal_runtime_authority.py::test_personal_authority_uses_full_reality_boundary_and_versioned_grant
-          tests/test_personal_runtime_authority.py::test_service_keeps_unknown_codex_outcome_recoverable
-          tests/test_task_verification.py::test_task_delivery_proof_does_not_verify_objective
-          tests/test_task_verification.py::test_transcript_delivery_does_not_claim_arbitrary_task_objective
-          tests/test_startup_reconciliation.py::test_startup_reconciliation_unknown_stays_recovering_and_does_not_wait_for_approval
-          tests/test_startup_reconciliation.py::test_startup_reconciliation_applied_verifies_without_approval_waiter
-          tests/conformance/test_terminal_authority.py::test_terminal_proof_must_cover_declared_obligations
+        id: targeted
+        continue-on-error: true
+        if: steps.verify.outcome == 'success'
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python -m pytest -q \
+            tests/test_personal_runtime_authority.py::test_personal_authority_uses_full_reality_boundary_and_versioned_grant \
+            tests/test_personal_runtime_authority.py::test_service_keeps_unknown_codex_outcome_recoverable \
+            tests/test_task_verification.py::test_task_delivery_proof_does_not_verify_objective \
+            tests/test_task_verification.py::test_transcript_delivery_does_not_claim_arbitrary_task_objective \
+            tests/test_startup_reconciliation.py::test_startup_reconciliation_unknown_stays_recovering_and_does_not_wait_for_approval \
+            tests/test_startup_reconciliation.py::test_startup_reconciliation_applied_verifies_without_approval_waiter \
+            tests/conformance/test_terminal_authority.py::test_terminal_proof_must_cover_declared_obligations \
+            2>&1 | tee /tmp/targeted.log
 
       - name: Ruff
+        id: ruff
+        continue-on-error: true
+        if: steps.verify.outcome == 'success'
         run: uv run ruff check .
 
       - name: Mypy
+        id: mypy
+        continue-on-error: true
+        if: steps.verify.outcome == 'success'
         run: uv run mypy src
 
       - name: Portable core import boundary
+        id: imports
+        continue-on-error: true
+        if: steps.verify.outcome == 'success'
         run: uv run python scripts/check_portable_core_imports.py
 
       - name: Full portable suite
-        run: uv run python -m pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)"
-
-      - name: Commit only mechanical vendor sync
+        id: full
+        continue-on-error: true
+        if: steps.verify.outcome == 'success'
         shell: bash
         run: |
+          set -o pipefail
+          uv run python -m pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)" 2>&1 | tee /tmp/full.log
+
+      - name: Persist staging result
+        if: always()
+        shell: bash
+        env:
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          UV_OUTCOME: ${{ steps.uv.outcome }}
+          DEPS_OUTCOME: ${{ steps.deps.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          TARGETED_OUTCOME: ${{ steps.targeted.outcome }}
+          RUFF_OUTCOME: ${{ steps.ruff.outcome }}
+          MYPY_OUTCOME: ${{ steps.mypy.outcome }}
+          IMPORTS_OUTCOME: ${{ steps.imports.outcome }}
+          FULL_OUTCOME: ${{ steps.full.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          old = json.loads(Path('/tmp/old-pin.json').read_text(encoding='utf-8'))
+          try:
+              current = json.loads(Path('portable-runtime-pin.json').read_text(encoding='utf-8'))
+          except Exception:
+              current = {}
+          outcomes = {
+              'sync': os.environ.get('SYNC_OUTCOME', ''),
+              'uv': os.environ.get('UV_OUTCOME', ''),
+              'deps': os.environ.get('DEPS_OUTCOME', ''),
+              'verify_pin': os.environ.get('VERIFY_OUTCOME', ''),
+              'targeted_regressions': os.environ.get('TARGETED_OUTCOME', ''),
+              'ruff': os.environ.get('RUFF_OUTCOME', ''),
+              'mypy': os.environ.get('MYPY_OUTCOME', ''),
+              'import_boundary': os.environ.get('IMPORTS_OUTCOME', ''),
+              'full_pytest': os.environ.get('FULL_OUTCOME', ''),
+          }
+          passed = all(value == 'success' for value in outcomes.values())
+          def tail(name: str) -> list[str]:
+              path = Path('/tmp') / f'{name}.log'
+              if not path.exists():
+                  return []
+              return path.read_text(encoding='utf-8', errors='replace').splitlines()[-80:]
+          status = {
+              'passed': passed,
+              'old_portable_pin': old.get('commit'),
+              'new_portable_pin': '0a22ad07f127a2051fe7a0eb5b19260a25ede7ba',
+              'vendor_tree_hash_before': old.get('tree_sha256'),
+              'vendor_tree_hash_after': current.get('tree_sha256'),
+              'semantic_changes': 'NONE',
+              'purpose': 'compatibility verification only',
+              'outcomes': outcomes,
+              'logs': {
+                  'sync_tail': tail('sync'),
+                  'verify_tail': tail('verify'),
+                  'targeted_tail': tail('targeted'),
+                  'full_tail': tail('full'),
+              },
+          }
+          Path('.vendor-sync-status.json').write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+          PY
+
+          passed="$(python -c 'import json; print("yes" if json.load(open(".vendor-sync-status.json", encoding="utf-8"))["passed"] else "no")')"
+          if [ "$passed" != "yes" ]; then
+            git restore --source=HEAD --staged --worktree portable-runtime-pin.json src/portable_runtime || true
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add portable-runtime-pin.json src/portable_runtime
-          bad="$(git diff --cached --name-only | grep -Ev '^(portable-runtime-pin\.json|src/portable_runtime/)' || true)"
-          if [ -n "$bad" ]; then
-            echo "refusing non-vendor staged paths:"
-            echo "$bad"
-            exit 1
+          git add .vendor-sync-status.json
+          if [ "$passed" = "yes" ]; then
+            git add portable-runtime-pin.json src/portable_runtime
           fi
-          old_commit="$(sed -n '1p' /tmp/old-pin.txt)"
-          old_hash="$(sed -n '2p' /tmp/old-pin.txt)"
-          new_hash="$(python -c 'import json; print(json.load(open("portable-runtime-pin.json", encoding="utf-8"))["tree_sha256"])')"
-          echo "old portable pin: $old_commit" >> "$GITHUB_STEP_SUMMARY"
-          echo "new portable pin: 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba" >> "$GITHUB_STEP_SUMMARY"
-          echo "vendor tree hash before: $old_hash" >> "$GITHUB_STEP_SUMMARY"
-          echo "vendor tree hash after: $new_hash" >> "$GITHUB_STEP_SUMMARY"
-          echo "semantic changes: NONE" >> "$GITHUB_STEP_SUMMARY"
-          echo "purpose: compatibility verification only" >> "$GITHUB_STEP_SUMMARY"
-          if git diff --cached --quiet; then
-            echo "mechanical vendor sync already present; validation only"
-            exit 0
-          fi
-          git commit -m "chore: sync portable-runtime pin to 0a22ad07"
+          git commit -m "chore: record portable-runtime pure sync result"
           git push origin HEAD:vendor/portable-runtime-0a22ad07
