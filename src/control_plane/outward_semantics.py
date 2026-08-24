@@ -7,6 +7,12 @@ from typing import Any
 from .repair_resolution import ResolutionKind, RestorationStatus
 from .state_machine import RepairState
 
+INTEGRITY_KINDS = (
+    "closed_restored_unverified",
+    "restored_without_proof",
+    "non_unresolved_without_basis",
+)
+
 
 def _text(row: Mapping[str, Any], key: str, default: str) -> str:
     value = row.get(key, default)
@@ -34,6 +40,48 @@ def decode_ref_list(row: Mapping[str, Any], key: str) -> list[str]:
     return refs
 
 
+def _raw_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": _text(row, "status", "unknown"),
+        "resolution_kind": _text(
+            row, "resolution_kind", ResolutionKind.UNRESOLVED.value
+        ),
+        "restoration_status": _text(
+            row, "restoration_status", RestorationStatus.UNVERIFIED.value
+        ),
+        "restoration_proof_refs": decode_ref_list(
+            row, "restoration_proof_refs_json"
+        ),
+        "resolution_basis_refs": decode_ref_list(
+            row, "resolution_basis_refs_json"
+        ),
+    }
+
+
+def integrity_violation_flags(row: Mapping[str, Any]) -> dict[str, bool]:
+    """Return observational integrity flags; this function performs no repair or mutation."""
+
+    projection = _raw_projection(row)
+    status = projection["status"]
+    kind = projection["resolution_kind"]
+    restoration = projection["restoration_status"]
+    proof_refs = projection["restoration_proof_refs"]
+    basis_refs = projection["resolution_basis_refs"]
+    return {
+        "closed_restored_unverified": (
+            status == RepairState.CLOSED.value
+            and kind == ResolutionKind.RESTORED.value
+            and restoration != RestorationStatus.VERIFIED.value
+        ),
+        "restored_without_proof": (
+            kind == ResolutionKind.RESTORED.value and not proof_refs
+        ),
+        "non_unresolved_without_basis": (
+            kind != ResolutionKind.UNRESOLVED.value and not basis_refs
+        ),
+    }
+
+
 def semantic_summary(*, status: str, resolution_kind: str, restoration_status: str) -> str:
     """Render existing facts without creating a new disposition or reality judgment."""
 
@@ -44,12 +92,6 @@ def semantic_summary(*, status: str, resolution_kind: str, restoration_status: s
         RestorationStatus.VERIFIED.value,
     ):
         return "已验证恢复"
-    if triple == (
-        RepairState.CLOSED.value,
-        ResolutionKind.NO_ACTION_REQUIRED.value,
-        RestorationStatus.VERIFIED.value,
-    ):
-        return "无需动作，已验证恢复"
     if triple == (
         RepairState.CLOSED.value,
         ResolutionKind.REJECTED.value,
@@ -75,46 +117,21 @@ def semantic_summary(*, status: str, resolution_kind: str, restoration_status: s
 
 
 def project_repair(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the three existing repair axes for API/notification consumers."""
+    """Project existing repair facts for outward consumers without mutation."""
 
-    status = _text(row, "status", "unknown")
-    resolution_kind = _text(row, "resolution_kind", ResolutionKind.UNRESOLVED.value)
-    restoration_status = _text(
-        row, "restoration_status", RestorationStatus.UNVERIFIED.value
-    )
+    projection = _raw_projection(row)
+    flags = integrity_violation_flags(row)
+    violations = [kind for kind in INTEGRITY_KINDS if flags[kind]]
+    if violations:
+        summary = "语义完整性异常，需检查"
+    else:
+        summary = semantic_summary(
+            status=projection["status"],
+            resolution_kind=projection["resolution_kind"],
+            restoration_status=projection["restoration_status"],
+        )
     return {
-        "status": status,
-        "resolution_kind": resolution_kind,
-        "restoration_status": restoration_status,
-        "semantic_summary": semantic_summary(
-            status=status,
-            resolution_kind=resolution_kind,
-            restoration_status=restoration_status,
-        ),
-        "restoration_proof_refs": decode_ref_list(row, "restoration_proof_refs_json"),
-        "resolution_basis_refs": decode_ref_list(row, "resolution_basis_refs_json"),
-    }
-
-
-def integrity_violation_flags(row: Mapping[str, Any]) -> dict[str, bool]:
-    """Return observational integrity flags; this function performs no repair or mutation."""
-
-    projection = project_repair(row)
-    status = projection["status"]
-    kind = projection["resolution_kind"]
-    restoration = projection["restoration_status"]
-    proof_refs = projection["restoration_proof_refs"]
-    basis_refs = projection["resolution_basis_refs"]
-    return {
-        "closed_restored_unverified": (
-            status == RepairState.CLOSED.value
-            and kind == ResolutionKind.RESTORED.value
-            and restoration != RestorationStatus.VERIFIED.value
-        ),
-        "restored_without_proof": (
-            kind == ResolutionKind.RESTORED.value and not proof_refs
-        ),
-        "non_unresolved_without_basis": (
-            kind != ResolutionKind.UNRESOLVED.value and not basis_refs
-        ),
+        **projection,
+        "semantic_summary": summary,
+        "integrity_violations": violations,
     }
