@@ -177,8 +177,12 @@ class Verifier:
         if self._capability_service is None:
             if self._direct is not None:
                 return await self._direct.verify_repair(repair_id=repair_id, alert=alert, actions=actions, tool_results=tool_results)  # noqa: E501
-            checks = [CheckResult("minimum_evidence", False, "No deterministic verification was configured")]
-            return VerificationReport.from_checks(repair_id=repair_id, checks=checks)
+            unavailable_checks = [
+                CheckResult("minimum_evidence", False, "No deterministic verification was configured")
+            ]
+            return VerificationReport.from_checks(
+                repair_id=repair_id, checks=unavailable_checks
+            )
         checks: list[CheckResult] = []
         targets: list[str] = []
         for action in actions:
