@@ -8,9 +8,10 @@ class RestorationStatus(StrEnum):
     """Current judgment about whether the target reality has been restored.
 
     UNVERIFIED means no qualifying restoration evidence has yet been established;
-    it makes no claim about reality. UNKNOWN means observation or checking occurred,
-    but the result remains indeterminate. FAILED and VERIFIED are evidence-bearing
-    judgments that the target restoration condition is respectively unmet or met.
+    it makes no claim about reality. UNKNOWN means the current reality result cannot
+    be determined, including when available evidence is unavailable or insufficient.
+    FAILED and VERIFIED are evidence-bearing judgments that the target restoration
+    condition is respectively unmet or met.
     """
 
     UNVERIFIED = "unverified"
@@ -50,10 +51,13 @@ def normalize_repair_resolution(
             seen.add(ref)
             refs.append(ref)
 
+    if restoration in {RestorationStatus.VERIFIED, RestorationStatus.FAILED} and not refs:
+        raise ValueError(
+            f"restoration_status={restoration.value} requires restoration proof refs"
+        )
+
     if kind in {ResolutionKind.RESTORED, ResolutionKind.NO_ACTION_REQUIRED}:
         if restoration is not RestorationStatus.VERIFIED:
             raise ValueError(f"{kind.value} requires restoration_status=verified")
-        if not refs:
-            raise ValueError(f"{kind.value} requires at least one restoration proof ref")
 
     return kind, restoration, tuple(refs)
