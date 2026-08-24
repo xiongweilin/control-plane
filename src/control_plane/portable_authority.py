@@ -577,7 +577,7 @@ class PortableRuntimeAuthority:
             save_decision(decision)
 
         grants: list[AuthorizationGrant] = []
-        specs = list(operation_specs or []) if action == "approve" else []
+        specs = list(operation_specs or []) if action in {"approve", "rollback"} else []
         if action == "approve" and not specs:
             resource = str(work.metadata.get("resource_ref") or work.metadata.get("resource_scope") or "")
             versions = [str(value) for value in work.metadata.get("subject_version_refs", [])]
@@ -1358,7 +1358,7 @@ class PortableRuntimeAuthority:
         if (
             decision is None
             or getattr(decision, "decision_type", None) != "human-approval"
-            or getattr(decision, "selected_option", None) != "approve"
+            or getattr(decision, "selected_option", None) not in {"approve", "rollback"}
         ):
             return CapabilityResult(
                 request_id=f"req-{repair_id}-{capability.replace('.', '-')}",
