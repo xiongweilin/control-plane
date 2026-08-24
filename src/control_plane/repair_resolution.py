@@ -51,6 +51,7 @@ def normalize_repair_resolution(
             seen.add(ref)
             refs.append(ref)
 
+    # Evidence lineage is owned by the restoration axis, independent of disposition.
     if restoration in {RestorationStatus.VERIFIED, RestorationStatus.FAILED} and not refs:
         raise ValueError(
             f"restoration_status={restoration.value} requires restoration proof refs"
