@@ -12,42 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  c4b-wire:
-    if: github.event_name == 'pull_request' && github.head_ref == 'c4b/outward-semantics-integrity' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: c4b/outward-semantics-integrity
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-      - name: Sync locked dependencies
-        run: uv sync --locked --extra dev
-      - name: Apply narrow C4b wiring
-        shell: bash
-        run: |
-          sed -i 's/integrity_counts = {kind: 0 for kind in INTEGRITY_KINDS}/integrity_counts = dict.fromkeys(INTEGRITY_KINDS, 0)/' scripts/c4b_wire.py
-          uv run python scripts/c4b_wire.py
-      - name: Focused C4b checks
-        run: |
-          uv run ruff check src/control_plane/outward_semantics.py src/control_plane/app.py src/control_plane/service.py src/control_plane/metrics.py tests/test_c4b_outward_semantics.py
-          uv run mypy src/control_plane/outward_semantics.py src/control_plane/app.py src/control_plane/service.py src/control_plane/metrics.py
-          uv run python -m pytest tests/test_c4b_outward_semantics.py tests/test_app.py tests/test_metrics.py
-      - name: Commit clean C4b product state
-        shell: bash
-        run: |
-          git rm .github/workflows/c4b-wire.yml
-          git rm -f scripts/c4b_wire.py
-          git checkout origin/main -- .github/workflows/ci.yml
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github/workflows/ci.yml src/control_plane/outward_semantics.py src/control_plane/app.py src/control_plane/service.py src/control_plane/metrics.py tests/test_c4b_outward_semantics.py
-          git commit -m "C4b: expose repair semantics and integrity observability"
-          git push origin HEAD:c4b/outward-semantics-integrity
-
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
