@@ -63,8 +63,8 @@ jobs:
 
           replace(
               "tests/test_personal_runtime_authority.py",
-              '''                obligation_refs=["provider_status", "verify.http", "verify.git_diff"],\n''',
-              '''                obligation_refs=["provider_status"],\n''',
+              '''            report=VerificationReport(\n                repair_id="repair-authority-bare-proof",\n                checks=[CheckResult("provider_status", True, "provider said it passed")],\n                obligation_refs=["provider_status", "verify.http", "verify.git_diff"],\n            ),\n''',
+              '''            report=VerificationReport.from_checks(\n                repair_id="repair-authority-bare-proof",\n                checks=[\n                    CheckResult("provider_status", True, "provider said it passed"),\n                    CheckResult("probe:https://example.invalid", True, "http passed"),\n                    CheckResult("git_diff_guard", True, "diff passed"),\n                ],\n            ),\n''',
           )
           PY
       - name: Mechanical checks
