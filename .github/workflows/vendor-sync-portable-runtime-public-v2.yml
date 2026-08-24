@@ -169,6 +169,7 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Verify exact public pin and tree digest
+        shell: bash
         run: uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
 
       - name: Windows-native regressions
