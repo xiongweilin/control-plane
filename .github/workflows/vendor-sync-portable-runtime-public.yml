@@ -1,0 +1,215 @@
+name: Vendor Sync Portable Runtime Public
+
+on:
+  push:
+    branches:
+      - vendor/portable-runtime-0a22ad07-public
+    paths:
+      - .github/workflows/vendor-sync-portable-runtime-public.yml
+
+permissions:
+  contents: write
+
+env:
+  PORTABLE_COMMIT: 0a22ad07f127a2051fe7a0eb5b19260a25ede7ba
+  PORTABLE_TREE_SHA256: 6ab95865cfc04e398e00edabcfa68ffc2a76c00d2475cc627cdbcbfb8b6a89f3
+
+jobs:
+  stage-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+
+      - name: Overlay exact portable-runtime tree
+        shell: bash
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+          git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin "$PORTABLE_COMMIT"
+          git -C "$RUNNER_TEMP/portable-runtime" checkout --detach "$PORTABLE_COMMIT"
+          rm -rf src/portable_runtime
+          cp -R "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("portable-runtime-pin.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data["commit"] = "0a22ad07f127a2051fe7a0eb5b19260a25ede7ba"
+          data["tree_sha256"] = "6ab95865cfc04e398e00edabcfa68ffc2a76c00d2475cc627cdbcbfb8b6a89f3"
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Enforce pure vendor diff scope
+        shell: bash
+        run: |
+          bad="$(git diff --name-only | grep -Ev '^(portable-runtime-pin\.json|src/portable_runtime/)' || true)"
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Verify exact public pin and tree digest
+        shell: bash
+        run: uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
+
+      - name: Qualification current-use smoke
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          from types import SimpleNamespace
+          from portable_runtime.core.qualification import AssessmentContext, QualificationResolutionError
+          from portable_runtime.records.models import Assertion
+
+          class Store:
+              def __init__(self, record):
+                  self.record = record
+              def get_record(self, ref_id):
+                  return self.record if ref_id == self.record.id else None
+              def get_decision(self, ref_id): return None
+              def get_authorization(self, ref_id): return None
+              def get_relation(self, ref_id): return None
+              def get_checkpoint(self, ref_id): return None
+              def get_evidence(self, ref_id): return None
+
+          def request(ref_id):
+              return SimpleNamespace(
+                  work_id=None,
+                  run_id=None,
+                  subject_version_refs=[],
+                  metadata={"qualification_refs": [{"id": ref_id, "version": 1}]},
+              )
+
+          supported = Assertion(
+              id="qual-supported",
+              statement="current supported qualification",
+              lifecycle_status="current",
+              epistemic_status="supported",
+              version=1,
+          )
+          AssessmentContext.resolve(Store(supported), request(supported.id))
+
+          stale = Assertion(
+              id="qual-revalidation",
+              statement="qualification requires revalidation",
+              lifecycle_status="current",
+              epistemic_status="revalidation-required",
+              version=1,
+          )
+          try:
+              AssessmentContext.resolve(Store(stale), request(stale.id))
+          except QualificationResolutionError:
+              pass
+          else:
+              raise SystemExit("revalidation-required Assertion was incorrectly accepted for current use")
+          PY
+
+      - name: Targeted responsibility regressions
+        run: >-
+          uv run python -m pytest
+          tests/test_personal_runtime_authority.py::test_personal_authority_uses_full_reality_boundary_and_versioned_grant
+          tests/test_task_verification.py::test_task_delivery_proof_does_not_verify_objective
+          tests/test_task_verification.py::test_transcript_delivery_does_not_claim_arbitrary_task_objective
+          tests/test_personal_runtime_authority.py::test_service_keeps_unknown_codex_outcome_recoverable
+          tests/test_startup_reconciliation.py::test_startup_reconciliation_unknown_stays_recovering_and_does_not_wait_for_approval
+          tests/test_startup_reconciliation.py::test_startup_reconciliation_applied_verifies_without_approval_waiter
+          tests/conformance/test_terminal_authority.py::test_terminal_proof_must_cover_declared_obligations
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Mypy
+        run: uv run mypy src
+
+      - name: Portable core import boundary
+        run: uv run python scripts/check_portable_core_imports.py
+
+      - name: Full Linux pytest
+        run: uv run python -m pytest -k "not (test_env_scan_all_healthy or test_terminate_process_tree_kills_children)"
+
+  stage-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+
+      - name: Overlay exact portable-runtime tree
+        shell: bash
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+          git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin "$PORTABLE_COMMIT"
+          git -C "$RUNNER_TEMP/portable-runtime" checkout --detach "$PORTABLE_COMMIT"
+          rm -rf src/portable_runtime
+          cp -R "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("portable-runtime-pin.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data["commit"] = "0a22ad07f127a2051fe7a0eb5b19260a25ede7ba"
+          data["tree_sha256"] = "6ab95865cfc04e398e00edabcfa68ffc2a76c00d2475cc627cdbcbfb8b6a89f3"
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Verify exact public pin and tree digest
+        shell: bash
+        run: uv run python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
+
+      - name: Windows-native regressions
+        run: uv run python -m pytest -k "test_env_scan_all_healthy or test_terminate_process_tree_kills_children"
+
+  commit-vendor:
+    needs: [stage-linux, stage-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Materialize exact verified vendor tree
+        shell: bash
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+          git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin "$PORTABLE_COMMIT"
+          git -C "$RUNNER_TEMP/portable-runtime" checkout --detach "$PORTABLE_COMMIT"
+          rm -rf src/portable_runtime
+          cp -R "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("portable-runtime-pin.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data["commit"] = "0a22ad07f127a2051fe7a0eb5b19260a25ede7ba"
+          data["tree_sha256"] = "6ab95865cfc04e398e00edabcfa68ffc2a76c00d2475cc627cdbcbfb8b6a89f3"
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+          python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
+          bad="$(git diff --name-only | grep -Ev '^(portable-runtime-pin\.json|src/portable_runtime/)' || true)"
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            exit 1
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add portable-runtime-pin.json src/portable_runtime
+          git commit -m "chore: sync portable-runtime 0a22ad07"
+          git push origin HEAD:vendor/portable-runtime-0a22ad07-public
