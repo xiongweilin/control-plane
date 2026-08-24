@@ -1169,19 +1169,29 @@ class PortableRuntimeAuthority:
             return []
         from portable_runtime.workflows.completion import CompletionAuthority
 
-        declared_refs = [
-            str(ref).strip()
-            for ref in report.obligation_refs
-            if isinstance(ref, str) and ref.strip()
-        ]
-        derived_refs = obligation_refs_for_checks(report.checks)
-        if declared_refs and not set(derived_refs).issubset(declared_refs):
-            missing = sorted(set(derived_refs).difference(declared_refs))
-            raise ValueError(
-                "typed verification report omits obligations for checks: "
-                + ", ".join(missing)
+        declared_refs = list(
+            dict.fromkeys(
+                str(ref).strip()
+                for ref in report.obligation_refs
+                if isinstance(ref, str) and ref.strip()
             )
-        obligation_refs = list(dict.fromkeys(declared_refs or derived_refs))
+        )
+        derived_refs = list(dict.fromkeys(obligation_refs_for_checks(report.checks)))
+        if declared_refs != derived_refs:
+            missing = [ref for ref in derived_refs if ref not in declared_refs]
+            extra = [ref for ref in declared_refs if ref not in derived_refs]
+            detail = []
+            if missing:
+                detail.append("missing=" + ",".join(missing))
+            if extra:
+                detail.append("extra=" + ",".join(extra))
+            if not detail:
+                detail.append("order-or-duplicate-normalization-mismatch")
+            raise ValueError(
+                "typed verification report obligation projection mismatch: "
+                + "; ".join(detail)
+            )
+        obligation_refs = declared_refs
         required_fn = getattr(CompletionAuthority, "required_obligation_refs", None)
         required_obligations = set(required_fn(work)) if callable(required_fn) else set()
         if passed and not required_obligations.issubset(obligation_refs):
