@@ -37,7 +37,7 @@ jobs:
           replace(
               verifier,
               '''    obligation_refs: list[str] = field(default_factory=list)\n    @property\n''',
-              '''    obligation_refs: list[str] = field(default_factory=list)\n\n    @classmethod\n    def from_checks(cls, *, repair_id: str, checks: list[CheckResult]) -> "VerificationReport":\n        \"\"\"Build a report with the verifier-owned check-to-obligation projection.\"\"\"\n\n        normalized_checks = list(checks)\n        return cls(\n            repair_id=repair_id,\n            checks=normalized_checks,\n            obligation_refs=obligation_refs_for_checks(normalized_checks),\n        )\n\n    @property\n''',
+              '''    obligation_refs: list[str] = field(default_factory=list)\n\n    @classmethod\n    def from_checks(cls, *, repair_id: str, checks: list[CheckResult]) -> VerificationReport:\n        \"\"\"Build a report with the verifier-owned check-to-obligation projection.\"\"\"\n\n        normalized_checks = list(checks)\n        return cls(\n            repair_id=repair_id,\n            checks=normalized_checks,\n            obligation_refs=obligation_refs_for_checks(normalized_checks),\n        )\n\n    @property\n''',
           )
           replace(
               verifier,
