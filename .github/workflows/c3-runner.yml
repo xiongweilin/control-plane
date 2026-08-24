@@ -1,0 +1,32 @@
+name: C3 runner
+
+on:
+  push:
+    branches:
+      - c3/closure-authority
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c3/closure-authority
+          fetch-depth: 0
+      - name: Apply wiring
+        run: python scripts/c3_wire.py
+      - name: Compile changed Python
+        run: python -m compileall -q src/control_plane tests scripts/c3_wire.py
+      - name: Commit clean C3 branch
+        shell: bash
+        run: |
+          git rm .github/workflows/c3-bootstrap.yml .github/workflows/c3-runner.yml scripts/c3_wire.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src tests
+          git commit -m "C3: wire unique repair closure authority"
+          git push origin HEAD:c3/closure-authority
