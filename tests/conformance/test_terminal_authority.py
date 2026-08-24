@@ -182,8 +182,15 @@ def test_store_terminal_primitive_requires_symmetric_pair_metadata(backend: str,
         with pytest.raises(ValueError, match="symmetric proof refs"):
             store.commit_terminal(terminal_work, terminal_run, [proof.id])
 
-        terminal_work = terminal_work.model_copy(update={"metadata": {"_completion_proof_refs": [proof.id]}})
-        terminal_run = terminal_run.model_copy(update={"metadata": {"_completion_proof_refs": [proof.id]}})
+        required = CompletionAuthority.required_obligation_refs(work)
+        audit = {
+            "_completion_proof_refs": [proof.id],
+            "completion_required_obligations": sorted(required),
+            "completion_covered_obligations": sorted(required),
+            "completion_missing_obligations": [],
+        }
+        terminal_work = terminal_work.model_copy(update={"metadata": dict(audit)})
+        terminal_run = terminal_run.model_copy(update={"metadata": dict(audit)})
         assert store.commit_terminal(terminal_work, terminal_run, [proof.id]).status == "succeeded"
     finally:
         if backend == "sqlite":
