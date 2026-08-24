@@ -27,7 +27,10 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --locked --extra dev
       - name: Apply narrow C4b wiring
-        run: uv run python scripts/c4b_wire.py
+        shell: bash
+        run: |
+          sed -i 's/integrity_counts = {kind: 0 for kind in INTEGRITY_KINDS}/integrity_counts = dict.fromkeys(INTEGRITY_KINDS, 0)/' scripts/c4b_wire.py
+          uv run python scripts/c4b_wire.py
       - name: Focused C4b checks
         run: |
           uv run ruff check src/control_plane/outward_semantics.py src/control_plane/app.py src/control_plane/service.py src/control_plane/metrics.py tests/test_c4b_outward_semantics.py
