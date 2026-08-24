@@ -14,24 +14,24 @@ def _create_legacy_db(path) -> None:
     conn.executescript(
         """
         CREATE TABLE repairs (
-  id TEXT PRIMARY KEY,
-  fingerprint TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  status TEXT NOT NULL,
-  attempt INTEGER NOT NULL DEFAULT 1,
-  agent_call_count INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  finished_at INTEGER,
-  result TEXT,
-  error TEXT
+            id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            agent_call_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            result TEXT,
+            error TEXT
         );
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT INTO repairs(
-  id, fingerprint, payload_json, status, attempt, created_at, updated_at
+            id, fingerprint, payload_json, status, attempt, created_at, updated_at
         ) VALUES ('legacy-closed', 'fp-closed', '{}', 'closed', 1, 1000, 1000);
         INSERT INTO repairs(
-  id, fingerprint, payload_json, status, attempt, created_at, updated_at
+            id, fingerprint, payload_json, status, attempt, created_at, updated_at
         ) VALUES ('legacy-verified', 'fp-verified', '{}', 'verified', 1, 1000, 1000);
         """
     )
@@ -113,22 +113,24 @@ def test_set_repair_resolution_does_not_change_repair_state(tmp_path) -> None:
     "resolution_kind",
     [ResolutionKind.RESTORED, ResolutionKind.NO_ACTION_REQUIRED],
 )
-def test_positive_resolution_fails_closed_without_verified_proof(tmp_path, resolution_kind) -> None:
+def test_positive_resolution_fails_closed_without_verified_proof(
+    tmp_path, resolution_kind: ResolutionKind
+) -> None:
     store = Store(tmp_path / f"{resolution_kind.value}.db")
     store.create_repair("repair-4", "fp-4", "{}")
 
     with pytest.raises(ValueError, match="restoration_status=verified"):
         store.set_repair_resolution(
-  "repair-4",
-  resolution_kind=resolution_kind,
-  restoration_status=RestorationStatus.UNVERIFIED,
-  proof_refs=("proof-1",),
+            "repair-4",
+            resolution_kind=resolution_kind,
+            restoration_status=RestorationStatus.UNVERIFIED,
+            proof_refs=("proof-1",),
         )
     with pytest.raises(ValueError, match="at least one restoration proof ref"):
         store.set_repair_resolution(
-  "repair-4",
-  resolution_kind=resolution_kind,
-  restoration_status=RestorationStatus.VERIFIED,
+            "repair-4",
+            resolution_kind=resolution_kind,
+            restoration_status=RestorationStatus.VERIFIED,
         )
 
     row = store.get_repair("repair-4")
@@ -166,7 +168,9 @@ def test_reopen_initialization_is_idempotent_and_preserves_resolution(tmp_path) 
         restoration_status=RestorationStatus.UNKNOWN,
         proof_refs=("observation-1",),
     )
-    expected = dict(store.get_repair("repair-6"))
+    stored = store.get_repair("repair-6")
+    assert stored is not None
+    expected = dict(stored)
     store.close()
 
     Store(db).close()
@@ -186,8 +190,10 @@ def test_reopen_initialization_is_idempotent_and_preserves_resolution(tmp_path) 
 
 def test_resolution_write_never_touches_portable_store(tmp_path) -> None:
     class ExplodingPortableStore:
-        def __getattr__(self, name):
-  raise AssertionError(f"portable store must not be touched by C2 resolution write: {name}")
+        def __getattr__(self, name: str):
+            raise AssertionError(
+                f"portable store must not be touched by C2 resolution write: {name}"
+            )
 
     store = Store(tmp_path / "portable-boundary.db")
     store.create_repair("repair-7", "fp-7", "{}")
