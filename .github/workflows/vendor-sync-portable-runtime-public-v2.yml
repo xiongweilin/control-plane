@@ -1,4 +1,5 @@
 name: Vendor Sync Portable Runtime Public V2
+# staging revision: windows verifier path corrected
 
 on:
   push:
