@@ -6,6 +6,9 @@ on:
       - vendor/portable-runtime-0a22ad07-public
     paths:
       - .github/workflows/vendor-sync-portable-runtime-public.yml
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -176,6 +179,7 @@ jobs:
         run: uv run python -m pytest -k "test_env_scan_all_healthy or test_terminate_process_tree_kills_children"
 
   commit-vendor:
+    if: github.event_name == 'push'
     needs: [stage-linux, stage-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
