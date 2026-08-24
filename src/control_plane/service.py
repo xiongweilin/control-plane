@@ -1657,7 +1657,7 @@ class RepairService:
         reconciliation_required = self._is_reconciliation_required(error_text)
         if self.portable_authority is not None:
             if verification_failure:
-                failure_report = VerificationReport(
+                failure_report = VerificationReport.from_checks(
                     repair_id=repair_id,
                     checks=[CheckResult("verification_failure", False, error_text)],
                 )
