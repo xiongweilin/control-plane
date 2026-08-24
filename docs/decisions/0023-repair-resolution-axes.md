@@ -14,11 +14,11 @@ Keep three orthogonal axes:
 - `ResolutionKind`: case disposition (`unresolved`, `restored`, `no_action_required`, `rejected`, `rolled_back`, `superseded`, `escalated`).
 - `RestorationStatus`: reality judgment (`unverified`, `verified`, `failed`, `unknown`).
 
-`UNVERIFIED` means qualifying restoration evidence has not yet been established and makes no claim about reality. `UNKNOWN` means observation or checking occurred but the result remains indeterminate.
+`UNVERIFIED` means qualifying restoration evidence has not yet been established and makes no claim about reality. `UNKNOWN` means the current reality result cannot be determined, including when available evidence is unavailable or insufficient.
 
-Persist restoration proof lineage separately as `restoration_proof_refs_json`. Structurally, `restored` and `no_action_required` require `restoration_status=verified` and at least one proof reference. C2 does not establish which product authority may make those assertions; that is deferred to C3 ClosureAuthority.
+Persist restoration proof lineage separately as `restoration_proof_refs_json`. The restoration axis itself requires evidence lineage for evidence-bearing judgments: both `verified` and `failed` require at least one restoration proof reference. Orthogonally, `restored` and `no_action_required` require `restoration_status=verified`. C2 does not establish which product authority may make those assertions; that is deferred to C3 ClosureAuthority.
 
-Historical rows migrate conservatively to `unknown + unresolved` with no proof refs. A legacy `CLOSED` or `VERIFIED` value is not retrospective restoration evidence. Newly created repairs initialize explicitly to `unverified + unresolved`.
+Historical rows migrate conservatively to `unknown + unresolved` with no proof refs. A legacy `CLOSED` or `VERIFIED` value is not retrospective restoration evidence. Newly created repairs initialize explicitly to `unverified + unresolved`. Both historical and new rows begin with `resolution_updated_at=NULL`; that timestamp records a real resolution/restoration judgment write, not schema initialization.
 
 ## Non-goals
 

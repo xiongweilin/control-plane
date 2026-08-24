@@ -62,7 +62,7 @@ def test_new_repair_starts_unverified_and_unresolved(tmp_path) -> None:
     assert row["restoration_status"] == RestorationStatus.UNVERIFIED.value
     assert row["resolution_kind"] == ResolutionKind.UNRESOLVED.value
     assert json.loads(row["restoration_proof_refs_json"]) == []
-    assert row["resolution_updated_at"] is not None
+    assert row["resolution_updated_at"] is None
     store.close()
 
 
@@ -137,6 +137,48 @@ def test_positive_resolution_fails_closed_without_verified_proof(
     assert row is not None
     assert row["resolution_kind"] == ResolutionKind.UNRESOLVED.value
     assert row["restoration_status"] == RestorationStatus.UNVERIFIED.value
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("resolution_kind", "restoration_status"),
+    [
+        (ResolutionKind.REJECTED, RestorationStatus.VERIFIED),
+        (ResolutionKind.ESCALATED, RestorationStatus.FAILED),
+    ],
+)
+def test_evidence_bearing_restoration_requires_proof_refs(
+    tmp_path, resolution_kind: ResolutionKind, restoration_status: RestorationStatus
+) -> None:
+    store = Store(tmp_path / f"{resolution_kind.value}-{restoration_status.value}.db")
+    store.create_repair("repair-evidence", "fp-evidence", "{}")
+    with pytest.raises(ValueError, match="requires restoration proof refs"):
+        store.set_repair_resolution(
+            "repair-evidence",
+            resolution_kind=resolution_kind,
+            restoration_status=restoration_status,
+        )
+    row = store.get_repair("repair-evidence")
+    assert row is not None
+    assert row["resolution_kind"] == ResolutionKind.UNRESOLVED.value
+    assert row["restoration_status"] == RestorationStatus.UNVERIFIED.value
+    store.close()
+
+
+def test_non_restored_disposition_can_carry_verified_restoration_with_proof(tmp_path) -> None:
+    store = Store(tmp_path / "rejected-verified.db")
+    store.create_repair("repair-independent", "fp-independent", "{}")
+    store.set_repair_resolution(
+        "repair-independent",
+        resolution_kind=ResolutionKind.REJECTED,
+        restoration_status=RestorationStatus.VERIFIED,
+        proof_refs=("proof-independent",),
+    )
+    row = store.get_repair("repair-independent")
+    assert row is not None
+    assert row["resolution_kind"] == ResolutionKind.REJECTED.value
+    assert row["restoration_status"] == RestorationStatus.VERIFIED.value
+    assert json.loads(row["restoration_proof_refs_json"]) == ["proof-independent"]
     store.close()
 
 

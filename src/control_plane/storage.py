@@ -285,7 +285,7 @@ class Store:
                     RestorationStatus.UNVERIFIED.value,
                     ResolutionKind.UNRESOLVED.value,
                     "[]",
-                    now,
+                    None,
                     now,
                     now,
                 ),
