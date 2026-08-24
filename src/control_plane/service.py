@@ -3322,7 +3322,7 @@ class RepairService:
         if resolved_project in self.config.allowed_auto_projects:
             try:
                 project_dir = self.config.project_dirs.get(
-                    resolved_project, f"D:\infrastructure\compose\{resolved_project}"
+                    resolved_project, rf"D:\infrastructure\compose\{resolved_project}"
                 )
                 result = await self._invoke_personal_operation(
                     repair_id=repair_id,

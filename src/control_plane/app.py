@@ -18,8 +18,8 @@ from pydantic import BaseModel
 from .approvals import ApprovalManager
 from .audit import inspect_session_fields
 from .budget import Budget
-from .codex_runner import CodexRunner
 from .closure_authority import ClosureAuthorityError
+from .codex_runner import CodexRunner
 from .config import ControlPlaneConfig, canonical_human_principal
 from .metrics import AUTH_FAILURES, ControlPlaneCollector
 from .models import (
