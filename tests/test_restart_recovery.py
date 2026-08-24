@@ -160,7 +160,7 @@ def _seed_pending_repair(store: Store, repair_id: str, branch_exists: bool = Tru
 
 
 @pytest.mark.asyncio
-async def test_resume_pending_approval_reject_after_restart(tmp_path) -> None:
+async def test_resume_pending_approval_reject_without_closure_authority_fails_closed(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "repos").mkdir(parents=True, exist_ok=True)
     store = Store(config.state_db)
@@ -175,9 +175,15 @@ async def test_resume_pending_approval_reject_after_restart(tmp_path) -> None:
     assert store.get_repair(repair_id)["status"] == "needs_approval"
     await service.approvals.decide(repair_id, "reject")
     await asyncio.wait_for(resume_task, timeout=10)
+    # Restart compatibility construction also omits portable Runtime. It may
+    # resume the approval waiter, but it cannot manufacture a terminal rejection
+    # without ClosureAuthority.
     row = store.get_repair(repair_id)
-    assert row["status"] == "closed"
-    assert row["result"] == "rejected"
+    assert row["status"] == "failed"
+    assert row["resolution_kind"] == "unresolved"
+    assert row["restoration_status"] == "unverified"
+    assert row["result"] != "rejected"
+    assert "ClosureAuthority" in str(row["error"] or "")
     await service.close()
     store.close()
 
