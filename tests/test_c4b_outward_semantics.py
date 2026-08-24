@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# Final non-harness C4b CI gate anchor.
 from dataclasses import replace
 from pathlib import Path
 
