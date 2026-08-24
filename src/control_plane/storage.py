@@ -68,6 +68,7 @@ class Store:
                     restoration_status TEXT NOT NULL DEFAULT 'unknown',
                     resolution_kind TEXT NOT NULL DEFAULT 'unresolved',
                     restoration_proof_refs_json TEXT NOT NULL DEFAULT '[]',
+                    resolution_basis_refs_json TEXT NOT NULL DEFAULT '[]',
                     resolution_updated_at INTEGER,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
@@ -185,6 +186,9 @@ class Store:
         self._ensure_column(
             "repairs", "restoration_proof_refs_json", "TEXT NOT NULL DEFAULT '[]'"
         )
+        self._ensure_column(
+            "repairs", "resolution_basis_refs_json", "TEXT NOT NULL DEFAULT '[]'"
+        )
         self._ensure_column("repairs", "resolution_updated_at", "INTEGER")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -274,9 +278,9 @@ class Store:
             self._connection.execute(
                 "INSERT INTO repairs("
                 "id, fingerprint, payload_json, status, attempt, restoration_status, "
-                "resolution_kind, restoration_proof_refs_json, resolution_updated_at, "
-                "created_at, updated_at"
-                ") VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+                "resolution_kind, restoration_proof_refs_json, resolution_basis_refs_json, "
+                "resolution_updated_at, created_at, updated_at"
+                ") VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     repair_id,
                     fingerprint,
@@ -284,6 +288,7 @@ class Store:
                     attempt,
                     RestorationStatus.UNVERIFIED.value,
                     ResolutionKind.UNRESOLVED.value,
+                    "[]",
                     "[]",
                     None,
                     now,
@@ -304,23 +309,22 @@ class Store:
         resolution_kind: ResolutionKind | str,
         restoration_status: RestorationStatus | str,
         proof_refs: tuple[str, ...] | list[str] = (),
+        basis_refs: tuple[str, ...] | list[str] = (),
     ) -> None:
-        """Persist the orthogonal resolution axes without changing RepairState.
-
-        C2 intentionally establishes storage and structural invariants only. It does
-        not decide who is authorized to assert restoration; C3 owns that question.
-        """
-        kind, restoration, refs = normalize_repair_resolution(
-            resolution_kind, restoration_status, proof_refs
+        """Persist orthogonal disposition/restoration lineage without lifecycle authority."""
+        kind, restoration, proofs, bases = normalize_repair_resolution(
+            resolution_kind, restoration_status, proof_refs, basis_refs
         )
         with self._lock:
             cursor = self._connection.execute(
                 "UPDATE repairs SET resolution_kind=?, restoration_status=?, "
-                "restoration_proof_refs_json=?, resolution_updated_at=? WHERE id=?",
+                "restoration_proof_refs_json=?, resolution_basis_refs_json=?, "
+                "resolution_updated_at=? WHERE id=?",
                 (
                     kind.value,
                     restoration.value,
-                    json.dumps(list(refs)),
+                    json.dumps(list(proofs)),
+                    json.dumps(list(bases)),
                     int(time.time()),
                     repair_id,
                 ),
@@ -394,6 +398,18 @@ class Store:
         work = portable.get_work(f"work_legacy_{repair_id}")
         run = portable.get_run(f"run_legacy_{repair_id}")
         if work is None and run is None:
+            return True
+        canonical_success = (
+            work is not None
+            and run is not None
+            and getattr(work, "status", "") == "completed"
+            and getattr(run, "status", "") == "succeeded"
+        )
+        if canonical_success:
+            if status not in {"verified", "closed"}:
+                raise ValueError(
+                    "canonical successful terminal pair cannot be downgraded by legacy lifecycle"
+                )
             return True
         work_status = {
             "queued": "open",

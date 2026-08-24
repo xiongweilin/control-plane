@@ -127,3 +127,54 @@ async def test_conflicting_human_approval_is_rejected(tmp_path: Path) -> None:
             decided_by="bob",
             operation_specs=[spec],
         )
+
+
+@pytest.mark.asyncio
+async def test_rollback_decision_materializes_explicit_rollback_grant(tmp_path: Path) -> None:
+    authority = _authority(tmp_path)
+    await authority.prepare_code_edit(
+        repair_id="repair-human-rollback",
+        repo=str(tmp_path),
+        prompt="prepare candidate",
+    )
+    decision, grants = authority.record_human_approval(
+        "repair-human-rollback",
+        decided_by="alice",
+        action="rollback",
+        operation_specs=[
+            {
+                "capability": "git.rollback",
+                "resource_ref": f"repo:{tmp_path.resolve()}",
+                "subject_version_refs": ["git:abc123"],
+                "effect_class": "write-local",
+            }
+        ],
+    )
+    assert decision.selected_option == "rollback"
+    assert [grant.allowed_capabilities for grant in grants] == [["git.rollback"]]
+    assert all(grant.source_decision_ref == decision.id for grant in grants)
+
+
+@pytest.mark.asyncio
+async def test_reject_decision_materializes_no_effect_grant(tmp_path: Path) -> None:
+    authority = _authority(tmp_path)
+    await authority.prepare_code_edit(
+        repair_id="repair-human-reject",
+        repo=str(tmp_path),
+        prompt="prepare candidate",
+    )
+    decision, grants = authority.record_human_approval(
+        "repair-human-reject",
+        decided_by="alice",
+        action="reject",
+        operation_specs=[
+            {
+                "capability": "git.rollback",
+                "resource_ref": f"repo:{tmp_path.resolve()}",
+                "subject_version_refs": ["git:abc123"],
+                "effect_class": "write-local",
+            }
+        ],
+    )
+    assert decision.selected_option == "reject"
+    assert grants == []
