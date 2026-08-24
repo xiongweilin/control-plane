@@ -32,27 +32,46 @@ class ResolutionKind(StrEnum):
     ESCALATED = "escalated"
 
 
+def _normalize_refs(values: Iterable[str], *, label: str) -> tuple[str, ...]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for raw_ref in values:
+        ref = raw_ref.strip()
+        if not ref:
+            raise ValueError(f"{label} refs must be non-empty strings")
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return tuple(refs)
+
+
 def normalize_repair_resolution(
     resolution_kind: ResolutionKind | str,
     restoration_status: RestorationStatus | str,
     proof_refs: Iterable[str],
-) -> tuple[ResolutionKind, RestorationStatus, tuple[str, ...]]:
-    """Validate structural C2 invariants without granting closure authority."""
+    basis_refs: Iterable[str] = (),
+) -> tuple[
+    ResolutionKind,
+    RestorationStatus,
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Validate orthogonal disposition/restoration lineage invariants.
+
+    ``basis_refs`` explain why the case disposition was selected. ``proof_refs``
+    explain the current restoration judgment. Neither lineage grants closure
+    authority by itself; product ClosureAuthority owns that question.
+    """
 
     kind = ResolutionKind(resolution_kind)
     restoration = RestorationStatus(restoration_status)
-    refs: list[str] = []
-    seen: set[str] = set()
-    for raw_ref in proof_refs:
-        ref = raw_ref.strip()
-        if not ref:
-            raise ValueError("restoration proof refs must be non-empty strings")
-        if ref not in seen:
-            seen.add(ref)
-            refs.append(ref)
+    proofs = _normalize_refs(proof_refs, label="restoration proof")
+    bases = _normalize_refs(basis_refs, label="resolution basis")
 
-    # Evidence lineage is owned by the restoration axis, independent of disposition.
-    if restoration in {RestorationStatus.VERIFIED, RestorationStatus.FAILED} and not refs:
+    if kind is not ResolutionKind.UNRESOLVED and not bases:
+        raise ValueError(f"resolution_kind={kind.value} requires resolution basis refs")
+
+    if restoration in {RestorationStatus.VERIFIED, RestorationStatus.FAILED} and not proofs:
         raise ValueError(
             f"restoration_status={restoration.value} requires restoration proof refs"
         )
@@ -63,4 +82,4 @@ def normalize_repair_resolution(
     ):
         raise ValueError(f"{kind.value} requires restoration_status=verified")
 
-    return kind, restoration, tuple(refs)
+    return kind, restoration, proofs, bases
