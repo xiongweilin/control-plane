@@ -35,6 +35,7 @@ from .models import (
     TaskRequest,
 )
 from .notify import Notifier
+from .outward_semantics import project_repair
 from .portable_authority import PortableRuntimeAuthority
 from .runtime import (
     acquire_single_instance,
@@ -560,6 +561,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     "status": row["status"],
                     "attempt": row["attempt"],
                     "result": row["result"],
+                    **project_repair(row),
                 }
                 for row in store.list_repairs_with_fallback(limit=20)
             ],
@@ -1035,6 +1037,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                     "result": row["result"],
+                    **project_repair(row),
                 }
                 for row in store.list_repairs_with_fallback(limit=20)
             ],
