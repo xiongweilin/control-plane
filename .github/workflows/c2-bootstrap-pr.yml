@@ -1,0 +1,50 @@
+name: C2 bootstrap PR
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'c2/repair-resolution-axes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c2/repair-resolution-axes
+          fetch-depth: 0
+      - name: Apply embedded C2 patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/c2-bootstrap.yml').read_text(encoding='utf-8')
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          embedded = workflow[start:end]
+          code = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in embedded.splitlines()
+          )
+          exec(compile(code, 'c2-bootstrap-embedded.py', 'exec'))
+          PY
+      - name: Remove bootstrap files from final diff
+        shell: bash
+        run: |
+          rm .github/workflows/c2-bootstrap.yml
+          rm .github/workflows/c2-bootstrap-pr.yml
+      - name: Commit C2 patch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "C2: add orthogonal repair resolution axes"
+          git push origin HEAD:c2/repair-resolution-axes
