@@ -20,7 +20,7 @@ class RestorationStatus(StrEnum):
 
 
 class ResolutionKind(StrEnum):
-    """Disposition of the repair case, orthogonal to workflow lifecycle and reality judgment."""
+    """Disposition of a repair case, separate from lifecycle and reality judgment."""
 
     UNRESOLVED = "unresolved"
     RESTORED = "restored"
@@ -36,7 +36,7 @@ def normalize_repair_resolution(
     restoration_status: RestorationStatus | str,
     proof_refs: Iterable[str],
 ) -> tuple[ResolutionKind, RestorationStatus, tuple[str, ...]]:
-    """Validate only structural C2 invariants; this function grants no closure authority."""
+    """Validate structural C2 invariants without granting closure authority."""
 
     kind = ResolutionKind(resolution_kind)
     restoration = RestorationStatus(restoration_status)
@@ -45,15 +45,15 @@ def normalize_repair_resolution(
     for raw_ref in proof_refs:
         ref = raw_ref.strip()
         if not ref:
-  raise ValueError("restoration proof refs must be non-empty strings")
+            raise ValueError("restoration proof refs must be non-empty strings")
         if ref not in seen:
-  seen.add(ref)
-  refs.append(ref)
+            seen.add(ref)
+            refs.append(ref)
 
     if kind in {ResolutionKind.RESTORED, ResolutionKind.NO_ACTION_REQUIRED}:
         if restoration is not RestorationStatus.VERIFIED:
-  raise ValueError(f"{kind.value} requires restoration_status=verified")
+            raise ValueError(f"{kind.value} requires restoration_status=verified")
         if not refs:
-  raise ValueError(f"{kind.value} requires at least one restoration proof ref")
+            raise ValueError(f"{kind.value} requires at least one restoration proof ref")
 
     return kind, restoration, tuple(refs)
