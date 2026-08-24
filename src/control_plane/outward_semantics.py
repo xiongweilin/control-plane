@@ -14,16 +14,29 @@ INTEGRITY_KINDS = (
 )
 
 
-def _text(row: Mapping[str, Any], key: str, default: str) -> str:
-    value = row.get(key, default)
+def _value(row: Any, key: str, default: Any) -> Any:
+    """Read dict-like and sqlite3.Row inputs without mutating either."""
+
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    keys = getattr(row, "keys", None)
+    if callable(keys):
+        available = keys()
+        if key in available:
+            return row[key]
+    return default
+
+
+def _text(row: Any, key: str, default: str) -> str:
+    value = _value(row, key, default)
     text = str(value or "").strip()
     return text or default
 
 
-def decode_ref_list(row: Mapping[str, Any], key: str) -> list[str]:
+def decode_ref_list(row: Any, key: str) -> list[str]:
     """Read a stored lineage list without treating malformed data as evidence."""
 
-    raw = row.get(key, "[]")
+    raw = _value(row, key, "[]")
     try:
         value = json.loads(str(raw or "[]"))
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -40,7 +53,7 @@ def decode_ref_list(row: Mapping[str, Any], key: str) -> list[str]:
     return refs
 
 
-def _raw_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+def _raw_projection(row: Any) -> dict[str, Any]:
     return {
         "status": _text(row, "status", "unknown"),
         "resolution_kind": _text(
@@ -58,7 +71,7 @@ def _raw_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def integrity_violation_flags(row: Mapping[str, Any]) -> dict[str, bool]:
+def integrity_violation_flags(row: Any) -> dict[str, bool]:
     """Return observational integrity flags; this function performs no repair or mutation."""
 
     projection = _raw_projection(row)
@@ -116,7 +129,7 @@ def semantic_summary(*, status: str, resolution_kind: str, restoration_status: s
     )
 
 
-def project_repair(row: Mapping[str, Any]) -> dict[str, Any]:
+def project_repair(row: Any) -> dict[str, Any]:
     """Project existing repair facts for outward consumers without mutation."""
 
     projection = _raw_projection(row)
