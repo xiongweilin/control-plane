@@ -126,7 +126,7 @@ def test_positive_resolution_fails_closed_without_verified_proof(
             restoration_status=RestorationStatus.UNVERIFIED,
             proof_refs=("proof-1",),
         )
-    with pytest.raises(ValueError, match="at least one restoration proof ref"):
+    with pytest.raises(ValueError, match="restoration_status=verified requires restoration proof refs"):
         store.set_repair_resolution(
             "repair-4",
             resolution_kind=resolution_kind,
