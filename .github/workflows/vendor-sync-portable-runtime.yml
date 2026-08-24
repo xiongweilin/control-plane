@@ -6,9 +6,18 @@ on:
       - vendor/portable-runtime-0a22ad07
     paths:
       - .github/workflows/vendor-sync-portable-runtime.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/vendor-sync-portable-runtime.yml
 
 permissions:
   contents: write
+
+concurrency:
+  group: stage-portable-runtime-pure-sync
+  cancel-in-progress: true
 
 jobs:
   sync-and-verify:
@@ -125,5 +134,9 @@ jobs:
           echo "vendor tree hash after: $new_hash" >> "$GITHUB_STEP_SUMMARY"
           echo "semantic changes: NONE" >> "$GITHUB_STEP_SUMMARY"
           echo "purpose: compatibility verification only" >> "$GITHUB_STEP_SUMMARY"
+          if git diff --cached --quiet; then
+            echo "mechanical vendor sync already present; validation only"
+            exit 0
+          fi
           git commit -m "chore: sync portable-runtime pin to 0a22ad07"
           git push origin HEAD:vendor/portable-runtime-0a22ad07
