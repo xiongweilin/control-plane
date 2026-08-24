@@ -1013,7 +1013,7 @@ async def test_repair_flow_with_approval_fails_closed_without_portable_runtime(t
 
 
 @pytest.mark.asyncio
-async def test_timed_out_agent_candidate_waits_for_review_and_restores_branch(tmp_path) -> None:
+async def test_timed_out_agent_reject_without_closure_authority_fails_closed(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -1047,18 +1047,26 @@ async def test_timed_out_agent_candidate_waits_for_review_and_restores_branch(tm
     assert action["status"] == "needs_approval"
     assert f"fix/control-plane-{repair_id}" in action["after_json"]
 
+    # This compatibility construction intentionally omits portable Runtime /
+    # ClosureAuthority. Human rejection therefore cannot form a terminal
+    # disposition; the outer repair handler must fail closed instead.
     await approvals.decide(repair_id, "reject")
     for _ in range(100):
-        if store.get_repair(repair_id)["status"] == "closed":
+        if store.get_repair(repair_id)["status"] == "failed":
             break
         await asyncio.sleep(0.05)
-    assert store.get_repair(repair_id)["result"] == "rejected"
+    row = store.get_repair(repair_id)
+    assert row["status"] == "failed"
+    assert row["resolution_kind"] == "unresolved"
+    assert row["restoration_status"] == "unverified"
+    assert row["result"] != "rejected"
+    assert "ClosureAuthority" in str(row["error"] or "")
     await service.close()
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_reject_closes_repair_without_candidate(tmp_path) -> None:
+async def test_reject_without_closure_authority_does_not_form_terminal_disposition(tmp_path) -> None:
     config = _config(tmp_path)
     store = Store(config.state_db)
     approvals = ApprovalManager()
@@ -1085,13 +1093,19 @@ async def test_reject_closes_repair_without_candidate(tmp_path) -> None:
         if store.get_repair(repair_id)["status"] == "needs_approval":
             break
         await asyncio.sleep(0.05)
+    # Compatibility-only construction: without portable Runtime there is no
+    # ClosureAuthority, so rejection must not recreate the old direct CLOSED seam.
     await approvals.decide(repair_id, "reject")
     for _ in range(200):
-        if store.get_repair(repair_id)["status"] == "closed":
+        if store.get_repair(repair_id)["status"] == "failed":
             break
         await asyncio.sleep(0.05)
-    assert store.get_repair(repair_id)["status"] == "closed"
-    assert store.get_repair(repair_id)["result"] == "rejected"
+    row = store.get_repair(repair_id)
+    assert row["status"] == "failed"
+    assert row["resolution_kind"] == "unresolved"
+    assert row["restoration_status"] == "unverified"
+    assert row["result"] != "rejected"
+    assert "ClosureAuthority" in str(row["error"] or "")
     assert not store.list_candidates("candidate")
     await service.close()
     store.close()

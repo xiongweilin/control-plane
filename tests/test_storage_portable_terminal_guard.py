@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from control_plane.storage import Store
 from portable_runtime.core.models import Run, Work
 from portable_runtime.records.models import EvidenceArtifact
@@ -72,10 +74,18 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
         )
         legacy.attach_portable_store(portable, enable_read=True)
         legacy.create_repair("r2", "fp-r2", "{}")
+        before = legacy.get_repair("r2")
+        assert before is not None
+        before_status = before["status"]
+        before_error = before["error"]
 
-        # A later legacy update must not rewrite or strip proof-bearing
-        # canonical terminal records.
-        legacy.set_repair_status("r2", "failed", error="legacy retry marker")
+        # Canonical success is authoritative. A later legacy downgrade must
+        # fail before mutating either the legacy case row or canonical records.
+        with pytest.raises(
+            ValueError,
+            match="canonical successful terminal pair cannot be downgraded",
+        ):
+            legacy.set_repair_status("r2", "failed", error="legacy retry marker")
 
         current_work = portable.get_work(work.id)
         current_run = portable.get_run(run.id)
@@ -83,5 +93,17 @@ def test_legacy_terminal_projection_preserves_authority_committed_pair(tmp_path:
         assert current_run is not None and current_run.status == "succeeded"
         assert current_work.metadata["_completion_proof_refs"] == ["proof-r2"]
         assert current_run.metadata["_completion_proof_refs"] == ["proof-r2"]
+        for field in (
+            "completion_required_obligations",
+            "completion_covered_obligations",
+            "completion_missing_obligations",
+        ):
+            assert current_work.metadata[field] == current_run.metadata[field]
+
+        after = legacy.get_repair("r2")
+        assert after is not None
+        assert after["status"] == before_status
+        assert after["status"] != "failed"
+        assert after["error"] == before_error
     finally:
         legacy.close()
