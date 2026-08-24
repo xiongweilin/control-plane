@@ -57,8 +57,10 @@ def normalize_repair_resolution(
             f"restoration_status={restoration.value} requires restoration proof refs"
         )
 
-    if kind in {ResolutionKind.RESTORED, ResolutionKind.NO_ACTION_REQUIRED}:
-        if restoration is not RestorationStatus.VERIFIED:
-            raise ValueError(f"{kind.value} requires restoration_status=verified")
+    if (
+        kind in {ResolutionKind.RESTORED, ResolutionKind.NO_ACTION_REQUIRED}
+        and restoration is not RestorationStatus.VERIFIED
+    ):
+        raise ValueError(f"{kind.value} requires restoration_status=verified")
 
     return kind, restoration, tuple(refs)
