@@ -39,7 +39,8 @@ jobs:
       - name: Commit clean C4b product state
         shell: bash
         run: |
-          git rm .github/workflows/c4b-wire.yml scripts/c4b_wire.py
+          git rm .github/workflows/c4b-wire.yml
+          git rm -f scripts/c4b_wire.py
           git checkout origin/main -- .github/workflows/ci.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
