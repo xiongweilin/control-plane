@@ -1,0 +1,32 @@
+name: C3 Ruff fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c3/closure-authority
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - name: Apply exact Ruff fixes
+        run: uv run ruff check src/control_plane/app.py src/control_plane/service.py --fix
+      - name: Commit product-only fix
+        shell: bash
+        run: |
+          git rm .github/workflows/c3-ruff-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/control_plane/app.py src/control_plane/service.py
+          git commit -m "C3: satisfy Ruff after closure wiring"
+          git push origin HEAD:c3/closure-authority
