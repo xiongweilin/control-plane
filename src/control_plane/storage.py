@@ -8,6 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from control_plane.repair_resolution import (
+    ResolutionKind,
+    RestorationStatus,
+    normalize_repair_resolution,
+)
+
 if TYPE_CHECKING:
     from portable_runtime.core.models import Work as PortableWork
 else:
@@ -59,6 +65,10 @@ class Store:
                     original_error TEXT NOT NULL DEFAULT '',
                     recovery_error TEXT NOT NULL DEFAULT '',
                     timeout_kind TEXT NOT NULL DEFAULT '',
+                    restoration_status TEXT NOT NULL DEFAULT 'unknown',
+                    resolution_kind TEXT NOT NULL DEFAULT 'unresolved',
+                    restoration_proof_refs_json TEXT NOT NULL DEFAULT '[]',
+                    resolution_updated_at INTEGER,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     finished_at INTEGER,
@@ -166,6 +176,16 @@ class Store:
         self._ensure_column("repairs", "original_error", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("repairs", "recovery_error", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("repairs", "timeout_kind", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            "repairs", "restoration_status", "TEXT NOT NULL DEFAULT 'unknown'"
+        )
+        self._ensure_column(
+            "repairs", "resolution_kind", "TEXT NOT NULL DEFAULT 'unresolved'"
+        )
+        self._ensure_column(
+            "repairs", "restoration_proof_refs_json", "TEXT NOT NULL DEFAULT '[]'"
+        )
+        self._ensure_column("repairs", "resolution_updated_at", "INTEGER")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         """Add a column to an existing table when it is missing (SQLite has no IF NOT EXISTS)."""
@@ -252,9 +272,23 @@ class Store:
         now = int(time.time())
         with self._lock:
             self._connection.execute(
-                "INSERT INTO repairs(id, fingerprint, payload_json, status, attempt, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-                (repair_id, fingerprint, payload_json, attempt, now, now),
+                "INSERT INTO repairs("
+                "id, fingerprint, payload_json, status, attempt, restoration_status, "
+                "resolution_kind, restoration_proof_refs_json, resolution_updated_at, "
+                "created_at, updated_at"
+                ") VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    repair_id,
+                    fingerprint,
+                    payload_json,
+                    attempt,
+                    RestorationStatus.UNVERIFIED.value,
+                    ResolutionKind.UNRESOLVED.value,
+                    "[]",
+                    None,
+                    now,
+                    now,
+                ),
             )
 
     def get_repair(self, repair_id: str) -> sqlite3.Row | None:
@@ -262,6 +296,37 @@ class Store:
             return self._connection.execute(
                 "SELECT * FROM repairs WHERE id=?", (repair_id,)
             ).fetchone()
+
+    def set_repair_resolution(
+        self,
+        repair_id: str,
+        *,
+        resolution_kind: ResolutionKind | str,
+        restoration_status: RestorationStatus | str,
+        proof_refs: tuple[str, ...] | list[str] = (),
+    ) -> None:
+        """Persist the orthogonal resolution axes without changing RepairState.
+
+        C2 intentionally establishes storage and structural invariants only. It does
+        not decide who is authorized to assert restoration; C3 owns that question.
+        """
+        kind, restoration, refs = normalize_repair_resolution(
+            resolution_kind, restoration_status, proof_refs
+        )
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE repairs SET resolution_kind=?, restoration_status=?, "
+                "restoration_proof_refs_json=?, resolution_updated_at=? WHERE id=?",
+                (
+                    kind.value,
+                    restoration.value,
+                    json.dumps(list(refs)),
+                    int(time.time()),
+                    repair_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown repair: {repair_id}")
 
     def set_repair_status(self, repair_id: str, status: str, **fields: Any) -> None:
         allowed = {
