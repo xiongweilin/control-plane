@@ -44,6 +44,7 @@ from .evidence import EvidenceRecord, write_evidence
 from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
+from .outward_semantics import project_repair
 from .personal_operations import PersonalOperationsProvider
 from .physical_boundary import GitPhysicalBoundary
 from .reconciliation import (
@@ -311,6 +312,12 @@ class RepairService:
                 reg = provider_registry or ProviderRegistry()
                 self.capability_service = CapabilityService(boundary=_LegacyRoutingBoundary(reg))
                 self._provider_registry = reg
+
+    def _fresh_outward_projection(self, repair_id: str) -> dict[str, Any]:
+        row = self.store.get_repair(repair_id)
+        if row is None:
+            raise RuntimeError(f"repair missing after terminal authority write: {repair_id}")
+        return project_repair(row)
 
     async def _resolve_git_version_for_authority(self, repo: str) -> str:
         """Resolve the immutable source version used by the owner grant."""
@@ -1591,6 +1598,7 @@ class RepairService:
         if self.closure_authority is None:
             raise RuntimeError("successful repair requires ClosureAuthority")
         self.closure_authority.close_restored(repair_id)
+        terminal_projection = self._fresh_outward_projection(repair_id)
 
         branch = proposal.get("branch")
         rollback = (
@@ -1599,10 +1607,9 @@ class RepairService:
             else ""
         )
         try:
-            await self._notify("info", "验证通过", f"repair_id={repair_id}\n{report.summary}")
             await self._notify(
                 "info",
-                f"修复完成：{alert.labels.get('alertname', 'unknown')}",
+                terminal_projection["semantic_summary"],
                 f"repair_id={repair_id}\n{report.summary}{rollback}",
             )
         except Exception:
@@ -2317,7 +2324,8 @@ class RepairService:
             if self.closure_authority is None:
                 raise RuntimeError("rollback disposition requires ClosureAuthority")
             self.closure_authority.record_rolled_back(repair_id, receipts)
-            await self._notify("warning", "修复已回滚", f"repair_id={repair_id}")
+            projection = self._fresh_outward_projection(repair_id)
+            await self._notify("warning", projection["semantic_summary"], f"repair_id={repair_id}")
             raise RepairRejectedError()
         else:
             await self._record_canonical_human_approval(
@@ -2331,7 +2339,8 @@ class RepairService:
             if self.closure_authority is None:
                 raise RuntimeError("rejection disposition requires ClosureAuthority")
             self.closure_authority.close_rejected(repair_id)
-            await self._notify("info", "修复已被拒绝", f"repair_id={repair_id}")
+            projection = self._fresh_outward_projection(repair_id)
+            await self._notify("info", projection["semantic_summary"], f"repair_id={repair_id}")
             raise RepairRejectedError()
         write_evidence(
             self.config.evidence_dir,
