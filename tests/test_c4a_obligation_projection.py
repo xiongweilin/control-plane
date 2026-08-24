@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# Focused C4a acceptance matrix A-F; this commit anchors final non-harness CI.
 from pathlib import Path
 
 import pytest
