@@ -184,7 +184,10 @@ def test_rejection_without_decision_fails_closed(tmp_path) -> None:
     portable.save_work(Work(id=f"work_legacy_{repair_id}", title="repair"))
     portable.save_run(Run(id=f"run_legacy_{repair_id}", work_id=f"work_legacy_{repair_id}"))
 
-    with pytest.raises(ClosureAuthorityError, match="Decision is missing"):
+    with pytest.raises(
+        ClosureAuthorityError,
+        match="human Decision refs are missing or asymmetric",
+    ):
         ClosureAuthority(legacy, portable).close_rejected(repair_id)
     row = legacy.get_repair(repair_id)
     assert row["status"] == "needs_approval"
@@ -209,7 +212,7 @@ def test_rollback_records_disposition_but_not_restoration(tmp_path) -> None:
     assert row["status"] == "rolled_back"
     assert row["resolution_kind"] == ResolutionKind.ROLLED_BACK.value
     assert row["restoration_status"] == RestorationStatus.UNVERIFIED.value
-    assert json.loads(row["resolution_basis_refs_json"]) == [decision.id]
+    assert json.loads(row["resolution_basis_refs_json"]) == [decision.id, "req-rollback"]
     legacy.close()
 
 
