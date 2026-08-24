@@ -25,6 +25,18 @@ class VerificationReport:
     # Explicit obligation identifiers covered by this report.  A terminal
     # proof may not infer coverage from a provider's boolean result.
     obligation_refs: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_checks(cls, *, repair_id: str, checks: list[CheckResult]) -> VerificationReport:
+        """Build a report with the verifier-owned check-to-obligation projection."""
+
+        normalized_checks = list(checks)
+        return cls(
+            repair_id=repair_id,
+            checks=normalized_checks,
+            obligation_refs=obligation_refs_for_checks(normalized_checks),
+        )
+
     @property
     def all_passed(self) -> bool:
         return bool(self.checks) and all(check.passed for check in self.checks)
@@ -128,7 +140,7 @@ class _DirectVerifier:
             checks.append(CheckResult(f"logs:{target}", ok, message, ref))
         if not checks:
             checks.append(CheckResult("minimum_evidence", False, "No deterministic verification was configured"))
-        return VerificationReport(repair_id=repair_id, checks=checks)
+        return VerificationReport.from_checks(repair_id=repair_id, checks=checks)
     @staticmethod
     def diff_allowed(repo: str, diff: str) -> tuple[bool, str]:
         if FORBIDDEN_DIFF_PATTERNS.search(diff):
@@ -165,7 +177,12 @@ class Verifier:
         if self._capability_service is None:
             if self._direct is not None:
                 return await self._direct.verify_repair(repair_id=repair_id, alert=alert, actions=actions, tool_results=tool_results)  # noqa: E501
-            return VerificationReport(repair_id=repair_id, checks=[CheckResult("minimum_evidence", False, "No deterministic verification was configured")])  # noqa: E501
+            unavailable_checks = [
+                CheckResult("minimum_evidence", False, "No deterministic verification was configured")
+            ]
+            return VerificationReport.from_checks(
+                repair_id=repair_id, checks=unavailable_checks
+            )
         checks: list[CheckResult] = []
         targets: list[str] = []
         for action in actions:
@@ -248,7 +265,7 @@ class Verifier:
             checks.append(CheckResult("git_diff_guard", ok, msg, ""))
         if not checks:
             checks.append(CheckResult("minimum_evidence", False, "No deterministic verification was configured"))
-        return VerificationReport(repair_id=repair_id, checks=checks)
+        return VerificationReport.from_checks(repair_id=repair_id, checks=checks)
     @staticmethod
     def diff_allowed(repo: str, diff: str) -> tuple[bool, str]:
         if FORBIDDEN_DIFF_PATTERNS.search(diff):

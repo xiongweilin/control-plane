@@ -164,10 +164,13 @@ async def test_finalize_repair_rejects_bare_verified_flag(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="durable evidence references"):
         authority.record_verification(
             "repair-authority-bare-proof",
-            report=VerificationReport(
+            report=VerificationReport.from_checks(
                 repair_id="repair-authority-bare-proof",
-                checks=[CheckResult("provider_status", True, "provider said it passed")],
-                obligation_refs=["provider_status", "verify.http", "verify.git_diff"],
+                checks=[
+                    CheckResult("provider_status", True, "provider said it passed"),
+                    CheckResult("probe:https://example.invalid", True, "http passed"),
+                    CheckResult("git_diff_guard", True, "diff passed"),
+                ],
             ),
         )
     work = runtime.store.get_work("work_legacy_repair-authority-bare-proof")
