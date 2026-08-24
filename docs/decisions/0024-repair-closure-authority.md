@@ -47,6 +47,8 @@ Historical `CLOSED + UNRESOLVED` rows are not retrospectively upgraded even if a
 
 An exact canonical successful pair (`Work=completed`, `Run=succeeded`) cannot be downgraded by later legacy writes to `FAILED`, `RECOVERING`, `INTERRUPTED`, or `ROLLED_BACK`. Legacy `VERIFIED` and `CLOSED` projection may proceed without rewriting the canonical terminal pair.
 
+After authoritative closure, notification and candidate sedimentation are ancillary work. Failure in either path is logged and may reduce observability or learning coverage, but it cannot be fed back into `_record_failure()` as if objective restoration had failed.
+
 ## Non-goals
 
 C3 does not change verifier check-to-obligation ownership, public API response semantics, Feishu wording beyond ordering completion notification after closure, metrics, portable-runtime semantics, or formal/Lean integration. Those remain separate later steps.
