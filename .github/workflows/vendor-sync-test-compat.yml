@@ -23,6 +23,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           def replace_once(path: str, old: str, new: str) -> None:
               p = Path(path)
@@ -32,79 +33,117 @@ jobs:
                   raise SystemExit(f"{path}: expected one replacement target, found {count}")
               p.write_text(text.replace(old, new, 1), encoding="utf-8")
 
-          replace_once(
-              "tests/conformance/test_authoritative.py",
-              '''class FailingResultCommitStore(InMemoryStateStore):
-              def save_outcome(self, value: Any) -> None:
-                  raise RuntimeError("result journal unavailable")
-          ''',
-              '''class FailingResultCommitStore(InMemoryStateStore):
-              def save_action(self, value: Any) -> None:
-                  if getattr(value, "status", "") != "running":
-                      raise RuntimeError("execution projection unavailable")
-                  super().save_action(value)
-          ''',
+          def rewrite_function(path: str, name: str, transform) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              marker = f"def {name}"
+              start = text.find(marker)
+              if start < 0:
+                  raise SystemExit(f"{path}: function {name} not found")
+              next_test = text.find("\ndef test_", start + len(marker))
+              next_async = text.find("\nasync def test_", start + len(marker))
+              candidates = [pos for pos in (next_test, next_async) if pos >= 0]
+              end = min(candidates) if candidates else len(text)
+              before = text[start:end]
+              after = transform(before)
+              if after == before:
+                  raise SystemExit(f"{path}: function {name} was not changed")
+              p.write_text(text[:start] + after + text[end:], encoding="utf-8")
+
+          # Upstream E020 now fails the durable execution projection, not Outcome authority.
+          p = Path("tests/conformance/test_authoritative.py")
+          text = p.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r"class FailingResultCommitStore\(InMemoryStateStore\):\n(?:    .*\n)+?(?=\nclass ExplodingPolicy)",
+              re.MULTILINE,
           )
+          replacement = (
+              "class FailingResultCommitStore(InMemoryStateStore):\n"
+              "    def save_action(self, value: Any) -> None:\n"
+              "        if getattr(value, \"status\", \"\") != \"running\":\n"
+              "            raise RuntimeError(\"execution projection unavailable\")\n"
+              "        super().save_action(value)\n"
+          )
+          text2, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f"tests/conformance/test_authoritative.py: fixture replacement count={count}")
+          p.write_text(text2, encoding="utf-8")
 
           replace_once(
               "tests/conformance/test_boundary_architecture.py",
-              '''    assert plan.names[:4] == ("qualification", "policy", "authorization", "procedure")
-          ''',
-              '''    assert plan.names[:5] == ("qualification", "governance-use", "policy", "authorization", "procedure")
-          ''',
+              '    assert plan.names[:4] == ("qualification", "policy", "authorization", "procedure")\n',
+              '    assert plan.names[:5] == ("qualification", "governance-use", "policy", "authorization", "procedure")\n',
           )
 
-          replace_once(
+          def p1(block: str) -> str:
+              anchor = '        "effect_class": "deploy",\n'
+              if anchor not in block:
+                  raise SystemExit("P1 effect_class anchor missing")
+              return block.replace(
+                  anchor,
+                  anchor
+                  + '        "governance": {\n'
+                  + '            "applicable": False,\n'
+                  + '            "requirement_digest": permit.governance_requirement_digest,\n'
+                  + '            "snapshot_digest": permit.governance_snapshot_digest,\n'
+                  + '        },\n',
+                  1,
+              )
+
+          rewrite_function(
               "tests/conformance/test_p1_semantic.py",
-              '        "effect_class": "deploy",\n',
-              '''        "effect_class": "deploy",
-              "governance": {
-                  "applicable": False,
-                  "requirement_digest": permit.governance_requirement_digest,
-                  "snapshot_digest": permit.governance_snapshot_digest,
-              },
-          ''',
+              "test_invocation_permit_binds_an_immutable_authority_sensitive_snapshot",
+              p1,
           )
 
-          replace_once(
+          def review(block: str) -> str:
+              if 'assert status == "failed"' not in block:
+                  raise SystemExit("review status assertion missing")
+              block = block.replace('assert status == "failed"', 'assert status == "succeeded"', 1)
+              block = block.replace(
+                  "# Strict capability qualification rejects an unregistered capability;\n"
+                  "        # a stranger workflow cannot turn an unqualified provider result into\n"
+                  "        # a successful execution claim.\n",
+                  "# A documented pure capability may execute through a registered provider.\n"
+                  "        # This proves execution only, not objective Outcome or completion authority.\n",
+                  1,
+              )
+              return block
+
+          rewrite_function(
               "tests/test_full_replacement.py",
-              '''        # Strict capability qualification rejects an unregistered capability;
-              # a stranger workflow cannot turn an unqualified provider result into
-              # a successful execution claim.
-              assert status == "failed"
-          ''',
-              '''        # The documented pure review capability may execute through a registered
-              # provider without Core modification. This is execution success only;
-              # it does not mint objective Outcome or terminal completion authority.
-              assert status == "succeeded"
-          ''',
+              "test_review_workflow_stranger_acceptance",
+              review,
           )
 
-          replace_once(
+          def incident(block: str) -> str:
+              old = 'assert len(state["outcome"]) >= 1'
+              if old not in block:
+                  raise SystemExit("incident outcome assertion missing")
+              block = block.replace(old, 'assert state["outcome"] == []', 1)
+              block = block.replace(
+                  "# Outcome persisted via CapabilityService (at least one per invoke)",
+                  "# CapabilityService persists execution facts only; objective Outcome is independent.",
+                  1,
+              )
+              return block
+
+          rewrite_function(
               "tests/test_incident_repair_e2e.py",
-              '''    # Outcome persisted via CapabilityService (at least one per invoke)
-              state = store.export_state()
-              assert len(state["outcome"]) >= 1
-              assert len(state["action"]) >= 1
-          ''',
-              '''    # CapabilityService persists execution facts only. Objective Outcome
-              # materialization belongs to an independent verification authority.
-              state = store.export_state()
-              assert state["outcome"] == []
-              assert len(state["action"]) >= 1
-          ''',
+              "test_incident_repair_e2e_observe_to_knowledge",
+              incident,
           )
 
-          replace_once(
+          def provider_replacement(block: str) -> str:
+              old = 'assert exported["outcome"]'
+              if old not in block:
+                  raise SystemExit("provider replacement outcome assertion missing")
+              return block.replace(old, 'assert exported["outcome"] == []', 1)
+
+          rewrite_function(
               "tests/test_portable_runtime.py",
-              '''        assert exported["action"]
-              assert exported["outcome"]
-          ''',
-              '''        assert exported["action"]
-              # Provider success remains an execution fact. Objective Outcome requires
-              # independent verification/materialization and is not projected here.
-              assert exported["outcome"] == []
-          ''',
+              "test_provider_replacement_routes_without_changing_work",
+              provider_replacement,
           )
           PY
 
