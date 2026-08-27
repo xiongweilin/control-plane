@@ -27,12 +27,13 @@ runtime = "portable_runtime.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# The public portable-runtime repository is the semantic upstream.  This private
-# profile intentionally ships the vendored runtime alongside control_plane so a
-# Windows installation is reproducible, but the vendored tree is not a second
-# authority.  Provider-neutral capability, procedure, qualification, store,
-# and Codex sandbox semantics follow public portable-runtime pin 2dae8b9;
-# private Windows execution-boundary code remains an adapter in control_plane.
+# portable-runtime/contracts is the provider-neutral product-semantic upstream.
+# This profile intentionally ships the vendored runtime alongside control_plane
+# so a Windows installation is reproducible, but the vendored tree is not a
+# second authority. The exact synchronized revision is owned only by
+# portable-runtime-pin.json; do not duplicate its commit SHA in prose/config
+# comments. Profile-specific Windows execution-boundary code remains an adapter
+# in control_plane.
 [tool.hatch.build.targets.wheel]
 packages = ["src/control_plane", "src/portable_runtime"]
 
@@ -49,8 +50,8 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 # intentionally long fixtures, import-order probes, and security-test literals.
 "tests/*" = ["S101", "S108", "S105", "S106", "E501", "B017", "N817", "B011", "F841", "S311", "S112", "E702", "E701", "E401", "E402", "I001", "F401", "N806", "SIM110", "N814", "N812"]
 "src/control_plane/config.py" = ["S104"]
-# Vendored src/portable_runtime follows the public project's lint baseline;
-# the remaining private differences are deployment-specific adapters documented
+# Vendored src/portable_runtime follows the upstream project's lint baseline;
+# the remaining profile-specific differences are deployment adapters documented
 # in MIGRATION.md.
 "src/portable_runtime/core/knowledge.py" = ["E501", "S110", "SIM102", "W291"]
 "src/portable_runtime/core/registry.py" = ["E501"]
@@ -109,4 +110,3 @@ module = "portable_runtime.*"
 warn_unused_ignores = false
 [tool.coverage.run]
 omit = ["tests/*", ".venv/*"]
-

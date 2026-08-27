@@ -1,36 +1,37 @@
-# Migration: portable-runtime base and private control-plane profile
+# Migration: portable-runtime base and control-plane profile
 
 ## Current goal
 
 This is a deliberate two-project architecture, not a plan to archive
 `control-plane`:
 
-- Public `xiongweilin/portable-runtime` owns the provider-neutral Work/Run,
-  capability, authorization, reliability and `RealityBoundary` semantics.
-- Private `xiongweilin/control-plane` vendors that runtime as its base and adds
+- `xiongweilin/portable-runtime` owns the provider-neutral Work/Run,
+  capability, authorization, reliability and `RealityBoundary` product semantics.
+- `xiongweilin/control-plane` vendors that runtime as its base and adds
   the personal Windows, Feishu, Prometheus, Alertmanager, Codex and legacy HTTP
   integration surface.
-- `python -m control_plane` remains the private production entrypoint.
+- `python -m control_plane` remains the personal-platform production entrypoint.
 
-The public project must remain independently usable and must not import private
-modules, secrets, metratio URLs or `D:\agent` paths. The private profile may
-depend on `portable_runtime`; the dependency direction does not reverse.
+The upstream project must remain independently usable and must not import
+profile-specific modules, secrets, metratio URLs or `D:\agent` paths. The
+profile may depend on `portable_runtime`; the dependency direction does not
+reverse.
 
 ## Ownership rules
 
 Portable Runtime owns:
 
-- Work/Run/record and canonical state transitions;
+- Work/Run/record and canonical product state transitions;
 - capability effect contracts and minimum procedure profiles;
 - authorization, qualification, reliability, fencing and RealityBoundary;
 - provider protocol and capability-scoped Codex execution semantics.
 
-The private Windows profile additionally owns the deployment-specific Codex
-process boundary: detached candidate worktrees and host-control credential
-scrubbing are implemented by the private `control_plane.codex_runner` helper
-and injected into the actual vendored Codex provider at app bootstrap, while
-the public provider remains provider-neutral. This boundary must not be used as
-a reason to add personal paths, secrets or Docker policy to the public
+The Windows profile additionally owns the deployment-specific Codex process
+boundary: detached candidate worktrees and host-control credential scrubbing
+are implemented by `control_plane.codex_runner` / the profile boundary adapter
+and injected into the vendored Codex provider at app bootstrap, while the
+upstream provider remains provider-neutral. This boundary must not be used as
+a reason to add personal paths, secrets or Docker policy to the upstream
 repository.
 
 Control Plane owns:
@@ -47,18 +48,30 @@ constructed compatibility callers.
 
 ## Vendored runtime policy
 
-`src/portable_runtime` is synchronized from the public repository and the
-public source tree is read-only from this project. The provider-neutral
-semantic hardening delta is pinned to public commit `2dae8b9` and the private
-vendored tree is checked against that exact commit in CI. The machine-readable
-`portable-runtime-pin.json` records the commit and normalized provider-neutral
-tree digest; `scripts/verify_portable_runtime_pin.py` rejects stale, missing,
-extra, or modified vendored files. The remaining private provider difference
-is deployment-specific Windows boundary injection and is
-not a second semantic authority.
+`src/portable_runtime` is synchronized from the upstream repository and the
+upstream source tree is read-only from this project.
 
-The private repository currently builds both packages so the personal profile
-can run from one checkout:
+The sole authoritative synchronization pin is:
+
+```text
+portable-runtime-pin.json
+```
+
+That file records the exact upstream commit, synchronized scope and normalized
+tree digest. Documentation must not duplicate its commit SHA as a second pin.
+`scripts/verify_portable_runtime_pin.py` rejects stale, missing, extra or
+modified vendored files against that machine-readable pin.
+
+A newer `portable-runtime` main commit is not, by itself, authorization to
+advance this profile's vendored base. Pin advancement is an explicit
+synchronization change that must update the vendored tree, machine pin and
+verification evidence together.
+
+The remaining profile-specific provider difference is deployment-specific
+Windows boundary injection and is not a second semantic authority.
+
+The repository currently builds both packages so the personal profile can run
+from one checkout:
 
 ```toml
 [tool.hatch.build.targets.wheel]
@@ -71,17 +84,21 @@ architecture decision.
 
 ## Upstream synchronization status
 
+The exact synchronized upstream revision is read from
+`portable-runtime-pin.json`; do not copy the SHA into prose.
+
 The provider-neutral procedure floors, explicit capability contracts,
-qualification Decision lookup, typed store access, and Codex sandbox mapping
-are now present in public `xiongweilin/portable-runtime` at `2dae8b9`. The private
-profile intentionally retains only the detached worktree and Windows
-credential/Docker environment boundary, which depends on this profile's
-filesystem and deployment policy and must not be moved into the public base.
-That boundary is now injected through the public provider's
-`ExecutionBoundary` protocol; `src/portable_runtime/providers/codex/provider.py`
-is byte-identical to the public provider, while
+qualification Decision lookup, typed store access and Codex sandbox mapping
+covered by that pin are present in the vendored tree. The profile intentionally
+retains only the detached worktree and Windows credential/Docker environment
+boundary, which depends on this profile's filesystem and deployment policy and
+must not be moved into the provider-neutral base.
+
+That boundary is injected through the public provider's `ExecutionBoundary`
+protocol; `src/portable_runtime/providers/codex/provider.py` is expected to
+match the pinned upstream provider, while
 `control_plane.codex_boundary.CodexExecutionBoundaryAdapter` supplies the
-private Windows implementation.
+profile-specific Windows implementation.
 
 ## Migration invariants
 
@@ -112,29 +129,29 @@ private Windows implementation.
 - `mypy src`
 - `scripts/check_portable_core_imports.py`
 - full `pytest` suite and coverage regression gate over both packages;
-- public-base cleanliness and pin verification (`portable-runtime-pin.json`;
-  CI fetches the exact public commit before running the verifier);
+- upstream-base cleanliness and pin verification (`portable-runtime-pin.json`;
+  CI fetches the exact pinned commit before running the verifier);
 - production `/live` and `/ready` after launcher changes.
 
 ## Repository governance
 
-Governance is intentionally asymmetric between the public base and the private
-profile:
+Governance is intentionally asymmetric between the provider-neutral base and
+the personal deployment profile:
 
 - `portable-runtime`: `main` must be protected and require `CI / lint-and-test`
   plus `CI / strict-conformance`.
-- `control-plane`: this is an experimental/private profile. Its CI jobs and
-  vendor verifier are synchronization and experiment evidence; this profile
-  does not require branch protection or required checks on `main`.
+- `control-plane`: profile CI jobs and the vendor verifier are synchronization,
+  deployment and experiment evidence; they do not create a second semantic
+  authority for portable runtime contracts.
 
-For the public base, the SonarCloud job remains an additional main-branch
-quality signal. Private-profile CI and vendor verification remain evidence for
-safe synchronization and do not create a second branch-governance standard.
+For the upstream base, the SonarCloud job remains an additional main-branch
+quality signal. Profile CI and vendor verification remain evidence for safe
+synchronization and do not create a second branch-governance standard.
 
 ## Historical notes
 
 The earlier extraction wording that described `control_plane` as deprecated or
 archived is obsolete. It has been replaced by this two-project boundary. The
-canonical authority cutover and the private entrypoint correction are recorded
+canonical authority cutover and the personal entrypoint correction are recorded
 in `docs/decisions/0015-personal-runtime-authority-cutover.md` and
 `docs/refactor/progress.md`.
