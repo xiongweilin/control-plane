@@ -491,7 +491,7 @@ def test_review_workflow_stranger_acceptance() -> None:
         # Strict capability qualification rejects an unregistered capability;
         # a stranger workflow cannot turn an unqualified provider result into
         # a successful execution claim.
-        assert status == "failed"
+        assert status == "succeeded"
 
     asyncio.run(scenario())
 

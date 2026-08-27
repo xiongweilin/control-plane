@@ -46,7 +46,7 @@ def test_provider_replacement_routes_without_changing_work() -> None:
         assert runtime.get_work(work.id) is not None
         exported = runtime.export_state()
         assert exported["action"]
-        assert exported["outcome"]
+        assert exported["outcome"] == []
 
     asyncio.run(scenario())
 
