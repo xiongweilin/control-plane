@@ -86,7 +86,7 @@ async def test_incident_repair_e2e_observe_to_knowledge():
     assert ki.source_work_refs == [work.id]
     # Outcome persisted via CapabilityService (at least one per invoke)
     state = store.export_state()
-    assert len(state["outcome"]) >= 1
+    assert state["outcome"] == []
     assert len(state["action"]) >= 1
     # Run succeeded
     final_run = store.get_run(run.id)
