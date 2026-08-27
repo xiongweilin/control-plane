@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from portable_runtime.core.capabilities import CapabilityRequest, CapabilityResult
-from portable_runtime.core.models import Action, Outcome, Step, StepAttempt, new_id, utcnow
+from portable_runtime.core.models import Action, Step, StepAttempt, new_id, utcnow
 
 EffectSemantics = Literal["pure", "idempotent", "deduplicatable", "reconcilable", "irreversible-opaque"]
 Reversibility = Literal["reversible", "compensatable", "irreversible", "unknown"]
@@ -77,6 +77,7 @@ class BoundaryStagePlan:
 
     names: tuple[str, ...] = (
         "qualification",
+        "governance-use",
         "policy",
         "authorization",
         "procedure",
@@ -242,6 +243,9 @@ def precommit_execution_records(
                 request_ref=request.id,
                 status="running",
             )
+            attempt = attempt.model_copy(
+                update={"metadata": {**attempt.metadata, "action_ref": action.id}}
+            )
             if hasattr(store, "transaction"):
                 with store.transaction():
                     store.save_step(step)
@@ -301,6 +305,79 @@ def precommit_execution_records(
 
 
 @dataclass(frozen=True)
+class PreinvokeAbortDecision:
+    aborted: bool = False
+    error: Exception | None = None
+
+
+def abort_preinvocation_records(
+    store: Any,
+    request: CapabilityRequest,
+    *,
+    provider_id: str,
+    records: ExecutionRecordIds,
+    code: str,
+    reason: str,
+) -> PreinvokeAbortDecision:
+    """Terminalize precommitted execution records without creating an Outcome."""
+
+    if store is None or records.step_id is None:
+        return PreinvokeAbortDecision()
+    error_payload = {"code": code, "reason": reason, "phase": "before-reality-exit"}
+    try:
+        step = store.get_step(records.step_id) if hasattr(store, "get_step") else None
+        attempt = (
+            store.get_attempt(records.attempt_id)
+            if records.attempt_id and hasattr(store, "get_attempt")
+            else None
+        )
+        if step is None or (records.attempt_id is not None and attempt is None):
+            raise RuntimeError("pre-invocation abort is missing precommitted execution records")
+        step_update = step.model_copy(update={"status": "cancelled", "updated_at": utcnow()})
+        attempt_update = (
+            attempt.model_copy(
+                update={
+                    "status": "cancelled",
+                    "ended_at": utcnow(),
+                    "error": error_payload,
+                }
+            )
+            if attempt is not None
+            else None
+        )
+        action_update = (
+            Action(
+                id=records.action_id,
+                work_id=request.work_id or "",
+                run_id=request.run_id or "",
+                capability=request.capability,
+                provider_id=provider_id,
+                request_ref=request.id,
+                status="cancelled",
+                metadata={"preinvocation_abort": error_payload},
+            )
+            if records.action_id is not None
+            else None
+        )
+
+        def commit() -> None:
+            store.save_step(step_update)
+            if attempt_update is not None:
+                store.save_attempt(attempt_update)
+            if action_update is not None:
+                store.save_action(action_update)
+
+        if hasattr(store, "transaction"):
+            with store.transaction():
+                commit()
+        else:
+            commit()
+        return PreinvokeAbortDecision(aborted=True)
+    except Exception as exc:
+        return PreinvokeAbortDecision(error=exc)
+
+
+@dataclass(frozen=True)
 class ProjectionDecision:
     projected_status: str | None = None
     outcome_id: str | None = None
@@ -315,7 +392,7 @@ def commit_execution_projection(
     provider_id: str,
     records: ExecutionRecordIds,
 ) -> ProjectionDecision:
-    """Persist post-provider state; no provider capability is accepted."""
+    """Persist execution facts only; objective Outcome authority belongs to verification."""
 
     if store is None or records.step_id is None:
         return ProjectionDecision()
@@ -351,24 +428,15 @@ def commit_execution_projection(
             request_ref=request.id,
             status=projected_status,
         )
-        outcome = Outcome(
-            id=new_id("outcome"),
-            action_id=action.id,
-            artifact_refs=result.output_artifact_refs,
-            evidence_refs=result.evidence_refs,
-            status=projected_status,
-        )
         if hasattr(store, "transaction"):
             with store.transaction():
                 store.save_step(step_update)
                 store.save_attempt(attempt_update)
                 store.save_action(action)
-                store.save_outcome(outcome)
         else:
             store.save_step(step_update)
             store.save_attempt(attempt_update)
             store.save_action(action)
-            store.save_outcome(outcome)
-        return ProjectionDecision(projected_status, outcome.id)
+        return ProjectionDecision(projected_status, None)
     except Exception as exc:
         return ProjectionDecision(error=exc)

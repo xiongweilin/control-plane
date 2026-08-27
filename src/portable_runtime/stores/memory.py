@@ -23,7 +23,7 @@ from portable_runtime.core.models import (
     Work,
 )
 from portable_runtime.records.knowledge import KnowledgeProjection
-from portable_runtime.records.models import BaseRecord, EvidenceArtifact
+from portable_runtime.records.models import BaseRecord, EvidenceArtifact, OutcomeRecord
 from portable_runtime.records.relations import RecordRelation
 
 
@@ -54,6 +54,12 @@ class InMemoryStateStore:
         self._leases: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._terminal_commit_depth = 0
+        self._outcome_impact_commit_depth = 0
+        self._recovery_observation_commit_depth = 0
+        self._recovery_disposition_commit_depth = 0
+        self._recovery_application_commit_depth = 0
+        self._historical_experience_use_commit_depth = 0
+        self._provider_execution_binding_dispatch_commit_depth = 0
 
     _SEMANTIC_KINDS = frozenset({"record", "relation", "authorization", "authorization_use", "knowledge_projection"})
 
@@ -101,6 +107,141 @@ class InMemoryStateStore:
             self._save("work", work)
             self._save("run", run)
         return run
+
+    def commit_verified_outcome(self, request: Any) -> OutcomeRecord:
+        """Atomically commit one verification-authorized confirmed Outcome."""
+        from portable_runtime.records.verified_outcome_commit import (
+            prepare_verified_outcome_commit,
+            same_verified_outcome_semantics,
+        )
+
+        with self.transaction():
+            prepared = prepare_verified_outcome_commit(self, request)
+            existing = self.get_record(prepared.outcome.id)
+            if existing is not None:
+                if not same_verified_outcome_semantics(existing, prepared.outcome):
+                    raise ValueError("verified-outcome deterministic identity rebound")
+                for event in prepared.events:
+                    persisted = self.get_event(event.id)
+                    if persisted is None or not same_verified_outcome_semantics(persisted, event):
+                        raise ValueError("verified-outcome authority event graph incomplete")
+                if not isinstance(existing, OutcomeRecord):
+                    raise ValueError("verified-outcome identity does not resolve to OutcomeRecord")
+                return existing
+            self._save("record", prepared.outcome)
+            for event in prepared.events:
+                self.append_event(event)
+            return prepared.outcome
+
+    def commit_historical_experience_use(self, request: Any) -> Any:
+        """Atomically compare-and-bind one task/domain judgment to exact experience semantics."""
+        from portable_runtime.experience.historical_use import (
+            freeze_historical_experience_use_request,
+            historical_experience_use_event_id,
+            prepare_historical_experience_use_commit,
+            validate_historical_experience_use_authority_graph,
+        )
+
+        frozen = freeze_historical_experience_use_request(request)
+        with self.transaction():
+            event_id = historical_experience_use_event_id(frozen.judgment.id, frozen.judgment.version)
+            if self.get_event(event_id) is None and self.get_record(frozen.judgment.id) is None:
+                self._validate_record_write_semantics(frozen.judgment)
+                self._validate_candidate_write("record", frozen.judgment)
+            prepared = prepare_historical_experience_use_commit(self, frozen)
+            if prepared.replayed:
+                validate_historical_experience_use_authority_graph(self.export_state())
+                return prepared.binding
+
+            # Raw storage is used only after the exact same semantic and graph
+            # validation gates as save_record have succeeded above.
+            self._save("record", prepared.judgment)
+            self._historical_experience_use_commit_depth += 1
+            try:
+                self.append_event(prepared.event)
+            finally:
+                self._historical_experience_use_commit_depth -= 1
+            validate_historical_experience_use_authority_graph(self.export_state())
+            return prepared.binding
+
+    def commit_outcome_impact_judgment(self, request: Any, impact_policy: Any, disposition_policy: Any) -> Any:
+        """Atomically commit or replay one durable Outcome governance judgment."""
+        from portable_runtime.governance.outcome_impact_commit import (
+            committed_outcome_impact,
+            prepare_outcome_impact_commit,
+        )
+
+        with self.transaction():
+            prepared = prepare_outcome_impact_commit(self, request, impact_policy, disposition_policy)
+            if prepared.replayed:
+                return committed_outcome_impact(prepared)
+            self._outcome_impact_commit_depth += 1
+            try:
+                for event in prepared.events:
+                    self.append_event(event)
+            finally:
+                self._outcome_impact_commit_depth -= 1
+            return committed_outcome_impact(prepared)
+
+    def commit_recovery_observation(self, request: Any) -> Any:
+        """Atomically commit or replay one recovery observation."""
+        from portable_runtime.workflows.recovery_observation import (
+            prepare_recovery_observation_commit,
+            recovery_observation_from_event,
+            same_recovery_observation_semantics,
+        )
+
+        with self.transaction():
+            prepared = prepare_recovery_observation_commit(self, request)
+            existing = self.get_event(prepared.event.id)
+            if existing is not None:
+                if not same_recovery_observation_semantics(existing, prepared.event):
+                    raise ValueError("RecoveryObservation identity rebound")
+                return recovery_observation_from_event(existing)
+            self._recovery_observation_commit_depth += 1
+            try:
+                self.append_event(prepared.event)
+            finally:
+                self._recovery_observation_commit_depth -= 1
+            return prepared.observation
+
+    def commit_recovery_disposition(self, request: Any, policy: Any) -> Any:
+        """Atomically commit or replay one exact-basis recovery disposition."""
+        from portable_runtime.workflows.recovery_disposition_commit import (
+            prepare_recovery_disposition_commit,
+        )
+
+        with self.transaction():
+            plan = prepare_recovery_disposition_commit(self, request, policy)
+            if plan.replayed:
+                return plan.disposition
+            if plan.event is None:
+                raise ValueError("RecoveryDisposition commit plan is missing its durable event")
+            self._recovery_disposition_commit_depth += 1
+            try:
+                self.append_event(plan.event)
+            finally:
+                self._recovery_disposition_commit_depth -= 1
+            return plan.disposition
+
+    def commit_recovery_application(self, request: Any) -> Any:
+        """Atomically commit or replay one exact-disposition application intent."""
+        from portable_runtime.workflows.recovery_application import (
+            prepare_recovery_application_commit,
+        )
+
+        with self.transaction():
+            plan = prepare_recovery_application_commit(self, request)
+            if plan.replayed:
+                return plan.application
+            if plan.event is None:
+                raise ValueError("RecoveryApplication commit plan is missing its durable event")
+            self._recovery_application_commit_depth += 1
+            try:
+                self.append_event(plan.event)
+            finally:
+                self._recovery_application_commit_depth -= 1
+            return plan.application
 
     def _validate_candidate_write(self, kind: str, value: BaseModel) -> None:
         """Validate semantic writes against the full current graph."""
@@ -165,6 +306,7 @@ class InMemoryStateStore:
     def save_decision(self, value: Decision) -> None: self._save_checked("decision", value)
     def get_decision(self, decision_id: str) -> Decision | None: return self._get("decision", Decision, decision_id)
     def save_action(self, value: Action) -> None: self._save_checked("action", value)
+    def get_action(self, action_id: str) -> Action | None: return self._get("action", Action, action_id)
     def save_outcome(self, value: Outcome) -> None: self._save_checked("outcome", value)
     def save_knowledge(self, value: KnowledgeItem) -> None: self._save_checked("knowledge", value)
     def get_knowledge(self, knowledge_id: str) -> KnowledgeItem | None:
@@ -212,6 +354,28 @@ class InMemoryStateStore:
     def save_event(self, value: Event) -> None: self.append_event(value)
 
     def append_event(self, value: Event) -> None:
+        from portable_runtime.governance.outcome_impact_commit import OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES
+        from portable_runtime.governance.provider_execution_binding import (
+            dispatch_has_provider_execution_binding_authority,
+        )
+
+        if value.type in OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES and self._outcome_impact_commit_depth <= 0:
+            raise ValueError("Outcome impact authority events require commit_outcome_impact_judgment")
+        if value.type == "RecoveryObservationRecorded" and self._recovery_observation_commit_depth <= 0:
+            raise ValueError("RecoveryObservation events require commit_recovery_observation")
+        if value.type == "RecoveryDispositionRecorded" and self._recovery_disposition_commit_depth <= 0:
+            raise ValueError("RecoveryDisposition events require commit_recovery_disposition")
+        if value.type == "RecoveryApplicationRecorded" and self._recovery_application_commit_depth <= 0:
+            raise ValueError("RecoveryApplication events require commit_recovery_application")
+        if value.type == "HistoricalExperienceUseRecorded" and self._historical_experience_use_commit_depth <= 0:
+            raise ValueError("HistoricalExperienceUse events require commit_historical_experience_use")
+        if (
+            dispatch_has_provider_execution_binding_authority(value)
+            and self._provider_execution_binding_dispatch_commit_depth <= 0
+        ):
+            raise ValueError(
+                "provider execution-binding dispatch events require governed dispatch commit"
+            )
         with self._lock:
             existing = self._records.get("event", {}).get(value.id)
             if existing is not None:
@@ -338,6 +502,16 @@ class InMemoryStateStore:
             return True
 
     # Records R1.2 implementation milestone
+    def _validate_record_write_semantics(self, value: BaseRecord) -> None:
+        from portable_runtime.protocol.validation import assert_semantic_mutation_authorized, validate_record_write
+        from portable_runtime.records.validation import validate_canonical_write
+
+        existing = cast(BaseRecord | None, self._records["record"].get(value.id))
+        errs = [*validate_record_write(value, existing), *validate_canonical_write(value)]
+        if errs:
+            raise ValueError("; ".join(errs))
+        assert_semantic_mutation_authorized(value, existing, self.export_state())
+
     def save_record(self, value: BaseRecord) -> None:
         try:
             from portable_runtime.records.authorization import AuthorizationGrant
@@ -346,17 +520,8 @@ class InMemoryStateStore:
                 return
         except Exception:
             pass
-        from portable_runtime.protocol.validation import assert_semantic_mutation_authorized, validate_record_write
-        from portable_runtime.records.validation import validate_canonical_write
-        def validate() -> None:
-            existing = cast(BaseRecord | None, self._records["record"].get(value.id))
-            errs = [*validate_record_write(value, existing), *validate_canonical_write(value)]
-            if errs:
-                raise ValueError("; ".join(errs))
-            assert_semantic_mutation_authorized(value, existing, self.export_state())
-
         with self._lock:
-            validate()
+            self._validate_record_write_semantics(value)
             self._validate_candidate_write("record", value)
             self._save("record", value)
     def get_record(self, record_id: str) -> BaseRecord | None:
@@ -445,6 +610,9 @@ class InMemoryStateStore:
             }
 
     def import_state(self, state: dict[str, list[dict[str, object]]]) -> None:
+        from portable_runtime.experience.historical_use import assert_historical_experience_use_import_closed
+
+        assert_historical_experience_use_import_closed(state)
         types: dict[str, type[Any]] = {
             "work": Work,
             "run": Run,
@@ -477,6 +645,37 @@ class InMemoryStateStore:
                 if model_type is None:
                     continue
                 prepared[kind] = [cast(BaseModel, model_type.model_validate(raw)) for raw in values]
+            from portable_runtime.governance.outcome_impact_commit import (
+                OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES,
+            )
+            from portable_runtime.governance.provider_execution_binding import (
+                dispatch_has_provider_execution_binding_authority,
+            )
+
+            if any(
+                getattr(event, "type", "") in OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES
+                for event in prepared.get("event", ())
+            ):
+                raise ValueError(
+                    "B3 outcome impact authority history import is unsupported; "
+                    "durable impact authority must be created by commit_outcome_impact_judgment"
+                )
+            if any(
+                getattr(event, "type", "") == "RecoveryApplicationRecorded"
+                for event in prepared.get("event", ())
+            ):
+                raise ValueError(
+                    "P5 RecoveryApplication authority import is unsupported; "
+                    "durable application authority must be created by commit_recovery_application"
+                )
+            if any(
+                dispatch_has_provider_execution_binding_authority(event)
+                for event in prepared.get("event", ())
+            ):
+                raise ValueError(
+                    "P5 provider execution-binding dispatch authority import is unsupported; "
+                    "durable execution-binding authority must be created by governed dispatch commit"
+                )
             candidate = {
                 kind: [value.model_dump(mode="json") for value in values.values()]
                 for kind, values in self._records.items()
@@ -498,6 +697,11 @@ class InMemoryStateStore:
             }
             assert_valid_state_transition(current, candidate, prepared)
             assert_valid_state_graph(candidate)
+            from portable_runtime.records.verified_outcome_replay import (
+                validate_verified_outcome_authority_graph,
+            )
+
+            validate_verified_outcome_authority_graph(candidate)
             for kind, prepared_values in prepared.items():
                 for value in prepared_values:
                     identifier = getattr(value, "id", None)
@@ -506,4 +710,3 @@ class InMemoryStateStore:
                     self._records[kind][identifier] = (
                         self._snapshot(value) if kind in self._SEMANTIC_KINDS else value
                     )
-
