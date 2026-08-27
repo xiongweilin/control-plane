@@ -19,133 +19,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply upstream compatibility expectations
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          def replace_once(path: str, old: str, new: str) -> None:
-              p = Path(path)
-              text = p.read_text(encoding="utf-8")
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one replacement target, found {count}")
-              p.write_text(text.replace(old, new, 1), encoding="utf-8")
-
-          def rewrite_function(path: str, name: str, transform) -> None:
-              p = Path(path)
-              text = p.read_text(encoding="utf-8")
-              marker = f"def {name}"
-              start = text.find(marker)
-              if start < 0:
-                  raise SystemExit(f"{path}: function {name} not found")
-              next_test = text.find("\ndef test_", start + len(marker))
-              next_async = text.find("\nasync def test_", start + len(marker))
-              candidates = [pos for pos in (next_test, next_async) if pos >= 0]
-              end = min(candidates) if candidates else len(text)
-              before = text[start:end]
-              after = transform(before)
-              if after == before:
-                  raise SystemExit(f"{path}: function {name} was not changed")
-              p.write_text(text[:start] + after + text[end:], encoding="utf-8")
-
-          # Upstream E020 now fails the durable execution projection, not Outcome authority.
-          p = Path("tests/conformance/test_authoritative.py")
-          text = p.read_text(encoding="utf-8")
-          pattern = re.compile(
-              r"class FailingResultCommitStore\(InMemoryStateStore\):\n(?:    .*\n)+?(?=\nclass ExplodingPolicy)",
-              re.MULTILINE,
-          )
-          replacement = (
-              "class FailingResultCommitStore(InMemoryStateStore):\n"
-              "    def save_action(self, value: Any) -> None:\n"
-              "        if getattr(value, \"status\", \"\") != \"running\":\n"
-              "            raise RuntimeError(\"execution projection unavailable\")\n"
-              "        super().save_action(value)\n"
-          )
-          text2, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f"tests/conformance/test_authoritative.py: fixture replacement count={count}")
-          p.write_text(text2, encoding="utf-8")
-
-          replace_once(
-              "tests/conformance/test_boundary_architecture.py",
-              '    assert plan.names[:4] == ("qualification", "policy", "authorization", "procedure")\n',
-              '    assert plan.names[:5] == ("qualification", "governance-use", "policy", "authorization", "procedure")\n',
-          )
-
-          def p1(block: str) -> str:
-              anchor = '        "effect_class": "deploy",\n'
-              if anchor not in block:
-                  raise SystemExit("P1 effect_class anchor missing")
-              return block.replace(
-                  anchor,
-                  anchor
-                  + '        "governance": {\n'
-                  + '            "applicable": False,\n'
-                  + '            "requirement_digest": permit.governance_requirement_digest,\n'
-                  + '            "snapshot_digest": permit.governance_snapshot_digest,\n'
-                  + '        },\n',
-                  1,
-              )
-
-          rewrite_function(
-              "tests/conformance/test_p1_semantic.py",
-              "test_invocation_permit_binds_an_immutable_authority_sensitive_snapshot",
-              p1,
-          )
-
-          def review(block: str) -> str:
-              if 'assert status == "failed"' not in block:
-                  raise SystemExit("review status assertion missing")
-              block = block.replace('assert status == "failed"', 'assert status == "succeeded"', 1)
-              block = block.replace(
-                  "# Strict capability qualification rejects an unregistered capability;\n"
-                  "        # a stranger workflow cannot turn an unqualified provider result into\n"
-                  "        # a successful execution claim.\n",
-                  "# A documented pure capability may execute through a registered provider.\n"
-                  "        # This proves execution only, not objective Outcome or completion authority.\n",
-                  1,
-              )
-              return block
-
-          rewrite_function(
-              "tests/test_full_replacement.py",
-              "test_review_workflow_stranger_acceptance",
-              review,
-          )
-
-          def incident(block: str) -> str:
-              old = 'assert len(state["outcome"]) >= 1'
-              if old not in block:
-                  raise SystemExit("incident outcome assertion missing")
-              block = block.replace(old, 'assert state["outcome"] == []', 1)
-              block = block.replace(
-                  "# Outcome persisted via CapabilityService (at least one per invoke)",
-                  "# CapabilityService persists execution facts only; objective Outcome is independent.",
-                  1,
-              )
-              return block
-
-          rewrite_function(
-              "tests/test_incident_repair_e2e.py",
-              "test_incident_repair_e2e_observe_to_knowledge",
-              incident,
-          )
-
-          def provider_replacement(block: str) -> str:
-              old = 'assert exported["outcome"]'
-              if old not in block:
-                  raise SystemExit("provider replacement outcome assertion missing")
-              return block.replace(old, 'assert exported["outcome"] == []', 1)
-
-          rewrite_function(
-              "tests/test_portable_runtime.py",
-              "test_provider_replacement_routes_without_changing_work",
-              provider_replacement,
-          )
-          PY
+        run: python scripts/vendor_sync_test_compat.py
 
       - name: Install uv
         uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
@@ -178,10 +52,10 @@ jobs:
       - name: Commit compatibility-only test alignment and self-clean
         shell: bash
         run: |
-          rm .github/workflows/vendor-sync-test-compat.yml
+          rm .github/workflows/vendor-sync-test-compat.yml scripts/vendor_sync_test_compat.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tests .github/workflows/vendor-sync-test-compat.yml
+          git add tests .github/workflows/vendor-sync-test-compat.yml scripts/vendor_sync_test_compat.py
           git diff --cached --check
           git commit -m "test: align profile expectations with portable runtime pin"
           git push origin HEAD:chore/vendor-portable-runtime-b26487a6
