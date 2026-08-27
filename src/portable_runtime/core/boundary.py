@@ -11,6 +11,7 @@ from portable_runtime.core.boundary_stages import (
     BoundaryStagePlan,
     InvocationStagePlan,
     ReliabilityStageInput,
+    abort_preinvocation_records,
     commit_execution_projection,
     evaluate_reliability_stage,
     precommit_execution_records,
@@ -38,6 +39,11 @@ from portable_runtime.core.qualification import (
 )
 from portable_runtime.core.reliability import CircuitBreaker, ReliabilityControls
 from portable_runtime.core.router import ConstraintRouter
+from portable_runtime.governance.dispatch import GovernanceDispatchCommitter
+from portable_runtime.governance.use_admission import (
+    GovernanceUseAdmission,
+    GovernanceUseRequirementResolver,
+)
 from portable_runtime.records.authorization import CanonicalAuthorizationRequest
 from portable_runtime.records.authorization import EffectClass as AuthorizationEffectClass
 
@@ -67,6 +73,10 @@ CODE_RESULT_COMMIT_FAILED = "ResultCommitFailed"
 CODE_STALE_RESULT = "StaleResult"
 CODE_QUALIFICATION_UNAVAILABLE = "QualificationUnavailable"
 CODE_QUALIFICATION_CHANGED = "QualificationChanged"
+CODE_GOVERNANCE_BLOCKED = "GovernanceBlocked"
+CODE_GOVERNANCE_UNAVAILABLE = "GovernanceUnavailable"
+CODE_GOVERNANCE_STALE = "GovernanceStale"
+CODE_GOVERNANCE_CHANGED = "GovernanceChanged"
 BOUNDARY_ERROR_CODES = {
     CODE_FENCING_REJECTED,
     CODE_FENCING_UNAVAILABLE,
@@ -94,6 +104,10 @@ BOUNDARY_ERROR_CODES = {
     CODE_STALE_RESULT,
     CODE_QUALIFICATION_UNAVAILABLE,
     CODE_QUALIFICATION_CHANGED,
+    CODE_GOVERNANCE_BLOCKED,
+    CODE_GOVERNANCE_UNAVAILABLE,
+    CODE_GOVERNANCE_STALE,
+    CODE_GOVERNANCE_CHANGED,
 }
 
 _EffectClass = Literal["pure", "idempotent", "deduplicatable", "reconcilable", "irreversible-opaque"]
@@ -156,8 +170,56 @@ def _int_or_none(value: Any) -> int | None:
         return None
     return parsed if parsed >= 1 else None
 
+
+def _governance_recheck_failure(reference: Any, current: Any) -> tuple[str, str] | None:
+    if current.status == "unavailable":
+        return CODE_GOVERNANCE_UNAVAILABLE, current.reason
+    if current.status == "stale":
+        return CODE_GOVERNANCE_STALE, current.reason
+    if current.status not in {"allowed", "not-applicable"}:
+        return (
+            CODE_GOVERNANCE_CHANGED,
+            f"governance use judgment changed after admission: {current.reason}",
+        )
+    if (
+        current.status != reference.status
+        or current.requirement_digest != reference.requirement_digest
+        or current.snapshot_digest != reference.snapshot_digest
+    ):
+        return (
+            CODE_GOVERNANCE_CHANGED,
+            "governance use judgment no longer matches the admitted snapshot",
+        )
+    return None
+
+
+def _governance_permit_failure(permit: InvocationPermit, current: Any) -> tuple[str, str] | None:
+    if current.status == "unavailable":
+        return CODE_GOVERNANCE_UNAVAILABLE, current.reason
+    if current.status == "stale":
+        return CODE_GOVERNANCE_STALE, current.reason
+    if current.status not in {"allowed", "not-applicable"}:
+        return (
+            CODE_GOVERNANCE_CHANGED,
+            f"governance use judgment changed before reality exit: {current.reason}",
+        )
+    applicable = current.status == "allowed"
+    if (
+        permit.governance_applicable != applicable
+        or not permit.governance_requirement_digest
+        or not permit.governance_snapshot_digest
+        or permit.governance_requirement_digest != current.requirement_digest
+        or permit.governance_snapshot_digest != current.snapshot_digest
+    ):
+        return (
+            CODE_GOVERNANCE_CHANGED,
+            "invocation permit governance binding does not match current admission",
+        )
+    return None
+
+
 class RealityBoundary:
-    def __init__(self, store: Any | None = None, registry: Any | None = None, *, routing: Any | None = None, policy_engine: Any | None = None, reliability: ReliabilityControls | None = None, runtime_id: str = "runtime", contract_registry: CapabilityContractRegistry | None = None, effect_registry: CapabilityEffectRegistry | None = None) -> None:
+    def __init__(self, store: Any | None = None, registry: Any | None = None, *, routing: Any | None = None, policy_engine: Any | None = None, reliability: ReliabilityControls | None = None, runtime_id: str = "runtime", contract_registry: CapabilityContractRegistry | None = None, effect_registry: CapabilityEffectRegistry | None = None, governance_requirement_resolver: GovernanceUseRequirementResolver | None = None) -> None:
         self.store = store
         self.registry = registry
         self.routing = routing or ConstraintRouter()
@@ -166,6 +228,7 @@ class RealityBoundary:
         self.runtime_id = runtime_id
         self.contract_registry = contract_registry or CapabilityContractRegistry(effect_registry=effect_registry)
         self.effect_registry = effect_registry or getattr(self.contract_registry, "effect_registry", CapabilityEffectRegistry())
+        self.governance_requirement_resolver = governance_requirement_resolver
         self.stage_plan = BoundaryStagePlan()
 
     def validate_fencing(self, request: CapabilityRequest) -> tuple[bool, str]:
@@ -556,6 +619,46 @@ class RealityBoundary:
                 _append_event(store, CODE_QUALIFICATION_UNAVAILABLE, request.id, {"reason": str(exc)})
                 return self._error_result(request, CODE_QUALIFICATION_UNAVAILABLE, f"qualification resolution failed: {exc}")
 
+        # Governance-use is a read-only admission seam. The runtime-owned
+        # requirement resolver is independent from the governance projection;
+        # canonical Event history is reconstructed in memory so an empty or
+        # stale sidecar can never be interpreted as "no blocker".
+        governance = GovernanceUseAdmission(store).evaluate(
+            request,
+            self.governance_requirement_resolver,
+        )
+        if governance.status in {"blocked", "unavailable", "stale"}:
+            code = {
+                "blocked": CODE_GOVERNANCE_BLOCKED,
+                "unavailable": CODE_GOVERNANCE_UNAVAILABLE,
+                "stale": CODE_GOVERNANCE_STALE,
+            }[governance.status]
+            details: dict[str, Any] = {
+                "reason": governance.reason,
+                "scheme_id": governance.scheme_id,
+                "use_context": (
+                    governance.use_context.name
+                    if governance.use_context is not None
+                    else None
+                ),
+            }
+            if governance.snapshot_digest is not None:
+                details["snapshot_digest"] = governance.snapshot_digest
+            _append_event(store, code, request.id, details)
+            _append_event(
+                store,
+                "InvocationBlocked",
+                request.id,
+                {"code": code, **details},
+            )
+            return self._error_result(
+                request,
+                code,
+                governance.reason,
+                scheme_id=governance.scheme_id,
+                governance_snapshot_digest=governance.snapshot_digest,
+            )
+
         # Policy failures and exceptions are always STOP.  ``require`` is not
         # a log-only decision: every mandatory obligation needs explicit proof.
         if self.policy_engine is not None:
@@ -775,11 +878,41 @@ class RealityBoundary:
             except Exception as exc:  # noqa: BLE001
                 _append_event(store, CODE_QUALIFICATION_CHANGED, request.id, {"reason": str(exc), "provider_id": provider_id})
                 return self._error_result(request, CODE_QUALIFICATION_CHANGED, f"qualification revalidation failed: {exc}", provider_id=provider_id)
+        refreshed_governance = GovernanceUseAdmission(store).evaluate(
+            request,
+            self.governance_requirement_resolver,
+        )
+        governance_failure = _governance_recheck_failure(governance, refreshed_governance)
+        if governance_failure is not None:
+            code, reason = governance_failure
+            _append_event(
+                store,
+                code,
+                request.id,
+                {"reason": reason, "provider_id": provider_id, "phase": "post-routing"},
+            )
+            _append_event(
+                store,
+                "InvocationBlocked",
+                request.id,
+                {"code": code, "reason": reason, "phase": "post-routing"},
+            )
+            return self._error_result(
+                request,
+                code,
+                reason,
+                provider_id=provider_id,
+                governance_snapshot_digest=refreshed_governance.snapshot_digest,
+            )
+        governance = refreshed_governance
         permit = InvocationPermit.issue(
             request,
             provider_id=provider_id,
             qualification_digest=assessment.digest if assessment is not None else "",
             lease_generation=_extract_lease_generation(request) or 0,
+            governance_applicable=governance.status == "allowed",
+            governance_requirement_digest=governance.requirement_digest,
+            governance_snapshot_digest=governance.snapshot_digest,
         )
         # From this point onward all precommit, fencing and provider-facing
         # work consumes the permit's reconstructed snapshot, never the
@@ -833,17 +966,118 @@ class RealityBoundary:
             if reliability_started and hasattr(self.reliability, "complete_action"):
                 _call_supported(self.reliability.complete_action, side_effect=True)
             return self._error_result(request, CODE_ROUTING_UNAVAILABLE, f"provider lookup failed: {exc}", provider_id=provider_id)
+        def abort_before_reality_exit(code: str, reason: str) -> CapabilityResult:
+            nonlocal reliability_started
+            if reliability_started and hasattr(self.reliability, "complete_action"):
+                try:
+                    _call_supported(self.reliability.complete_action, side_effect=True)
+                except Exception:
+                    pass
+                reliability_started = False
+            abort = abort_preinvocation_records(
+                store,
+                request,
+                provider_id=provider_id,
+                records=records,
+                code=code,
+                reason=reason,
+            )
+            if abort.error is not None:
+                abort_reason = (
+                    f"pre-invocation abort projection failed after {code}: {abort.error}"
+                )
+                _append_event(
+                    store,
+                    CODE_PRECOMMIT_FAILED,
+                    request.id,
+                    {"reason": abort_reason, "provider_id": provider_id},
+                )
+                return self._error_result(
+                    request,
+                    CODE_PRECOMMIT_FAILED,
+                    abort_reason,
+                    provider_id=provider_id,
+                )
+            details = {
+                "code": code,
+                "reason": reason,
+                "provider_id": provider_id,
+                "phase": "before-reality-exit",
+            }
+            _append_event(store, code, request.id, details)
+            _append_event(store, "InvocationAbortedBeforeRealityExit", request.id, details)
+            _append_event(store, "InvocationBlocked", request.id, details)
+            return self._error_result(
+                request,
+                code,
+                reason,
+                provider_id=provider_id,
+                governance_snapshot_digest=permit.governance_snapshot_digest,
+            )
+
+        if assessment is not None and store is not None:
+            try:
+                if not assessment.refresh_matches(store, request):
+                    return abort_before_reality_exit(
+                        CODE_QUALIFICATION_CHANGED,
+                        "authoritative qualification facts changed before reality exit",
+                    )
+            except QualificationResolutionError as exc:
+                return abort_before_reality_exit(CODE_QUALIFICATION_CHANGED, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                return abort_before_reality_exit(
+                    CODE_QUALIFICATION_CHANGED,
+                    f"qualification final revalidation failed: {exc}",
+                )
+
+        final_governance = GovernanceUseAdmission(store).evaluate(
+            request,
+            self.governance_requirement_resolver,
+        )
+        governance_failure = _governance_permit_failure(permit, final_governance)
+        if governance_failure is not None:
+            code, reason = governance_failure
+            return abort_before_reality_exit(code, reason)
+
+        dispatch_commit = GovernanceDispatchCommitter(store).commit(
+            request,
+            permit,
+            self.governance_requirement_resolver,
+            attempt_id=records.attempt_id,
+        )
+        if dispatch_commit.status not in {"committed", "not-applicable"}:
+            if dispatch_commit.status == "unavailable":
+                code = CODE_GOVERNANCE_UNAVAILABLE
+            elif dispatch_commit.status == "stale":
+                code = CODE_GOVERNANCE_STALE
+            else:
+                code = CODE_GOVERNANCE_CHANGED
+            return abort_before_reality_exit(code, dispatch_commit.reason)
+
         context = InvocationContext(runtime_id=self.runtime_id, work_id=execution_request.work_id, run_id=execution_request.run_id, lease_generation=permit.lease_generation, idempotency_key=execution_request.idempotency_key)
         context.metadata.update(execution_request.metadata or {})
         context.metadata.update(
             {
                 "qualification_digest": permit.qualification_digest,
+                "governance_applicable": permit.governance_applicable,
+                "governance_requirement_digest": permit.governance_requirement_digest,
+                "governance_snapshot_digest": permit.governance_snapshot_digest,
+                "dispatch_commit_ref": dispatch_commit.commit_ref,
                 "invocation_permit_provider": permit.provider_id,
                 "invocation_permit_request": permit.request_digest,
             }
         )
         breaker = _circuit_for(provider_id)
-        _append_event(store, "InvocationStarted", request.id, {"provider_id": provider_id, "capability": request.capability})
+        _append_event(
+            store,
+            "InvocationStarted",
+            request.id,
+            {
+                "provider_id": provider_id,
+                "capability": request.capability,
+                "dispatch_commit_ref": dispatch_commit.commit_ref,
+            },
+        )
         breaker_state_before = breaker.state
         try:
             result = await provider.invoke(execution_request, context)
@@ -864,7 +1098,13 @@ class RealityBoundary:
             store,
             "InvocationCompleted",
             request.id,
-            {"provider_id": provider_id, "status": result.status, "capability": request.capability},
+            {
+                "provider_id": provider_id,
+                "status": result.status,
+                "capability": request.capability,
+                "semantic_level": "execution",
+                "authoritative_outcome": False,
+            },
         )
 
         # Fencing is re-read after every run-bound provider call.  A changed
@@ -887,8 +1127,8 @@ class RealityBoundary:
                 _append_event(store, CODE_POST_FENCING_REJECTED, request.id, {"reason": post_reason, "provider_id": provider_id})
                 return result
 
-        # Durable projection is part of the authoritative outcome.  A commit
-        # failure after provider success is recoverable/unknown, never success.
+        # Durable execution projection is separate from objective Outcome authority.
+        # A projection commit failure after provider execution is recoverable/unknown.
         projection = commit_execution_projection(
             store,
             request,
@@ -901,17 +1141,29 @@ class RealityBoundary:
             _append_event(store, CODE_RESULT_COMMIT_FAILED, request.id, {"reason": reason, "provider_id": provider_id})
             return result.model_copy(update={"status": "unknown", "error": {"code": CODE_RESULT_COMMIT_FAILED, "reason": reason}})
         if projection.projected_status is not None:
+            execution_payload = {
+                "provider_id": provider_id,
+                "status": projection.projected_status,
+                "capability": request.capability,
+                "semantic_level": "execution",
+                "authoritative_outcome": False,
+            }
             _append_event(
                 store,
-                "CapabilitySucceeded" if projection.projected_status == "succeeded" else "CapabilityCompleted",
+                "ExecutionSucceeded"
+                if projection.projected_status == "succeeded"
+                else "ExecutionCompleted",
                 request.id,
-                {"provider_id": provider_id, "status": projection.projected_status, "capability": request.capability},
+                execution_payload,
             )
+            # Compatibility only: capability success is an execution fact, not an Outcome.
             _append_event(
                 store,
-                "OutcomeRecorded",
+                "CapabilitySucceeded"
+                if projection.projected_status == "succeeded"
+                else "CapabilityCompleted",
                 request.id,
-                {"outcome_id": projection.outcome_id, "status": projection.projected_status, "provider_id": provider_id},
+                {**execution_payload, "compatibility_event": True},
             )
         return result
 
