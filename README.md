@@ -13,16 +13,26 @@ is vendored from `xiongweilin/portable-runtime`.
 | Control Plane schema | `official-1.0.0` |
 | Portable Runtime milestone | `R2.0` |
 | Runtime protocol | `2.0` |
-| Portable Runtime pin | `2dae8b9` |
+| Portable Runtime pin | `0a22ad07` |
 | Personal profile | `P1.x` |
 
 `src/portable_runtime` follows the public pin as its base. The provider-neutral
 capability, procedure-profile, qualification, store, and Codex sandbox
-semantics are synchronized to public pin `2dae8b9`; the remaining private
-provider difference is the Windows execution boundary adapter.
+semantics are synchronized to public pin `0a22ad07`; the remaining
+profile-specific provider difference is the Windows execution boundary adapter.
 
 [![CI](https://github.com/xiongweilin/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/xiongweilin/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 
+## Semantic status
+
+```text
+C1-C4b          CLOSED
+baseline        main@8536f4a1e47a889851067bd000a334d35923709b
+mode            observation-only
+C5              NOT OPEN
+```
+
+Observation and semantic-reopen criteria are recorded in issue #20. Runtime, verifier, authority, outward semantics, and metrics remain unchanged by this documentation status.
 
 ## Portable Runtime quick start (no Codex / Feishu / Docker / Prometheus required)
 
@@ -63,18 +73,11 @@ See [docs/architecture.md](docs/architecture.md),
 
 ---
 
-> [!WARNING]
-> `portable_runtime` is the public, provider-neutral runtime base. The private
-> `control_plane` project is the personal-platform superset: it adds the
-> Windows/Feishu/Prometheus integrations and remains the production entrypoint.
+`control-plane` is the Windows/Feishu/Prometheus/Docker personal-platform deployment profile over the vendored provider-neutral runtime base.
 
 ## Personal Platform Profile (Windows/Feishu/Prometheus/Docker integration)
 
-The `control_plane` package below is the private personal-platform profile
-over the public portable runtime. It handles the personal integrations while
-the portable runtime provides the canonical Work/Run and provider-neutral
-capability foundation. Only this section requires Codex, Feishu, Prometheus,
-Alertmanager, Docker or Windows Task Scheduler.
+The `control_plane` package handles the personal integrations while the portable runtime provides the canonical Work/Run and provider-neutral capability foundation. This section requires Codex, Feishu, Prometheus, Alertmanager, Docker or Windows Task Scheduler.
 
 ## Architecture
 
@@ -104,7 +107,7 @@ uv run python -m control_plane
 - Codex capability requests use a physical sandbox ceiling: `reason.generate`, `code.read` and `git.diff` run `read-only`; `code.edit`, `code.test` and `shell.exec` run `workspace-write`. Unknown capabilities fail closed to `read-only`; `danger-full-access` is not a personal-profile sandbox.
 - A repair session requests `code.edit` explicitly and runs from a detached candidate Git worktree by default (`[agent] isolate_worktree = true`); the source checkout is never the Codex cwd. The candidate branch remains in the source repository for review after the ephemeral worktree is removed.
 - Remote/deployment effects are not delegated to the Codex session. They require a separate Provider behind Portable Runtime's RealityBoundary and its authorization/reliability checks.
-- Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are private typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly. Docker results keep desired-state evidence separate from event attribution: `docker.restart` remains non-terminal (`unknown`) when the command returned and the allowlisted project is healthy but no independent restart identity was observed; `docker.compose.up` is explicitly a desired-state operation.
+- Runtime operations are separate from Codex: `git.merge` / `git.push` and `docker.restart` / `docker.compose.up` are profile-local typed providers behind Portable Runtime authorization, procedure and reliability gates. The Codex session may propose these actions but cannot execute them directly. Docker results keep desired-state evidence separate from event attribution: `docker.restart` remains non-terminal (`unknown`) when the command returned and the allowlisted project is healthy but no independent restart identity was observed; `docker.compose.up` is explicitly a desired-state operation.
 - Candidate + approval: agent modifications to code/config must be committed to the `fix/control-plane-<id>` branch; the control plane reads the branch diff, refuses changes to verifiers/alert rules/permissions/the control plane itself, and after approval invokes the separately authorized Git provider. Candidate promotion additionally requires a closed source repair and records a typed portable `Decision` + `AuthorizationGrant` scoped to the candidate version/resource. If the agent times out but has left a commit, the repair enters `candidate/pending-review` (repair state `needs_approval`) and is not marked failed; after every agent run, `finally` restores the original Git branch.
 - Denied by default: file writes (except candidate branches), dependency changes, database writes, cloud writes, credential access, data deletion, and modifying verifiers/alert rules/permissions.
 
@@ -117,7 +120,7 @@ codex exec --model <model> --sandbox <read-only|workspace-write> --skip-git-repo
   # cwd = detached candidate worktree for workspace-write; transcript on stdout
 ```
 
-The working directory uses native Windows paths (WSL was retired on 2026-08-07). The private app passes this boundary configuration into the actual vendored `CodexProvider` used by alert-driven repairs; the compatibility `CodexRunner` uses the same helper. Each child environment removes GitHub/SSH token variables, disables Git credential helpers and SSH-agent inheritance, and sets `GIT_SSH_COMMAND`/`GIT_ASKPASS` to non-interactive deny commands. Docker variables point to a deliberately nonexistent named pipe/context (`control-plane-codex-disabled`), so the Codex process does not inherit Docker Desktop's host control plane. These guards are independent of the prompt and the Codex sandbox; typed Git/Docker providers use their own authority-scoped process environment. The control plane injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback. The Codex sandbox is a separate physical ceiling, not a substitute for Portable Runtime authorization or RealityBoundary governance.
+The working directory uses native Windows paths (WSL was retired on 2026-08-07). The application passes this boundary configuration into the actual vendored `CodexProvider` used by alert-driven repairs; the compatibility `CodexRunner` uses the same helper. Each child environment removes GitHub/SSH token variables, disables Git credential helpers and SSH-agent inheritance, and sets `GIT_SSH_COMMAND`/`GIT_ASKPASS` to non-interactive deny commands. Docker variables point to a deliberately nonexistent named pipe/context (`control-plane-codex-disabled`), so the Codex process does not inherit Docker Desktop's host control plane. These guards are independent of the prompt and the Codex sandbox; typed Git/Docker providers use their own authority-scoped process environment. The control plane injects hard constraints, verifies results independently, gates code-merge approval, and performs rollback. The Codex sandbox is a separate physical ceiling, not a substitute for Portable Runtime authorization or RealityBoundary governance.
 
 ## Feishu commands
 
@@ -195,7 +198,7 @@ Both the main task and the watchdog use the `wscript.exe //B //NoLogo` hidden wr
 
 ## Agent operation boundary
 
-The Codex agent may run read-only diagnostics, URL probes and PromQL queries. It may not execute `docker restart`, `docker compose restart/up -d`, `git merge` or `git push`. Those effects are performed only by the private typed Git/Docker providers after a scoped `AuthorizationGrant`; the provider allowlists Compose projects and rejects force-push, destructive volume/database operations, credential/firewall/sshd changes, and stopping or deleting containers holding persisted data. For Docker, `desired_state_verified` means the current containers satisfy the running/healthy postcondition. `event_attribution` remains `unknown` for `docker.restart` unless an independent event observer proves the restart, and is `not-applicable` for `docker.compose.up`; healthy containers must not be used as restart-event evidence.
+The Codex agent may run read-only diagnostics, URL probes and PromQL queries. It may not execute `docker restart`, `docker compose restart/up -d`, `git merge` or `git push`. Those effects are performed only by the profile-local typed Git/Docker providers after a scoped `AuthorizationGrant`; the provider allowlists Compose projects and rejects force-push, destructive volume/database operations, credential/firewall/sshd changes, and stopping or deleting containers holding persisted data. For Docker, `desired_state_verified` means the current containers satisfy the running/healthy postcondition. `event_attribution` remains `unknown` for `docker.restart` unless an independent event observer proves the restart, and is `not-applicable` for `docker.compose.up`; healthy containers must not be used as restart-event evidence.
 
 ## Verifier (deterministic checks)
 
@@ -265,7 +268,7 @@ The control plane listens on `127.0.0.1:18083` by default (`[server] host` in `c
 ### Git branch safety
 
 - Before restoring the original branch, the worktree is checked; when dirty, restoration is **abandoned** and the error is recorded — user's uncommitted changes are never overwritten.
-- Local Git scaffolding (candidate worktree add/remove, branch restoration, and stale-candidate deletion) runs through the private `GitPhysicalBoundary`. Repository containment, branch identity, worktree occupancy, and cleanliness are rechecked at the mutation point; an unknown check fails closed and never becomes "clean".
+- Local Git scaffolding (candidate worktree add/remove, branch restoration, and stale-candidate deletion) runs through the profile-local `GitPhysicalBoundary`. Repository containment, branch identity, worktree occupancy, and cleanliness are rechecked at the mutation point; an unknown check fails closed and never becomes "clean".
 - `dirty_worktree_policy`: `reject` (default, refuse execution on a dirty worktree) | `isolate` (legacy preflight mode; candidate `workspace-write` sessions are isolated by `[agent] isolate_worktree` regardless).
 - `[candidates].branch_prefix` unifies candidate branch naming (internal field `candidate_branch_prefix`, default `fix/control-plane-`).
 
@@ -359,5 +362,3 @@ Dependency-update candidates call the GitHub Security Advisories API (urllib, no
 - [0009 upgrade vs fix authorization](/docs/decisions/0009-upgrade-vs-fix-authorization.md)
 - [0010 OpenCodex network boundary and model source](/docs/decisions/0010-opencodex-network-boundary.md)
 - [0012 model-gateway connectivity diagnosis (after OpenCodex retirement)](/docs/decisions/0012-model-gateway-connectivity.md)
-
-
