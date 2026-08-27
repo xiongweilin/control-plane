@@ -163,33 +163,53 @@ class Runtime:
             return []
 
     async def reconcile(self, step_id: str) -> CapabilityResult | None:
+        """Compatibility-only fail-closed reconciliation surface.
+
+        A step plus its latest attempt cannot prove one unique reconciliation
+        responsibility. Automated reconciliation therefore requires an
+        independent exact recovery-responsibility authority path. This legacy
+        method never crosses a provider reality boundary.
+        """
+
         try:
             step = self.store.get_step(step_id)  # type: ignore[attr-defined]
         except Exception:
             return None
         if not step:
             return None
-        attempts = []
         try:
             attempts = self.store.list_attempts(step_id)  # type: ignore[attr-defined]
         except Exception:
-            pass
+            return None
         if not attempts:
             return None
         last = sorted(attempts, key=lambda a: a.attempt_no)[-1]
         if not last.request_ref or not last.provider_id:
             return None
-        result = await self.capabilities.reconcile(last.request_ref, last.provider_id)
-        if result:
-            if result.status == "unknown":
-                step.status = "unknown"
-                self.store.save_step(step)  # type: ignore
-            return result
-        if step.effect_semantics in ("irreversible-opaque", "reconcilable"):
-            step.status = "unknown"
-            self.store.save_step(step)  # type: ignore
-            return CapabilityResult(request_id=last.request_ref, provider_id=last.provider_id, status="unknown", message="reconcile failed, marked unknown")
-        return None
+
+        # Compatibility projection only: a durable dispatch with no exact
+        # reconciliation responsibility selected remains locally unknown.
+        if step.status != "unknown":
+            with contextlib.suppress(Exception):
+                self.store.save_step(
+                    step.model_copy(update={"status": "unknown", "updated_at": utcnow()})
+                )
+
+        return CapabilityResult(
+            request_id=last.request_ref,
+            provider_id=last.provider_id,
+            status="unknown",
+            message=(
+                "dispatch was durably committed; legacy Runtime.reconcile(step_id) "
+                "is compatibility-only and cannot authorize automated reconciliation"
+            ),
+            error={
+                "code": "AuthoritativeReconciliationRequired",
+                "reason": (
+                    "step/latest Attempt identity cannot select a reconciliation responsibility"
+                ),
+            },
+        )
 
     def interrupt(self, run_id: str) -> Run:
         run = self.store.get_run(run_id)

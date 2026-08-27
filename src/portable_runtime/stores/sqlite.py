@@ -76,7 +76,7 @@ class LeaseExecutionError(StoreUnavailable):
 def _parse_utc(value: Any) -> datetime | None:
     """Parse a persisted timestamp as an aware UTC datetime.
 
-    ``None`` means no expiry.  Malformed timestamps raise instead of being
+    ``None`` means no expiry. Malformed timestamps raise instead of being
     treated as expired: an unknown lease state must not silently become
     acquirable.
     """
@@ -142,12 +142,17 @@ class SQLiteStateStore:
     )
     # authorization added dynamically via import_state handling
 
-
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = _safe_db_path(path)
         self._lock = threading.RLock()
         self._terminal_commit_depth = 0
+        self._outcome_impact_commit_depth = 0
+        self._recovery_observation_commit_depth = 0
+        self._recovery_disposition_commit_depth = 0
+        self._recovery_application_commit_depth = 0
+        self._historical_experience_use_commit_depth = 0
+        self._provider_execution_binding_dispatch_commit_depth = 0
         self._connection = sqlite3.connect(_safe_db_path(path), check_same_thread=False, isolation_level=None)  # NOSONAR  # noqa: E501
         self._connection.row_factory = sqlite3.Row
         with self._lock:
@@ -165,7 +170,7 @@ class SQLiteStateStore:
                 "expires_at TEXT, heartbeat_at TEXT)"
             )
             # Databases created by an earlier development build included a
-            # redundant NOT NULL ``version`` column.  Keep writes compatible
+            # redundant NOT NULL ``version`` column. Keep writes compatible
             # with those files while using the independent lease table as the
             # source of truth.
             self._lease_has_version_column = any(
@@ -244,6 +249,200 @@ class SQLiteStateStore:
                 raise
         return run
 
+    def commit_verified_outcome(self, request: Any) -> OutcomeRecord:
+        """Atomically commit one verification-authorized confirmed Outcome."""
+        from portable_runtime.records.verified_outcome_commit import (
+            prepare_verified_outcome_commit,
+            same_verified_outcome_semantics,
+        )
+
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                prepared = prepare_verified_outcome_commit(self, request)
+                existing = self.get_record(prepared.outcome.id)
+                if existing is not None:
+                    if not same_verified_outcome_semantics(existing, prepared.outcome):
+                        raise ValueError("verified-outcome deterministic identity rebound")
+                    for event in prepared.events:
+                        persisted = self.get_event(event.id)
+                        if persisted is None or not same_verified_outcome_semantics(persisted, event):
+                            raise ValueError("verified-outcome authority event graph incomplete")
+                    if not isinstance(existing, OutcomeRecord):
+                        raise ValueError("verified-outcome identity does not resolve to OutcomeRecord")
+                    if owns_transaction:
+                        self._connection.execute("COMMIT")
+                    return existing
+                self._save("record", prepared.outcome)
+                for event in prepared.events:
+                    self.append_event(event)
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return prepared.outcome
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
+    def commit_historical_experience_use(self, request: Any) -> Any:
+        """Writer-serialized compare-and-bind of one judgment to exact experience semantics."""
+        from portable_runtime.experience.historical_use import (
+            freeze_historical_experience_use_request,
+            historical_experience_use_event_id,
+            prepare_historical_experience_use_commit,
+            validate_historical_experience_use_authority_graph,
+        )
+
+        frozen = freeze_historical_experience_use_request(request)
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                event_id = historical_experience_use_event_id(frozen.judgment.id, frozen.judgment.version)
+                if self.get_event(event_id) is None and self.get_record(frozen.judgment.id) is None:
+                    self._validate_record_write_semantics(frozen.judgment)
+                    self._validate_candidate_write("record", frozen.judgment)
+                prepared = prepare_historical_experience_use_commit(self, frozen)
+                if not prepared.replayed:
+                    # Full save_record semantic/graph gates ran above; raw
+                    # write merely keeps J and its authority event atomic.
+                    self._save("record", prepared.judgment)
+                    self._historical_experience_use_commit_depth += 1
+                    try:
+                        self.append_event(prepared.event)
+                    finally:
+                        self._historical_experience_use_commit_depth -= 1
+                validate_historical_experience_use_authority_graph(self.export_state())
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return prepared.binding
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
+    def commit_outcome_impact_judgment(self, request: Any, impact_policy: Any, disposition_policy: Any) -> Any:
+        """Writer-serialized commit/replay of one durable Outcome governance judgment."""
+        from portable_runtime.governance.outcome_impact_commit import (
+            committed_outcome_impact,
+            prepare_outcome_impact_commit,
+        )
+
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                prepared = prepare_outcome_impact_commit(self, request, impact_policy, disposition_policy)
+                if not prepared.replayed:
+                    self._outcome_impact_commit_depth += 1
+                    try:
+                        for event in prepared.events:
+                            self.append_event(event)
+                    finally:
+                        self._outcome_impact_commit_depth -= 1
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return committed_outcome_impact(prepared)
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
+    def commit_recovery_observation(self, request: Any) -> Any:
+        """Writer-serialized commit/replay of one recovery observation."""
+        from portable_runtime.workflows.recovery_observation import (
+            prepare_recovery_observation_commit,
+            recovery_observation_from_event,
+            same_recovery_observation_semantics,
+        )
+
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                prepared = prepare_recovery_observation_commit(self, request)
+                existing = self.get_event(prepared.event.id)
+                if existing is not None:
+                    if not same_recovery_observation_semantics(existing, prepared.event):
+                        raise ValueError("RecoveryObservation identity rebound")
+                    observation = recovery_observation_from_event(existing)
+                    if owns_transaction:
+                        self._connection.execute("COMMIT")
+                    return observation
+                self._recovery_observation_commit_depth += 1
+                try:
+                    self.append_event(prepared.event)
+                finally:
+                    self._recovery_observation_commit_depth -= 1
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return prepared.observation
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
+    def commit_recovery_disposition(self, request: Any, policy: Any) -> Any:
+        """Writer-serialized commit/replay of one exact-basis recovery disposition."""
+        from portable_runtime.workflows.recovery_disposition_commit import (
+            prepare_recovery_disposition_commit,
+        )
+
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                plan = prepare_recovery_disposition_commit(self, request, policy)
+                if not plan.replayed:
+                    if plan.event is None:
+                        raise ValueError("RecoveryDisposition commit plan is missing its durable event")
+                    self._recovery_disposition_commit_depth += 1
+                    try:
+                        self.append_event(plan.event)
+                    finally:
+                        self._recovery_disposition_commit_depth -= 1
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return plan.disposition
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
+    def commit_recovery_application(self, request: Any) -> Any:
+        """Writer-serialized commit/replay of one exact-disposition application intent."""
+        from portable_runtime.workflows.recovery_application import (
+            prepare_recovery_application_commit,
+        )
+
+        with self._lock:
+            owns_transaction = not self._connection.in_transaction
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                plan = prepare_recovery_application_commit(self, request)
+                if not plan.replayed:
+                    if plan.event is None:
+                        raise ValueError("RecoveryApplication commit plan is missing its durable event")
+                    self._recovery_application_commit_depth += 1
+                    try:
+                        self.append_event(plan.event)
+                    finally:
+                        self._recovery_application_commit_depth -= 1
+                if owns_transaction:
+                    self._connection.execute("COMMIT")
+                return plan.application
+            except Exception:
+                if owns_transaction:
+                    self._rollback(self._connection.cursor())
+                raise
+
     def _validate_candidate_write(self, kind: str, value: Any) -> None:
         """Validate semantic writes against the complete current graph."""
         from portable_runtime.protocol.validation import assert_valid_candidate_write
@@ -284,7 +483,7 @@ class SQLiteStateStore:
 
     def save_run(self, value: Run) -> None: self._save_checked("run", value)
     def get_run(self, run_id: str) -> Run | None:
-        # The lease table is authoritative.  Overlay its current state so a
+        # The lease table is authoritative. Overlay its current state so a
         # stale run JSON mirror cannot make a caller believe an old owner is
         # still fencing the run.
         with self._lock:
@@ -341,6 +540,7 @@ class SQLiteStateStore:
     def save_decision(self, value: Decision) -> None: self._save_checked("decision", value)
     def get_decision(self, decision_id: str) -> Decision | None: return self._get("decision", Decision, decision_id)
     def save_action(self, value: Action) -> None: self._save_checked("action", value)
+    def get_action(self, action_id: str) -> Action | None: return self._get("action", Action, action_id)
     def save_outcome(self, value: Outcome) -> None: self._save_checked("outcome", value)
     def save_knowledge(self, value: KnowledgeItem) -> None: self._save_checked("knowledge", value)
     def get_knowledge(self, knowledge_id: str) -> KnowledgeItem | None:
@@ -381,6 +581,28 @@ class SQLiteStateStore:
             if status is None or value.lifecycle_status == status
         ]
     def append_event(self, value: Event) -> None:
+        from portable_runtime.governance.outcome_impact_commit import OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES
+        from portable_runtime.governance.provider_execution_binding import (
+            dispatch_has_provider_execution_binding_authority,
+        )
+
+        if value.type in OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES and self._outcome_impact_commit_depth <= 0:
+            raise ValueError("Outcome impact authority events require commit_outcome_impact_judgment")
+        if value.type == "RecoveryObservationRecorded" and self._recovery_observation_commit_depth <= 0:
+            raise ValueError("RecoveryObservation events require commit_recovery_observation")
+        if value.type == "RecoveryDispositionRecorded" and self._recovery_disposition_commit_depth <= 0:
+            raise ValueError("RecoveryDisposition events require commit_recovery_disposition")
+        if value.type == "RecoveryApplicationRecorded" and self._recovery_application_commit_depth <= 0:
+            raise ValueError("RecoveryApplication events require commit_recovery_application")
+        if value.type == "HistoricalExperienceUseRecorded" and self._historical_experience_use_commit_depth <= 0:
+            raise ValueError("HistoricalExperienceUse events require commit_historical_experience_use")
+        if (
+            dispatch_has_provider_execution_binding_authority(value)
+            and self._provider_execution_binding_dispatch_commit_depth <= 0
+        ):
+            raise ValueError(
+                "provider execution-binding dispatch events require governed dispatch commit"
+            )
         existing = self._get("event", Event, value.id)
         if existing is not None:
             try:
@@ -426,7 +648,7 @@ class SQLiteStateStore:
         try:
             cursor.execute("ROLLBACK")
         except Exception:
-            # The original operation is the useful diagnostic.  A rollback
+            # The original operation is the useful diagnostic. A rollback
             # failure must never turn an already typed error back into False.
             pass
 
@@ -434,7 +656,7 @@ class SQLiteStateStore:
         """Atomically replace a JSON record only at the expected version.
 
         ``False`` means the predicate matched zero rows (a normal stale/missing
-        record conflict).  Any SQL/transaction failure raises
+        record conflict). Any SQL/transaction failure raises
         :class:`CASExecutionError`; there is intentionally no permissive
         insert/upsert fallback.
         """
@@ -721,6 +943,16 @@ class SQLiteStateStore:
                 raise LeaseExecutionError(f"SQLite lease release failed for {run_id!r}") from exc
 
     # Records R1.2 implementation milestone
+    def _validate_record_write_semantics(self, value: BaseRecord) -> None:
+        from portable_runtime.protocol.validation import assert_semantic_mutation_authorized, validate_record_write
+        from portable_runtime.records.validation import validate_canonical_write
+
+        existing = self.get_record(value.id)
+        errs = [*validate_record_write(value, existing), *validate_canonical_write(value)]
+        if errs:
+            raise ValueError("; ".join(errs))
+        assert_semantic_mutation_authorized(value, existing, self.export_state())
+
     def save_record(self, value: BaseRecord) -> None:
         try:
             from portable_runtime.records.authorization import AuthorizationGrant
@@ -729,17 +961,7 @@ class SQLiteStateStore:
                 return
         except Exception:
             pass
-        from portable_runtime.protocol.validation import assert_semantic_mutation_authorized, validate_record_write
-        from portable_runtime.records.validation import validate_canonical_write
-
-        def validate() -> None:
-            existing = self.get_record(value.id)
-            errs = [*validate_record_write(value, existing), *validate_canonical_write(value)]
-            if errs:
-                raise ValueError("; ".join(errs))
-            assert_semantic_mutation_authorized(value, existing, self.export_state())
-
-        self._atomic_graph_save("record", value, validate)
+        self._atomic_graph_save("record", value, lambda: self._validate_record_write_semantics(value))
 
     def get_record(self, record_id: str) -> BaseRecord | None:
         return self._get("record", BaseRecord, record_id)
@@ -844,9 +1066,12 @@ class SQLiteStateStore:
         return result
 
     def import_state(self, state: dict[str, list[dict[str, object]]]) -> None:
+        from portable_runtime.experience.historical_use import assert_historical_experience_use_import_closed
+
+        assert_historical_experience_use_import_closed(state)
         with self._lock:
             # A state import is a compare/validate/replace operation against a
-            # single locked database snapshot.  BEGIN IMMEDIATE prevents a
+            # single locked database snapshot. BEGIN IMMEDIATE prevents a
             # concurrent writer from changing the graph after validation but
             # before the replacement rows are committed.
             if "authorization" not in self._types:
@@ -874,6 +1099,37 @@ class SQLiteStateStore:
                         raw for raw in candidate.get(kind, [])
                         if isinstance(raw, dict) and raw.get("id") not in incoming_ids
                     ] + [value.model_dump(mode="json") for value in prepared[kind]]
+                from portable_runtime.governance.outcome_impact_commit import (
+                    OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES,
+                )
+                from portable_runtime.governance.provider_execution_binding import (
+                    dispatch_has_provider_execution_binding_authority,
+                )
+
+                if any(
+                    getattr(event, "type", "") in OUTCOME_IMPACT_AUTHORITY_EVENT_TYPES
+                    for event in prepared.get("event", ())
+                ):
+                    raise ValueError(
+                        "B3 outcome impact authority history import is unsupported; "
+                        "durable impact authority must be created by commit_outcome_impact_judgment"
+                    )
+                if any(
+                    getattr(event, "type", "") == "RecoveryApplicationRecorded"
+                    for event in prepared.get("event", ())
+                ):
+                    raise ValueError(
+                        "P5 RecoveryApplication authority import is unsupported; "
+                        "durable application authority must be created by commit_recovery_application"
+                    )
+                if any(
+                    dispatch_has_provider_execution_binding_authority(event)
+                    for event in prepared.get("event", ())
+                ):
+                    raise ValueError(
+                        "P5 provider execution-binding dispatch authority import is unsupported; "
+                        "durable execution-binding authority must be created by governed dispatch commit"
+                    )
                 from portable_runtime.protocol.validation import (
                     assert_valid_state_graph,
                     assert_valid_state_transition,
@@ -881,6 +1137,11 @@ class SQLiteStateStore:
 
                 assert_valid_state_transition(current, candidate, prepared)
                 assert_valid_state_graph(candidate)
+                from portable_runtime.records.verified_outcome_replay import (
+                    validate_verified_outcome_authority_graph,
+                )
+
+                validate_verified_outcome_authority_graph(candidate)
                 for kind, prepared_values in prepared.items():
                     for value in prepared_values:
                         self._connection.execute(
@@ -905,7 +1166,6 @@ class SQLiteStateStore:
     def import_bundle(self, bundle_path: Path, artifact_store: Any | None = None) -> dict[str, Any]:
         from .bundle import import_bundle as _import_bundle
         return _import_bundle(self, artifact_store, bundle_path)
-
 
 
 
