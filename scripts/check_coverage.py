@@ -1,9 +1,15 @@
-"""Coverage decline gate (batch5 item 8).
+"""Coverage decline gate for control-plane-owned profile code.
 
-Runs the test suite with coverage and fails when the total coverage drops
-below the recorded baseline. The baseline lives in
+Runs the test suite with coverage and fails when ``control_plane`` coverage
+drops below the recorded baseline. The baseline lives in
 ``scripts/coverage-baseline.txt`` (a single percentage number) and was captured
 from the CI portable suite (the same ``-k`` filter used in GitHub Actions).
+
+``src/portable_runtime`` is an exact vendored upstream tree, verified separately
+by ``verify_portable_runtime_pin.py`` and by portable-runtime's own CI/conformance
+owner. Including every newly vendored upstream module in this profile-owned
+coverage denominator would make an exact vendor sync look like a profile
+coverage regression even when no control-plane code changed.
 
 Usage:
     uv run python scripts/check_coverage.py
@@ -47,15 +53,15 @@ def main() -> int:
     # The gate is already launched through the project's environment (the CI
     # workflow uses ``uv run python``). Reusing that interpreter avoids a
     # nested uv trampoline, which is not reliable on Windows.
-    # The migration gate covers both the compatibility profile and the
-    # canonical portable runtime.  Keeping both roots explicit avoids a
-    # misleading green gate that exercises only legacy control-plane code.
+    #
+    # Measure only profile-owned code here. The vendored portable-runtime tree
+    # has an independent exact-pin gate and upstream CI owner; putting upstream
+    # modules in this denominator would weaken the meaning of this baseline.
     command = [
         sys.executable,
         "-m",
         "pytest",
         "--cov=control_plane",
-        "--cov=portable_runtime",
         "--cov-report=term",
         "-q",
     ]
