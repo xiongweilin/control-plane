@@ -1,0 +1,70 @@
+name: One-shot portable-runtime vendor sync
+
+on:
+  push:
+    branches:
+      - chore/vendor-portable-runtime-b26487a6
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Checkout exact portable-runtime revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/xiongweilin/portable-runtime.git "$RUNNER_TEMP/portable-runtime"
+          git -C "$RUNNER_TEMP/portable-runtime" fetch --depth=1 origin b26487a6efe3933c5d92d637b522eac211e153c1
+          git -C "$RUNNER_TEMP/portable-runtime" checkout --detach b26487a6efe3933c5d92d637b522eac211e153c1
+
+      - name: Replace vendored portable runtime and update pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src/portable_runtime
+          cp -a "$RUNNER_TEMP/portable-runtime/src/portable_runtime" src/portable_runtime
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('.')
+          scope = Path('src/portable_runtime')
+          digest = hashlib.sha256()
+          for path in sorted(p for p in scope.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc'):
+              relative = path.relative_to(root).as_posix()
+              content = path.read_bytes().replace(b'\r\n', b'\n')
+              digest.update(relative.encode('utf-8'))
+              digest.update(b'\0')
+              digest.update(hashlib.sha256(content).digest())
+              digest.update(b'\n')
+          pin_path = Path('portable-runtime-pin.json')
+          pin = json.loads(pin_path.read_text(encoding='utf-8'))
+          pin['commit'] = 'b26487a6efe3933c5d92d637b522eac211e153c1'
+          pin['tree_sha256'] = digest.hexdigest()
+          pin_path.write_text(json.dumps(pin, indent=2) + '\n', encoding='utf-8', newline='\n')
+          print(pin['tree_sha256'])
+          PY
+
+      - name: Verify exact vendored tree
+        shell: bash
+        run: python scripts/verify_portable_runtime_pin.py --public-root "$RUNNER_TEMP/portable-runtime"
+
+      - name: Commit exact sync and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/vendor-portable-runtime-sync-once.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "chore: vendor portable-runtime b26487a6"
+          git push origin HEAD:chore/vendor-portable-runtime-b26487a6
