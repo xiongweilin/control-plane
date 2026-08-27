@@ -56,16 +56,13 @@ jobs:
 
           replace_once(
               "tests/conformance/test_p1_semantic.py",
-              '''        "effect_class": "deploy",
-              "idempotency_key": "idem-snapshot",
-          ''',
+              '        "effect_class": "deploy",\n',
               '''        "effect_class": "deploy",
               "governance": {
                   "applicable": False,
                   "requirement_digest": permit.governance_requirement_digest,
                   "snapshot_digest": permit.governance_snapshot_digest,
               },
-              "idempotency_key": "idem-snapshot",
           ''',
           )
 
