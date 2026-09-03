@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from portable_runtime.core.capabilities import CapabilityRequest
 
@@ -107,8 +107,7 @@ class Verifier:
             capability=capability,
             parameters=parameters,
         )
-        service = self._capability_service
-        assert service is not None
+        service = cast(Any, self._capability_service)
         result = await service.invoke(request)
         passed = result.status == "succeeded"
         message = (
