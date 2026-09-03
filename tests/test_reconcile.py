@@ -10,6 +10,7 @@ from control_plane.approvals import ApprovalManager
 from control_plane.budget import Budget
 from control_plane.config import ControlPlaneConfig
 from control_plane.models import Alert
+from control_plane.notify import Notifier
 from control_plane.service import RepairService
 from control_plane.storage import Store
 
@@ -76,6 +77,98 @@ def _prometheus_alerts(*alerts: tuple[str, str]) -> dict:
             ]
         },
     }
+
+
+async def test_control_plane_stale_ready_recovery_requires_fresh_metric(tmp_path) -> None:
+    service, store = _make_service(tmp_path)
+    queries: list[str] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        queries.append(request.url.params["query"])
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [{"metric": {"job": "control-plane"}, "value": [0, "1"]}],
+                },
+            },
+        )
+
+    service.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    ok, message = await service._verify_alert_recovery(_alert("ControlPlaneStaleReady"))
+
+    assert ok is True
+    assert message == "query returned results"
+    assert queries == ["(time() - control_plane_health_last_ready) < bool 3600"]
+    await service.close()
+    store.close()
+
+
+async def test_control_plane_stale_ready_recovery_rejects_stale_metric(tmp_path) -> None:
+    service, store = _make_service(tmp_path)
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [{"metric": {"job": "control-plane"}, "value": [0, "0"]}],
+                },
+            },
+        )
+
+    service.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    ok, message = await service._verify_alert_recovery(_alert("ControlPlaneStaleReady"))
+
+    assert ok is False
+    assert "expected 1" in message
+    await service.close()
+    store.close()
+
+
+async def test_control_plane_stale_ready_resolution_resets_attempts(tmp_path) -> None:
+    cfg = replace(
+        ControlPlaneConfig(),
+        api_key="x",
+        state_db=tmp_path / "cp.db",
+        notification_enabled=False,
+        prometheus_url="http://prometheus.local",
+    )
+    store = Store(cfg.state_db)
+    alert = _alert("ControlPlaneStaleReady")
+    fingerprint = _seed_firing(store, alert)
+    service = RepairService(
+        cfg,
+        store,
+        Budget(store, 10, 8),
+        object(),
+        ApprovalManager(),
+        Notifier(cfg),
+    )
+
+    service.http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "vector",
+                        "result": [{"metric": {"job": "control-plane"}, "value": [0, "1"]}],
+                    },
+                },
+            )
+        )
+    )
+    await service._handle_resolved(alert, int(alert.starts_at.timestamp()))
+
+    assert store.get_setting(f"attempt_reset:{fingerprint}", "") != ""
+    await service.close()
+    store.close()
 
 
 async def test_reconcile_resolves_stale_firing_alert(tmp_path) -> None:
