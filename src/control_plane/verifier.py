@@ -73,7 +73,8 @@ FORBIDDEN_DIFF_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-VerificationCallable = Callable[..., Awaitable[tuple[bool, str, str]]]
+VerificationResult = tuple[bool, str] | tuple[bool, str, str]
+VerificationCallable = Callable[..., Awaitable[VerificationResult]]
 
 
 class Verifier:
@@ -106,7 +107,9 @@ class Verifier:
             capability=capability,
             parameters=parameters,
         )
-        result = await self._capability_service.invoke(request)
+        service = self._capability_service
+        assert service is not None
+        result = await service.invoke(request)
         passed = result.status == "succeeded"
         message = (
             result.message
@@ -133,7 +136,8 @@ class Verifier:
         if self._capability_service is not None:
             return await self._invoke_capability(capability, capability_parameters)
         if self._direct_enabled and direct is not None:
-            return await direct(*direct_args, **direct_kwargs)
+            result = await direct(*direct_args, **direct_kwargs)
+            return (*result, "") if len(result) == 2 else result
         return False, f"capability unavailable: {capability}", ""
 
     async def verify_repair(
