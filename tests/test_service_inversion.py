@@ -18,7 +18,7 @@ from control_plane.models import AlertmanagerPayload
 from control_plane.notify import Notifier
 from control_plane.service import RepairService
 from control_plane.storage import Store
-from control_plane.verifier import LegacyVerifier, Verifier
+from control_plane.verifier import Verifier
 from portable_runtime.core.capabilities import (  # noqa: E501
     CapabilityResult,
     ProviderDescriptor,
@@ -117,16 +117,11 @@ def test_service_exposes_capability_service(tmp_path) -> None:
     executor = FakeExecutor()
     agent = FakeCodexRunner()
     service = RepairService(config, store, Budget(store, 100, 8), agent, ApprovalManager(), Notifier(config), executor=executor, http=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))))  # noqa: E501
-    # S45: service should have capability_service and should not directly expose codex subprocess
     assert hasattr(service, "capability_service")
     assert isinstance(service.capability_service, CapabilityService)
-    # Registry should contain our legacy adapter
     descs = service.capability_service.registry.list()
     assert any(d.id == "codex-legacy-adapter" for d in descs)
-    # Helper should exist
     assert hasattr(service, "_invoke_codex_via_capability")
-    # Verify that service.py no longer direct imports codex for execution path (check that workflow does not import)
-    # The portable workflow file must not import codex
     wf_path = Path("src/portable_runtime/workflows/incident_repair/workflow.py")
     if wf_path.exists():
         txt = wf_path.read_text(encoding="utf-8")
@@ -138,7 +133,6 @@ def test_service_exposes_capability_service(tmp_path) -> None:
 
 def test_verifier_fallback_returns_the_fallback_service(tmp_path, monkeypatch) -> None:
     """Provider bootstrap failures must return the empty fallback service."""
-
     config = _config(tmp_path)
     store = Store(config.state_db)
     service = RepairService(
@@ -182,9 +176,7 @@ async def test_legacy_repair_flow_fails_closed_without_portable_runtime(tmp_path
 
     payload = _payload()
     resp = await service.ingest(payload)
-    # Should be accepted via capability path
     assert resp.accepted == 1
-    # Wait for the disabled compatibility path to surface its bounded failure.
     for _ in range(200):
         rows = store.list_repairs()
         if rows and rows[0]["status"] in {"closed", "failed"}:
@@ -193,8 +185,6 @@ async def test_legacy_repair_flow_fails_closed_without_portable_runtime(tmp_path
     rows = store.list_repairs()
     assert rows and rows[0]["status"] == "failed"
     assert "routing seam" in str(rows[0]["error"] or rows[0]["result"])
-    # The adapter remains discoverable for migration diagnostics, but it is
-    # never reached by the fail-closed compatibility boundary.
     assert agent.calls == 0
     await service.close()
     store.close()
@@ -209,7 +199,6 @@ async def test_personal_effect_compatibility_path_never_invokes_provider(
     tmp_path, monkeypatch, capability: str
 ) -> None:
     """All personal Git/Docker effects fail closed without Portable Runtime."""
-
     config = _config(tmp_path)
     store = Store(config.state_db)
     service = RepairService(
@@ -250,60 +239,62 @@ async def test_personal_effect_compatibility_path_never_invokes_provider(
 
 
 @pytest.mark.asyncio
-async def test_verifier_legacy_facade_routes_via_capabilities(tmp_path) -> None:
-    """Verifier facade now calls six verify.* capabilities, output remains Evidence."""
-    # Build a verifier capability service with fake providers
+async def test_verifier_routes_via_capabilities(tmp_path) -> None:
+    """Verifier calls verify.* capabilities and returns deterministic checks."""
     registry = ProviderRegistry()
 
     class FakeHttp:
         @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-http", name="Fake HTTP", version="1.0.0", capabilities=["verify.http"])  # noqa: E501
+        def descriptor(self): return ProviderDescriptor(id="verifier-http", name="Fake HTTP", version="1.0.0", capabilities=["verify.http"])
         async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="GET http://example.com -> 200 PASS", metadata={"evidence_ref": "evidence-http-1"})  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakeContainer:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-container", name="Fake Container", version="1.0.0", capabilities=["verify.container"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="all containers running")  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakePromql:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-promql", name="Fake Promql", version="1.0.0", capabilities=["verify.promql"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="promql ok")  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakeLogs:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-logs", name="Fake Logs", version="1.0.0", capabilities=["verify.logs"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="logs ok")  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakeGit:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-git", name="Fake Git", version="1.0.0", capabilities=["verify.git"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="git ok")  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakeTests:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-tests", name="Fake Tests", version="1.0.0", capabilities=["verify.tests"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="tests ok")  # noqa: E501
-        async def cancel(self, request_id): return None
-    class FakeGitDiff:
-        @property
-        def descriptor(self): return ProviderDescriptor(id="verifier-git_diff", name="Fake GitDiff", version="1.0.0", capabilities=["verify.git_diff"])  # noqa: E501
-        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
-        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="Diff is within allowed boundaries")  # noqa: E501
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="GET http://example.com -> 200 PASS", metadata={"evidence_ref": "evidence-http-1"})
         async def cancel(self, request_id): return None
 
-    for prov in [FakeHttp(), FakeContainer(), FakePromql(), FakeLogs(), FakeGit(), FakeTests(), FakeGitDiff()]:
-        registry.register(prov)
-    svc = CapabilityService(registry)
-    verifier = Verifier(capability_service=svc)
-    # Also test alias
-    assert LegacyVerifier is Verifier
+    class FakeContainer:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-container", name="Fake Container", version="1.0.0", capabilities=["verify.container"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="all containers running")
+        async def cancel(self, request_id): return None
+
+    class FakePromql:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-promql", name="Fake Promql", version="1.0.0", capabilities=["verify.promql"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="promql ok")
+        async def cancel(self, request_id): return None
+
+    class FakeLogs:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-logs", name="Fake Logs", version="1.0.0", capabilities=["verify.logs"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="logs ok")
+        async def cancel(self, request_id): return None
+
+    class FakeGit:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-git", name="Fake Git", version="1.0.0", capabilities=["verify.git"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="git ok")
+        async def cancel(self, request_id): return None
+
+    class FakeTests:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-tests", name="Fake Tests", version="1.0.0", capabilities=["verify.tests"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="tests ok")
+        async def cancel(self, request_id): return None
+
+    class FakeGitDiff:
+        @property
+        def descriptor(self): return ProviderDescriptor(id="verifier-git_diff", name="Fake GitDiff", version="1.0.0", capabilities=["verify.git_diff"])
+        async def health(self): return ProviderHealth(provider_id=self.descriptor.id, available=True)
+        async def invoke(self, request, context): return CapabilityResult(request_id=request.id, provider_id=self.descriptor.id, status="succeeded", message="Diff is within allowed boundaries")
+        async def cancel(self, request_id): return None
+
+    for provider in [FakeHttp(), FakeContainer(), FakePromql(), FakeLogs(), FakeGit(), FakeTests(), FakeGitDiff()]:
+        registry.register(provider)
+    verifier = Verifier(capability_service=CapabilityService(registry))
     report = await verifier.verify_repair(
         repair_id="repair-1",
         alert={"labels": {"alertname": "Test"}},
@@ -311,36 +302,45 @@ async def test_verifier_legacy_facade_routes_via_capabilities(tmp_path) -> None:
         tool_results={
             "probe_urls": ["http://example.com"],
             "promql": {"up": "up{instance=\"node1\"}"},
-            "repos": [("/tmp/repo", "fix/branch")],  # noqa: S108
+            "repos": [("/tmp/repo", "fix/branch")],
             "error_log_targets": ["dify"],
             "tests": [{"command": ["python", "-m", "pytest", "-q"]}],
             "diff": "a.txt | 1 +",
         },
     )
-    # Should have checks for all six capabilities
-    names = [c.name for c in report.checks]
-    assert any("probe:" in n for n in names)
-    assert any("promql:" in n for n in names)
-    assert any("git:" in n for n in names)
-    assert any("logs:" in n for n in names)
-    assert any("tests:" in n for n in names)
-    assert any("container_status" in n for n in names)
-    # Evidence semantics: checks exist and are not self-certified (execution != verification)
+    names = [check.name for check in report.checks]
+    assert any("probe:" in name for name in names)
+    assert any("promql:" in name for name in names)
+    assert any("git:" in name for name in names)
+    assert any("logs:" in name for name in names)
+    assert any("tests:" in name for name in names)
+    assert "container_status" in names
     assert report.checks
-    # All our fakes return succeeded, so report should be all_passed
     assert report.all_passed
 
 
 @pytest.mark.asyncio
 async def test_verifier_fallback_still_works() -> None:
-    """Legacy direct Verifier still works without capability service (backward compat)."""
+    """Direct Verifier still works without capability service."""
     async def fake_probe(url, **kw): return True, "probe ok", "ref-probe"
     async def fake_container(targets): return True, "containers ok", "ref-container"
     async def fake_promql(q, exp): return True, "promql ok", "ref-promql"
     async def fake_logs(target, **kw): return True, "logs ok", "ref-logs"
     async def fake_git(repo, branch): return True, "git ok", "ref-git"
-    verifier = Verifier(probe=fake_probe, container_status=fake_container, promql=fake_promql, logs=fake_logs, git=fake_git)  # noqa: E501
-    report = await verifier.verify_repair(repair_id="r2", alert={}, actions=[{"tool": "container_status", "target": "dify"}], tool_results={"probe_urls": ["http://example.com"]})  # noqa: E501
+
+    verifier = Verifier(
+        probe=fake_probe,
+        container_status=fake_container,
+        promql=fake_promql,
+        logs=fake_logs,
+        git=fake_git,
+    )
+    report = await verifier.verify_repair(
+        repair_id="r2",
+        alert={},
+        actions=[{"tool": "container_status", "target": "dify"}],
+        tool_results={"probe_urls": ["http://example.com"]},
+    )
     assert report.checks
     assert report.all_passed
 
@@ -349,7 +349,13 @@ def test_core_does_not_import_providers() -> None:
     """Core must not import codex/feishu per check_portable_core_imports."""
     import subprocess
     import sys
-    result = subprocess.run([sys.executable, "scripts/check_portable_core_imports.py"], capture_output=True, text=True, cwd=".")  # noqa: E501
+
+    result = subprocess.run(
+        [sys.executable, "scripts/check_portable_core_imports.py"],
+        capture_output=True,
+        text=True,
+        cwd=".",
+    )
     assert result.returncode == 0
     assert "passed" in result.stdout.lower()
 
@@ -361,6 +367,5 @@ def test_service_no_direct_subprocess_in_workflow(tmp_path) -> None:
     txt = wf_file.read_text(encoding="utf-8")
     assert "subprocess" not in txt
     assert "CodexRunner" not in txt
-    # Should use context.invoke
     assert "context.invoke" in txt
     assert "reason.generate" in txt or "code.edit" in txt
