@@ -3189,6 +3189,16 @@ class RepairService:
             )
             return ok, message
 
+        if alertname == "ControlPlaneStaleReady":
+            # Mirror the alert rule's one-hour freshness boundary. The bool
+            # comparison yields a deterministic 1 only when the latest
+            # readiness timestamp is present and fresh.
+            ok, message, _ = await self._check_promql(
+                "(time() - control_plane_health_last_ready) < bool 3600",
+                expected=1,
+            )
+            return ok, message
+
         if project in self.config.allowed_auto_projects:
             ok, message, _ = await self._check_containers([project])
             return ok, message

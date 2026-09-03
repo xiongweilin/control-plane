@@ -212,7 +212,7 @@ After a repair completes, a deterministic module verifies — model self-reports
 
 Evidence is derived automatically by alert type: `ServiceDown` (instance is a URL) → probe + `probe_success == 1`; `PrometheusScrapeFailed` → `up{instance=...} == 1`; pure-ops repairs with no code/probe evidence fall back to the allowlisted project container baseline. With no deterministic check at all, it is judged a failure (minimum_evidence).
 
-Recovery verification uses the same class of deterministic evidence: dev-environment alerts require `dev_environment_health == 1` and non-stale maintenance metrics; stale-metric alerts require the newest sample to re-enter the 7-hour window; service-unreachable uses HTTP probes in the allowlist; scrape failures use `up == 1`; known-project alerts use container health state. When running npm audits, always explicitly use `--registry=https://registry.npmjs.org`.
+Recovery verification uses the same class of deterministic evidence: dev-environment alerts require `dev_environment_health == 1` and non-stale maintenance metrics; `ControlPlaneStaleReady` requires `(time() - control_plane_health_last_ready) < bool 3600`; stale-metric alerts require the newest sample to re-enter the 7-hour window; service-unreachable uses HTTP probes in the allowlist; scrape failures use `up == 1`; known-project alerts use container health state. When running npm audits, always explicitly use `--registry=https://registry.npmjs.org`.
 
 ## Daily precipitation cleanup
 
