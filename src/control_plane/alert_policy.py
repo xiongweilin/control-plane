@@ -43,7 +43,7 @@ def _succeeded(result: dict[str, Any] | None) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class AutonomousRepairPolicy:
-    """Two attempts: strong diagnosis, cheap execution, kernel verification.
+    """Two attempts: diagnosis, execution, kernel verification.
 
     The policy only selects controller actions. Codex invocation, provider
     dispatch, persistence, effect admission and real operations remain inside
@@ -110,7 +110,7 @@ class AutonomousRepairPolicy:
             capability="reason.generate",
             instruction=instruction,
             parameters=parameters,
-            reason="use the strong model to diagnose the current repair attempt",
+            reason="use the configured diagnosis model for the current repair attempt",
         )
 
     def _execute(
@@ -142,7 +142,7 @@ class AutonomousRepairPolicy:
             capability=capability,
             instruction=instruction,
             parameters=parameters,
-            reason="use the cheap model for bounded execution after diagnosis",
+            reason="use the configured execution model after diagnosis",
         )
 
     def _verify(self, state: ControllerState) -> ControllerDecision:
@@ -196,7 +196,7 @@ class AutonomousRepairPolicy:
                     controller_ref=state.id,
                     state_version=state.version,
                     kind=ControllerDecisionKind.WAIT,
-                    reason="two strong-model diagnosis attempts failed",
+                    reason="two diagnosis attempts failed",
                 )
             return self._execute(state, _message(last_result))
 
@@ -208,7 +208,7 @@ class AutonomousRepairPolicy:
                     controller_ref=state.id,
                     state_version=state.version,
                     kind=ControllerDecisionKind.WAIT,
-                    reason="the second cheap-model execution attempt failed",
+                    reason="the second execution attempt failed",
                 )
             if self.project:
                 return ControllerDecision(
@@ -268,7 +268,7 @@ class AutonomousRepairPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ManualTaskPolicy:
-    """Strong-model interpretation followed by one cheap-model execution step."""
+    """Model-backed interpretation followed by one execution step."""
 
     controller: CognitiveController = field(repr=False, compare=False)
     prompt: str
@@ -313,7 +313,7 @@ class ManualTaskPolicy:
                     "required, and give a bounded execution instruction.\n\n" + self.prompt
                 ),
                 parameters=params,
-                reason="use the strong model to interpret an explicit personal task",
+                reason="use the configured diagnosis model to interpret the personal task",
             )
         last = invocations[-1]
         result = results.get(last.id)
@@ -341,7 +341,7 @@ class ManualTaskPolicy:
                     "Do not claim effects you cannot verify.\n\n" + _message(result)
                 ),
                 parameters=params,
-                reason="use the cheap model for execution after strong-model interpretation",
+                reason="use the configured execution model after task interpretation",
             )
         return ControllerDecision(
             controller_ref=state.id,
