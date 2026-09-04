@@ -8,14 +8,15 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from portable_runtime.controller import CognitiveController, ControllerDecision, ControllerDecisionKind
+from portable_runtime.controller import CognitiveController
 from portable_runtime.core.capability_contract import CapabilityEffectRule
 from portable_runtime.deployment.local import create_personal_platform_runtime
 from portable_runtime.interactions.feishu.provider import FeishuHumanProvider, FeishuNotificationProvider
 from portable_runtime.providers.codex.provider import CodexProvider
 
+from .alert_policy import UnattendedAlertPolicy, drive_alert_diagnosis
 from .audit import inspect_session_fields
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
@@ -23,12 +24,7 @@ from .game_mode import read_game_mode_state
 from .personal_operations import PersonalOperationsProvider
 
 
-class TaskRequest(BaseModel):
-    prompt: str = Field(min_length=1)
-    repo: str | None = None
-
-
-class TaskResponse(BaseModel):
+class DiagnosisResult(BaseModel):
     work_id: str
     controller_id: str
     status: str
@@ -87,7 +83,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Personal Control Plane",
-        version="0.2.0",
+        version="0.3.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -100,21 +96,13 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if not candidate or not secrets.compare_digest(candidate, cfg.api_key):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    async def run_cognition(*, title: str, prompt: str, repo: str | None = None) -> TaskResponse:
+    async def run_alert_diagnosis(*, title: str, prompt: str, repo: str | None = None) -> DiagnosisResult:
         if repo and not cfg.repo_allowed(repo):
             raise HTTPException(status_code=400, detail="repo is outside personal allowlist")
-        work = runtime.create_work(title=title, description=prompt, kind="personal-cognitive-task")
+        work = runtime.create_work(title=title, description=prompt, kind="personal-alert-diagnosis")
         state = controller.create(subject_ref=work.id, context_refs=[work.id])
-        decision = ControllerDecision(
-            controller_ref=state.id,
-            state_version=state.version,
-            kind=ControllerDecisionKind.INVOKE_CAPABILITY,
-            capability="reason.generate",
-            instruction=prompt,
-            parameters={"repo": repo} if repo else {},
-            reason="personal profile requested a read-only cognitive step",
-        )
-        final_state = await controller.apply(decision)
+        policy = UnattendedAlertPolicy(prompt=prompt, repo=repo)
+        final_state = await drive_alert_diagnosis(controller, state.id, policy)
         result_payload: dict[str, Any] | None = None
         for event in reversed(runtime.store.list_events(final_state.id)):
             if event.type == "ControllerCapabilityResultObserved":
@@ -122,7 +110,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 if isinstance(raw, dict):
                     result_payload = raw
                 break
-        return TaskResponse(
+        return DiagnosisResult(
             work_id=work.id,
             controller_id=final_state.id,
             status=str((result_payload or {}).get("status", final_state.status.value)),
@@ -187,13 +175,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "contracts": [item.model_dump(mode="json") for item in runtime.contract_registry.list()],
         }
 
-    @app.post("/v1/tasks", response_model=TaskResponse)
-    async def task(body: TaskRequest, x_control_plane_key: str = Header(default="")) -> TaskResponse:
-        require_key(x_control_plane_key)
-        result = await run_cognition(title="Personal task", prompt=body.prompt, repo=body.repo)
-        await notify(result.work_id, f"任务已进入 Agent Kernel：{result.work_id}\nstatus={result.status}")
-        return result
-
     @app.post("/v1/alerts/alertmanager", response_model=AlertIngestResponse)
     async def alertmanager(payload: dict[str, Any], x_control_plane_key: str = Header(default=""), authorization: str = Header(default="")) -> AlertIngestResponse:
         bearer = authorization.partition(" ")
@@ -230,10 +211,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 "Return likely causes, discriminating observations, and the safest next cognitive or operational step.\n"
                 + json.dumps(raw, ensure_ascii=False, default=str)
             )
-            result = await run_cognition(title=f"Alert: {alertname}", prompt=prompt, repo=repo)
+            result = await run_alert_diagnosis(title=f"Alert: {alertname}", prompt=prompt, repo=repo)
             diagnosed += 1
             controllers.append(result.controller_id)
-            await notify(result.work_id, f"告警已进入 Agent Kernel：{alertname}\nwork={result.work_id}\nstatus={result.status}")
+            await notify(result.work_id, f"告警已完成只读诊断：{alertname}\nwork={result.work_id}\nstatus={result.status}")
         return AlertIngestResponse(accepted=accepted, suppressed=suppressed, diagnosed=diagnosed, controllers=controllers)
 
     @app.get("/v1/game-mode")
