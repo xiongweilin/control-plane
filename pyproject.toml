@@ -1,9 +1,12 @@
 [project]
 name = "control-plane"
-version = "0.1.0"
-description = "Personal platform control plane: alert-driven repair agent with evidence semantics"
+version = "0.2.0"
+description = "Personal Windows/monitoring/Feishu profile for Agent Kernel"
 requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
 dependencies = [
+    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@6deb4ab80e4c22470a6c0f72c827c45569bcba54",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",
@@ -15,27 +18,22 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
-    "pytest-cov>=5,<7",
     "ruff>=0.9,<1",
     "mypy>=1.10,<2",
 ]
 
 [project.scripts]
-runtime = "portable_runtime.__main__:main"
+control-plane = "control_plane.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# portable-runtime/contracts is the provider-neutral product-semantic upstream.
-# This profile intentionally ships the vendored runtime alongside control_plane
-# so a Windows installation is reproducible, but the vendored tree is not a
-# second authority. The exact synchronized revision is owned only by
-# portable-runtime-pin.json; do not duplicate its commit SHA in prose/config
-# comments. Profile-specific Windows execution-boundary code remains an adapter
-# in control_plane.
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/control_plane", "src/portable_runtime"]
+packages = ["src/control_plane"]
 
 [tool.ruff]
 target-version = "py312"
@@ -45,68 +43,29 @@ line-length = 120
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/verify_portable_runtime_pin.py" = ["S603", "S607"]
-# The vendored conformance suite is copied from portable-runtime and carries
-# intentionally long fixtures, import-order probes, and security-test literals.
-"tests/*" = ["S101", "S108", "S105", "S106", "E501", "B017", "N817", "B011", "F841", "S311", "S112", "E702", "E701", "E401", "E402", "I001", "F401", "N806", "SIM110", "N814", "N812"]
-"src/control_plane/config.py" = ["S104"]
-# Vendored src/portable_runtime follows the upstream project's lint baseline;
-# the remaining profile-specific differences are deployment adapters documented
-# in MIGRATION.md.
-"src/portable_runtime/core/knowledge.py" = ["E501", "S110", "SIM102", "W291"]
-"src/portable_runtime/core/registry.py" = ["E501"]
-"src/portable_runtime/core/router.py" = ["S110", "SIM105", "E501", "S112", "F841", "SIM102"]
-"src/portable_runtime/core/runtime.py" = ["S110", "SIM105", "E501"]
-"src/portable_runtime/stores/memory.py" = ["S110", "SIM105", "E501", "SIM102"]
-"src/portable_runtime/stores/sqlite.py" = ["S110", "SIM105", "E501", "UP017", "F401"]
-"src/portable_runtime/core/policies.py" = ["S110", "SIM105", "E501", "B007", "UP037"]
-"src/portable_runtime/workflows/procedure.py" = ["S110", "SIM105", "E501", "B904", "SIM103", "SIM102", "S112", "SIM108", "W291"]
-"src/portable_runtime/records/*.py" = ["E501", "S110", "SIM102", "SIM103", "B904"]
-"src/portable_runtime/core/workflows.py" = ["S112"]
-"src/portable_runtime/workflows/context.py" = ["S110", "SIM105", "E501"]
-"src/portable_runtime/workflows/daily_scan/workflow.py" = ["S110", "SIM105", "E501"]
-"src/portable_runtime/workflows/knowledge_consolidation/workflow.py" = ["S110", "SIM105", "E501", "W291"]
-"src/portable_runtime/workflows/incident_repair/workflow.py" = ["S110", "SIM105"]
-"src/portable_runtime/api/http.py" = ["S110", "SIM105", "E501"]
-"src/portable_runtime/api/cli.py" = ["S110", "E501", "F841"]
-"src/portable_runtime/stores/bundle.py" = ["E501", "B007", "S112", "S110", "I001"]
-"src/portable_runtime/interfaces/transport.py" = ["S110", "SIM105", "E501", "UP042", "SIM102"]
-"src/portable_runtime/triggers/base.py" = ["UP042"]
-"src/portable_runtime/triggers/webhook/trigger.py" = ["S110", "SIM105"]
-"src/portable_runtime/triggers/alertmanager/trigger.py" = ["S110", "SIM105"]
-"src/portable_runtime/core/boundary.py" = ["S110", "SIM105", "E501", "S112", "SIM102", "F821"]
-"src/portable_runtime/core/capability_contract.py" = ["E501", "SIM103"]
-"src/portable_runtime/core/invocation.py" = ["E501", "SIM102", "S110", "SIM105"]
-"src/portable_runtime/core/independence.py" = ["E501", "S110", "SIM102", "UP037"]
+"tests/*" = ["S101", "E501"]
+"src/control_plane/app.py" = ["E501", "I001"]
+"src/control_plane/config.py" = ["E501"]
+"src/control_plane/codex_boundary.py" = ["E501", "S603", "S607"]
+"src/control_plane/personal_operations.py" = ["E501", "S603", "S607"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-pythonpath = ["."]
+pythonpath = ["src"]
 
 [tool.mypy]
 python_version = "3.12"
 check_untyped_defs = true
 warn_redundant_casts = true
-warn_unused_ignores = true
+warn_unused_ignores = false
 no_implicit_optional = true
 show_error_codes = true
-exclude = ["tests/"]
-
-[[tool.mypy.overrides]]
-module = "portable_runtime.core.independence"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "portable_runtime.core.capability_contract"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "portable_runtime.core.invocation"
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "portable_runtime.*"
-warn_unused_ignores = false
-[tool.coverage.run]
-omit = ["tests/*", ".venv/*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "control_plane.app"
+disable_error_code = ["union-attr"]
