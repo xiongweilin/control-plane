@@ -44,13 +44,13 @@ PC / Prometheus / Alertmanager
                     |
               Feishu notify
                     |
-         /cp instruct <id> <command>
+       /task <controller_id> <command>
                     |
                     v
-             new controller cycle
+             follow-up controller
 ```
 
-Autonomous repair is deliberately bounded to two attempts. Each attempt uses `codex/gpt-5.6-sol` for diagnosis and `codex/gpt-5.6-luna` for execution. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu instruction starts a follow-up controller on the same Agent Kernel Work.
+Autonomous repair is deliberately bounded to two attempts. Each attempt uses `codex/gpt-5.6-sol` for diagnosis and `codex/gpt-5.6-luna` for execution. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu `/task <controller_id> <command>` starts a follow-up controller on the same Agent Kernel Work.
 
 ## Boundary
 
@@ -104,13 +104,13 @@ There is no compatibility projection. If Agent Kernel needs a semantic feature, 
 - `GET /metrics` — Prometheus metrics.
 - `GET /status` — concise personal runtime/model status for Feishu `/cp status`.
 - `GET /v1/runtime` — Agent Kernel runtime/work/contract view (API key).
-- `POST /v1/tasks` — explicit personal command/task; strong-model interpretation followed by cheap-model execution through Agent Kernel.
+- `POST /v1/tasks` — explicit personal command/task; strong-model interpretation followed by cheap-model execution through Agent Kernel. A prompt beginning with `<controller_id> ` is treated as an explicit continuation command for that waiting incident.
 - `POST /v1/alerts/alertmanager` — authenticated unattended incident ingress; two autonomous repair attempts maximum.
-- `POST /v1/controllers/{controller_id}/command` — explicit owner instruction for a controller that stopped in `WAITING`; creates a follow-up controller on the same Work.
+- `POST /v1/controllers/{controller_id}/command` — direct authenticated equivalent of the Feishu continuation form.
 - `GET /v1/game-mode` — current personal game-mode projection.
 - `GET /v1/sessions/inspect` — reports sensitive field names only, never values.
 
-Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task` dispatch to `/v1/tasks`; `/cp instruct <controller_id> <command>` dispatches an explicit instruction to a waiting repair.
+Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task` already dispatch to `/v1/tasks`, so no second Feishu command protocol is needed. The escalation notification tells the owner to send `/task <controller_id> <explicit command>`; the control plane recognizes that prefix and attaches the instruction to the waiting incident.
 
 ## Models
 
