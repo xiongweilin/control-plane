@@ -176,7 +176,7 @@ class AutonomousRepairPolicy:
     def _form_closure(
         self,
         state: ControllerState,
-        diagnosis_result: dict[str, Any],
+        diagnosis_result: dict[str, Any] | None,
     ) -> ControllerDecision:
         assessment_ref = self.bridge.assessment_ref(state)
         basis_refs = [assessment_ref]
@@ -561,7 +561,11 @@ class ManualTaskPolicy:
     def _effect_class(self) -> EffectClass:
         return EffectClass.INTERNAL_REVERSIBLE if self.repo else EffectClass.READ_ONLY
 
-    def _form_closure(self, state: ControllerState, result: dict[str, Any]) -> ControllerDecision:
+    def _form_closure(
+        self,
+        state: ControllerState,
+        result: dict[str, Any] | None,
+    ) -> ControllerDecision:
         assessment_ref = self.bridge.assessment_ref(state)
         basis_refs = [assessment_ref]
         if state.last_result_ref:
