@@ -23,5 +23,8 @@ Canonical files:
 - `Run-ControlPlane.ps1` / `Run-ControlPlaneHidden.vbs` — process supervisor.
 - `Watch-ControlPlane.ps1` / `Watch-ControlPlaneHidden.vbs` — liveness watchdog.
 
+The supervisor and installer resolve the repository root two levels above this
+deployment directory, so the scheduled task can run from any working directory.
+
 There is intentionally no portable-runtime copy, portable-local deployment, or
 migration shim in this repository.

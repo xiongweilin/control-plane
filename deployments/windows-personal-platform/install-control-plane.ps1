@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 
 param(
-    [string]$ProjectDir = (Split-Path -Parent $PSScriptRoot)
+    [string]$ProjectDir = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 )
 
 $ErrorActionPreference = 'Stop'

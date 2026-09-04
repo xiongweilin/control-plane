@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$ProjectDir = (Split-Path -Parent $PSScriptRoot),
+    [string]$ProjectDir = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
     [ValidateRange(5, 300)]
     [int]$ProbeIntervalSeconds = 30,
     [ValidateRange(0, 600)]
