@@ -24,12 +24,12 @@ PC / Prometheus / Alertmanager
             +------------------------------+
             |                              |
             v                              v
- Codex + gpt-5.6-sol              Prometheus / personal effects
- strong diagnosis                 verification / bounded apply
+ Codex + gpt-5.6-luna             Prometheus / personal effects
+ diagnosis                        verification / bounded apply
             |
             v
  Codex + gpt-5.6-luna
- cheap bounded execution
+ bounded execution
             |
             v
  verify real alert state
@@ -50,7 +50,7 @@ PC / Prometheus / Alertmanager
              follow-up controller
 ```
 
-Autonomous repair is deliberately bounded to two attempts. Each attempt uses `codex/gpt-5.6-sol` for diagnosis and `codex/gpt-5.6-luna` for execution. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu `/task <controller_id> <command>` starts a follow-up controller on the same Agent Kernel Work.
+Autonomous repair is deliberately bounded to two attempts. Both diagnosis and execution use `codex/gpt-5.6-luna`; they remain distinct controller phases with different instructions and capabilities. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu `/task <controller_id> <command>` starts a follow-up controller on the same Agent Kernel Work.
 
 ## Boundary
 
@@ -104,7 +104,7 @@ There is no compatibility projection. If Agent Kernel needs a semantic feature, 
 - `GET /metrics` — Prometheus metrics.
 - `GET /status` — concise personal runtime/model status for Feishu `/cp status`.
 - `GET /v1/runtime` — Agent Kernel runtime/work/contract view (API key).
-- `POST /v1/tasks` — explicit personal command/task; strong-model interpretation followed by cheap-model execution through Agent Kernel. A prompt beginning with `<controller_id> ` is treated as an explicit continuation command for that waiting incident.
+- `POST /v1/tasks` — explicit personal command/task; Luna interpretation followed by Luna execution through Agent Kernel. A prompt beginning with `<controller_id> ` is treated as an explicit continuation command for that waiting incident.
 - `POST /v1/alerts/alertmanager` — authenticated unattended incident ingress; two autonomous repair attempts maximum.
 - `POST /v1/controllers/{controller_id}/command` — direct authenticated equivalent of the Feishu continuation form.
 - `GET /v1/game-mode` — current personal game-mode projection.
@@ -116,11 +116,11 @@ Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task`
 
 ```toml
 [model]
-diagnosis_model = "codex/gpt-5.6-sol"
+diagnosis_model = "codex/gpt-5.6-luna"
 execution_model = "codex/gpt-5.6-luna"
 ```
 
-Both are invoked through the same Agent Kernel `CodexProvider`; the profile selects the per-request model through capability parameters.
+Both phases are invoked through the same Agent Kernel `CodexProvider`; the phase distinction is carried by controller policy, instructions and capability parameters rather than by model tier.
 
 ## Setup
 
@@ -143,4 +143,4 @@ uv run mypy src
 uv run pytest -q
 ```
 
-Structural tests fail if an embedded `src/portable_runtime` tree or any retired generic control-plane module reappears. Tests also assert the strong/cheap model split, restored personal task surface, bounded two-attempt repair policy and Feishu continuation command boundary.
+Structural tests fail if an embedded `src/portable_runtime` tree or any retired generic control-plane module reappears. Tests also assert Luna use in both cognitive phases, the restored personal task surface, bounded two-attempt repair policy and Feishu continuation command boundary.
