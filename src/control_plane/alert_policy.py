@@ -41,6 +41,19 @@ def _succeeded(result: dict[str, Any] | None) -> bool:
     return str(result.get("status", "")) == "succeeded"
 
 
+def _latest_invocation(
+    state: ControllerState,
+    invocations: list[ControllerDecision],
+) -> ControllerDecision:
+    if state.last_decision_ref:
+        for decision in invocations:
+            if decision.id == state.last_decision_ref:
+                return decision
+    # StateStore event listings are newest-first; the fallback supports
+    # policy unit tests that record durable events without advancing state.
+    return invocations[0]
+
+
 @dataclass(frozen=True, slots=True)
 class AutonomousRepairPolicy:
     """Two attempts: diagnosis, execution, kernel verification.
@@ -176,7 +189,7 @@ class AutonomousRepairPolicy:
             return self._diagnosis(state)
 
         results = _result_by_decision(self.controller, state.id)
-        last = invocations[-1]
+        last = _latest_invocation(state, invocations)
         last_result = results.get(last.id)
         attempts = self._diagnosis_count(state)
 
@@ -315,7 +328,7 @@ class ManualTaskPolicy:
                 parameters=params,
                 reason="use the configured diagnosis model to interpret the personal task",
             )
-        last = invocations[-1]
+        last = _latest_invocation(state, invocations)
         result = results.get(last.id)
         if last.parameters.get("phase") == "diagnosis":
             if not _succeeded(result):
