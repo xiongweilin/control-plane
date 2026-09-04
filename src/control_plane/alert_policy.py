@@ -14,7 +14,10 @@ from portable_runtime.controller import (
 _RESULT_EVENT = "ControllerCapabilityResultObserved"
 
 
-def _result_by_decision(controller: CognitiveController, controller_id: str) -> dict[str, dict[str, Any]]:
+def _result_by_decision(
+    controller: CognitiveController,
+    controller_id: str,
+) -> dict[str, dict[str, Any]]:
     values: dict[str, dict[str, Any]] = {}
     for event in controller.store.list_events(controller_id):
         if event.type != _RESULT_EVENT:
@@ -70,16 +73,26 @@ class AutonomousRepairPolicy:
             and decision.parameters.get("phase") == "diagnosis"
         )
 
-    def _diagnosis(self, state: ControllerState, *, retry_context: str = "") -> ControllerDecision:
+    def _diagnosis(
+        self,
+        state: ControllerState,
+        *,
+        retry_context: str = "",
+    ) -> ControllerDecision:
         attempt = self._diagnosis_count(state) + 1
         instruction = (
-            f"Diagnose this incident for autonomous repair attempt {attempt}/{self.max_attempts}.\n"
-            "Identify the most likely root cause and give a concrete, bounded execution instruction. "
-            "Do not claim recovery or completion. Prefer the smallest repair that can be tested.\n\n"
+            f"Diagnose this incident for autonomous repair attempt {attempt}/"
+            f"{self.max_attempts}.\n"
+            "Identify the most likely root cause and give a concrete, bounded "
+            "execution instruction. Do not claim recovery or completion. Prefer "
+            "the smallest repair that can be tested.\n\n"
             f"Incident:\n{self.prompt}"
         )
         if self.human_instruction:
-            instruction += f"\n\nHuman instruction (authoritative task direction, not truth):\n{self.human_instruction}"
+            instruction += (
+                "\n\nHuman instruction (authoritative task direction, not truth):\n"
+                f"{self.human_instruction}"
+            )
         if retry_context:
             instruction += f"\n\nPrevious attempt evidence:\n{retry_context}"
         parameters: dict[str, Any] = {
@@ -106,8 +119,9 @@ class AutonomousRepairPolicy:
         instruction = (
             "Execute the diagnosed repair now. Use the current repository only. "
             "Make the smallest necessary local changes and run relevant checks/tests. "
-            "Do not push, merge, access remote credentials, or run Docker directly; those effects "
-            "belong to Agent Kernel providers. Finish with a concise execution summary.\n\n"
+            "Do not push, merge, access remote credentials, or run Docker directly; "
+            "those effects belong to Agent Kernel providers. Finish with a concise "
+            "execution summary.\n\n"
             f"Diagnosis and plan:\n{diagnosis}"
         )
         parameters: dict[str, Any] = {
@@ -200,9 +214,14 @@ class AutonomousRepairPolicy:
                     state_version=state.version,
                     kind=ControllerDecisionKind.INVOKE_CAPABILITY,
                     capability="docker.compose.up",
-                    instruction="Apply the already prepared local repair for the configured project.",
+                    instruction=(
+                        "Apply the already prepared local repair for the configured project."
+                    ),
                     parameters={"project": self.project, "phase": "apply"},
-                    reason="apply the allowlisted personal project through the kernel effect boundary",
+                    reason=(
+                        "apply the allowlisted personal project through the kernel effect "
+                        "boundary"
+                    ),
                 )
             return self._verify(state)
 
@@ -276,7 +295,10 @@ class ManualTaskPolicy:
         ]
         results = _result_by_decision(self.controller, state.id)
         if not invocations:
-            params: dict[str, Any] = {"model": self.diagnosis_model, "phase": "diagnosis"}
+            params: dict[str, Any] = {
+                "model": self.diagnosis_model,
+                "phase": "diagnosis",
+            }
             if self.repo:
                 params["repo"] = self.repo
             return ControllerDecision(
@@ -285,8 +307,8 @@ class ManualTaskPolicy:
                 kind=ControllerDecisionKind.INVOKE_CAPABILITY,
                 capability="reason.generate",
                 instruction=(
-                    "Interpret this explicit personal command, identify the concrete work required, "
-                    "and give a bounded execution instruction.\n\n" + self.prompt
+                    "Interpret this explicit personal command, identify the concrete work "
+                    "required, and give a bounded execution instruction.\n\n" + self.prompt
                 ),
                 parameters=params,
                 reason="use the strong model to interpret an explicit personal task",
@@ -314,8 +336,7 @@ class ManualTaskPolicy:
                 capability=capability,
                 instruction=(
                     "Execute this explicit personal task now within the available boundary. "
-                    "Do not claim effects you cannot verify.\n\n"
-                    + _message(result)
+                    "Do not claim effects you cannot verify.\n\n" + _message(result)
                 ),
                 parameters=params,
                 reason="use the cheap model for execution after strong-model interpretation",
