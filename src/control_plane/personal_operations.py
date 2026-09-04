@@ -28,7 +28,13 @@ class PersonalOperationsProvider:
             id="personal-operations",
             name="Personal Git/Docker Operations",
             version="2.0.0",
-            capabilities=["git.merge", "git.push", "git.rollback", "docker.restart", "docker.compose.up"],
+            capabilities=[
+                "git.merge",
+                "git.push",
+                "git.rollback",
+                "docker.restart",
+                "docker.compose.up",
+            ],
             priority=20,
             tags={"personal-profile", "side-effect"},
             effect_semantics="reconcilable",
@@ -53,7 +59,11 @@ class PersonalOperationsProvider:
             detail=f"git={git_ok} docker={docker_ok}",
         )
 
-    async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
+    async def invoke(
+        self,
+        request: CapabilityRequest,
+        context: InvocationContext,
+    ) -> CapabilityResult:
         del context
         try:
             if request.capability.startswith("git."):
@@ -61,7 +71,11 @@ class PersonalOperationsProvider:
             elif request.capability.startswith("docker."):
                 message = await self._docker(request)
             else:
-                return self._result(request, "unavailable", f"unsupported capability {request.capability}")
+                return self._result(
+                    request,
+                    "unavailable",
+                    f"unsupported capability {request.capability}",
+                )
         except TimeoutError as exc:
             return self._result(request, "unknown", str(exc))
         except (OSError, RuntimeError, ValueError) as exc:
@@ -77,18 +91,32 @@ class PersonalOperationsProvider:
         del request_id
         return None
 
-    def _result(self, request: CapabilityRequest, status: str, message: str) -> CapabilityResult:
+    def _result(
+        self,
+        request: CapabilityRequest,
+        status: str,
+        message: str,
+    ) -> CapabilityResult:
         return CapabilityResult(
             request_id=request.id,
             provider_id=self.descriptor.id,
             status=status,
             message=message,
-            metadata={"capability": request.capability, "resource_ref": request.resource_ref or ""},
+            metadata={
+                "capability": request.capability,
+                "resource_ref": request.resource_ref or "",
+            },
         )
 
-    async def _run(self, argv: list[str], *, cwd: str | None = None, timeout: float = 120) -> str:
+    async def _run(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: float = 120,
+    ) -> str:
         executable = shutil.which(argv[0]) or argv[0]
-        proc = await asyncio.create_subprocess_exec(  # noqa: S603
+        proc = await asyncio.create_subprocess_exec(
             executable,
             *argv[1:],
             cwd=cwd,
@@ -100,7 +128,9 @@ class PersonalOperationsProvider:
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise TimeoutError(f"command outcome is ambiguous after timeout: {argv[0]}") from None
+            raise TimeoutError(
+                f"command outcome is ambiguous after timeout: {argv[0]}"
+            ) from None
         out = (stdout or b"").decode("utf-8", errors="replace").strip()
         err = (stderr or b"").decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
@@ -146,7 +176,15 @@ class PersonalOperationsProvider:
             service = str(request.parameters.get("service", "")).strip()
             if not service:
                 raise ValueError("docker.restart requires parameters.service")
-            return await self._run(["docker", "compose", "restart", service], cwd=project_dir, timeout=180)
+            return await self._run(
+                ["docker", "compose", "restart", service],
+                cwd=project_dir,
+                timeout=180,
+            )
         if request.capability == "docker.compose.up":
-            return await self._run(["docker", "compose", "up", "-d"], cwd=project_dir, timeout=300)
+            return await self._run(
+                ["docker", "compose", "up", "-d"],
+                cwd=project_dir,
+                timeout=300,
+            )
         raise ValueError(f"unsupported docker capability: {request.capability}")
