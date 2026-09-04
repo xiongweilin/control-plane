@@ -9,7 +9,7 @@ from portable_runtime.core.runtime import Runtime
 
 from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy
 
-DIAGNOSIS_MODEL = "codex/gpt-5.6-sol"
+DIAGNOSIS_MODEL = "codex/gpt-5.6-luna"
 EXECUTION_MODEL = "codex/gpt-5.6-luna"
 
 
@@ -65,7 +65,7 @@ def _policy(controller: CognitiveController) -> AutonomousRepairPolicy:
     )
 
 
-async def test_alert_policy_starts_with_strong_diagnosis() -> None:
+async def test_alert_policy_starts_with_configured_diagnosis_model() -> None:
     controller = _controller()
     state = ControllerState(id="controller-test")
     decision = await _policy(controller).select(state)
@@ -75,7 +75,7 @@ async def test_alert_policy_starts_with_strong_diagnosis() -> None:
     assert decision.parameters["phase"] == "diagnosis"
 
 
-async def test_alert_policy_uses_cheap_model_for_execution() -> None:
+async def test_alert_policy_uses_configured_model_for_execution() -> None:
     controller = _controller()
     state = ControllerState(id="controller-test")
     policy = _policy(controller)
@@ -137,7 +137,7 @@ async def test_alert_policy_closes_when_monitor_confirms_recovery() -> None:
     assert close.kind is ControllerDecisionKind.CLOSE
 
 
-async def test_manual_task_uses_same_model_split() -> None:
+async def test_manual_task_uses_luna_for_both_phases() -> None:
     controller = _controller()
     state = ControllerState(id="controller-task")
     policy = ManualTaskPolicy(
@@ -153,3 +153,4 @@ async def test_manual_task_uses_same_model_split() -> None:
     execution = await policy.select(state)
     assert execution.parameters["model"] == EXECUTION_MODEL
     assert execution.capability == "shell.exec"
+    assert diagnosis.parameters["model"] == execution.parameters["model"]
