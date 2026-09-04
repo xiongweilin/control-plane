@@ -1,12 +1,14 @@
 # Windows personal deployment
 
-This directory is the personal Windows deployment shell around `agent-kernel`.
+This directory is the unattended personal Windows deployment shell around `agent-kernel`.
 It owns Task Scheduler, hidden launch, watchdog/liveness probing, local firewall
 setup and log protection. It does not own runtime, cognitive-control,
 responsibility, record, authority, recovery or verification semantics.
 
 The Python application is `control_plane`; its generic kernel is installed from
-`xiongweilin/agent-kernel` as the `portable-runtime` distribution.
+`xiongweilin/agent-kernel` as the `portable-runtime` distribution. Interactive
+repository development and repair use Codex directly and do not route through
+this background service.
 
 Install dependencies first:
 
@@ -26,5 +28,5 @@ Canonical files:
 The supervisor and installer resolve the repository root two levels above this
 deployment directory, so the scheduled task can run from any working directory.
 
-There is intentionally no portable-runtime copy, portable-local deployment, or
-migration shim in this repository.
+There is intentionally no portable-runtime copy, portable-local deployment,
+generic task UI or migration shim in this repository.
