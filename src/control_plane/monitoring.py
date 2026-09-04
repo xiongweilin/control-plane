@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
@@ -58,7 +57,9 @@ class PersonalMonitoringProvider:
             )
 
     async def invoke(
-        self, request: CapabilityRequest, context: InvocationContext
+        self,
+        request: CapabilityRequest,
+        context: InvocationContext,
     ) -> CapabilityResult:
         del context
         if request.capability != "monitor.alert.active":
@@ -95,7 +96,11 @@ class PersonalMonitoringProvider:
             current = raw.get("labels", {})
             if not isinstance(current, dict):
                 continue
-            if all(str(current.get(k, "")) == str(v) for k, v in expected.items() if v):
+            if all(
+                str(current.get(key, "")) == str(value)
+                for key, value in expected.items()
+                if value
+            ):
                 state = str(raw.get("state", "firing"))
                 if state in {"firing", "pending"}:
                     matches += 1
