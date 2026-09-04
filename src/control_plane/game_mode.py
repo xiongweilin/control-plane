@@ -88,12 +88,15 @@ def read_game_mode_state(
     """
 
     path = Path(state_path)
-    inactive = lambda reason, status="": GameModeStatus(  # noqa: E731
-        phase="inactive",
-        status=status,
-        reason=reason,
-        state_path=path,
-    )
+
+    def inactive(reason: str, status: str = "") -> GameModeStatus:
+        return GameModeStatus(
+            phase="inactive",
+            status=status,
+            reason=reason,
+            state_path=path,
+        )
+
     try:
         raw = path.read_text(encoding="utf-8-sig")
         payload = json.loads(raw)
