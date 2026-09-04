@@ -33,7 +33,7 @@ class _PreparedBoundary:
     def cleanup(self) -> None:
         if self.worktree is not None and self.repository is not None:
             with contextlib.suppress(OSError, subprocess.SubprocessError):
-                subprocess.run(  # noqa: S603
+                subprocess.run(
                     [
                         _git_executable(),
                         "-C",
@@ -55,19 +55,21 @@ class CodexExecutionBoundary:
     """Windows/profile-specific process isolation injected into Agent Kernel.
 
     Workspace-write remains isolated by default. Exact repositories configured as
-    standing auto-repair projects may be edited in place only while their working
-    tree is clean. Docker and remote Git credentials remain physically denied to
-    Codex; deployment effects still cross Agent Kernel through profile providers.
+    standing auto-repair projects may be edited in place after a clean-tree
+    takeover. That ownership remains in memory across the two bounded repair
+    attempts so the second attempt sees the first attempt's changes. Docker and
+    remote Git credentials remain physically denied to Codex.
     """
 
     def __init__(self, config: ControlPlaneConfig) -> None:
         self.config = config
         self.session_dir = Path(config.agent_session_dir)
+        self._managed_auto_repos: set[Path] = set()
 
     @staticmethod
     def _is_git_repository(repo: Path) -> bool:
         try:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 [_git_executable(), "-C", str(repo), "rev-parse", "--show-toplevel"],
                 capture_output=True,
                 timeout=30,
@@ -80,7 +82,7 @@ class CodexExecutionBoundary:
     @staticmethod
     def _working_tree_clean(repo: Path) -> bool:
         try:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 [_git_executable(), "-C", str(repo), "status", "--porcelain"],
                 capture_output=True,
                 timeout=30,
@@ -94,7 +96,7 @@ class CodexExecutionBoundary:
         root = self.config.codex_worktree_root
         root.mkdir(parents=True, exist_ok=True)
         worktree = root / f"candidate-{uuid.uuid4().hex}"
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             [
                 _git_executable(),
                 "-C",
@@ -204,7 +206,14 @@ class CodexExecutionBoundary:
                 if not self._is_git_repository(source):
                     raise RuntimeError("workspace-write requires a confirmed Git repository")
                 auto_project = self.config.auto_project_for_repo(source)
-                if auto_project is None or not self._working_tree_clean(source):
+                if auto_project is not None:
+                    if source not in self._managed_auto_repos:
+                        if not self._working_tree_clean(source):
+                            raise RuntimeError(
+                                "standing auto-repair repository is not clean; human review required"
+                            )
+                        self._managed_auto_repos.add(source)
+                else:
                     pair = self._candidate_worktree(source)
             if pair is None:
                 return _PreparedBoundary(
