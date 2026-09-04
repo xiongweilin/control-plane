@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from portable_runtime.controller import (
     CognitiveController,
@@ -10,22 +11,134 @@ from portable_runtime.controller import (
     ControllerStatus,
 )
 
+_RESULT_EVENT = "ControllerCapabilityResultObserved"
+
+
+def _result_by_decision(controller: CognitiveController, controller_id: str) -> dict[str, dict[str, Any]]:
+    values: dict[str, dict[str, Any]] = {}
+    for event in controller.store.list_events(controller_id):
+        if event.type != _RESULT_EVENT:
+            continue
+        decision_ref = event.payload.get("decision_ref")
+        raw = event.payload.get("result")
+        if isinstance(decision_ref, str) and isinstance(raw, dict):
+            values[decision_ref] = dict(raw)
+    return values
+
+
+def _message(result: dict[str, Any] | None) -> str:
+    if not result:
+        return ""
+    return str(result.get("message", ""))[-12_000:]
+
+
+def _succeeded(result: dict[str, Any] | None) -> bool:
+    return bool(result) and str(result.get("status", "")) == "succeeded"
+
 
 @dataclass(frozen=True, slots=True)
-class UnattendedAlertPolicy:
-    """Diagnose one unattended alert through Agent Kernel, then close.
+class AutonomousRepairPolicy:
+    """Two attempts: strong diagnosis, cheap execution, kernel verification.
 
-    The profile chooses only the next controller action. Capability execution,
-    Work semantics, authorization, provider dispatch, persistence and effects
-    remain owned by Agent Kernel.
+    The policy only selects controller actions. Codex invocation, provider
+    dispatch, persistence, effect admission and real operations remain inside
+    Agent Kernel. After the second unresolved verification it waits for a human
+    command instead of continuing autonomously.
     """
 
+    controller: CognitiveController = field(repr=False, compare=False)
     prompt: str
+    diagnosis_model: str
+    execution_model: str
     repo: str | None = None
+    project: str | None = None
+    verification_labels: dict[str, str] = field(default_factory=dict)
+    human_instruction: str | None = None
+    max_attempts: int = 2
 
     @property
     def policy_ref(self) -> str:
-        return "control-plane/unattended-alert-diagnosis-v1"
+        return "control-plane/autonomous-repair-v1"
+
+    def _diagnosis_count(self, state: ControllerState) -> int:
+        return sum(
+            1
+            for decision in self.controller.decisions(state.id)
+            if decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+            and decision.capability == "reason.generate"
+            and decision.parameters.get("model") == self.diagnosis_model
+            and decision.parameters.get("phase") == "diagnosis"
+        )
+
+    def _diagnosis(self, state: ControllerState, *, retry_context: str = "") -> ControllerDecision:
+        attempt = self._diagnosis_count(state) + 1
+        instruction = (
+            f"Diagnose this incident for autonomous repair attempt {attempt}/{self.max_attempts}.\n"
+            "Identify the most likely root cause and give a concrete, bounded execution instruction. "
+            "Do not claim recovery or completion. Prefer the smallest repair that can be tested.\n\n"
+            f"Incident:\n{self.prompt}"
+        )
+        if self.human_instruction:
+            instruction += f"\n\nHuman instruction (authoritative task direction, not truth):\n{self.human_instruction}"
+        if retry_context:
+            instruction += f"\n\nPrevious attempt evidence:\n{retry_context}"
+        parameters: dict[str, Any] = {
+            "model": self.diagnosis_model,
+            "phase": "diagnosis",
+        }
+        if self.repo:
+            parameters["repo"] = self.repo
+        return ControllerDecision(
+            controller_ref=state.id,
+            state_version=state.version,
+            kind=ControllerDecisionKind.INVOKE_CAPABILITY,
+            capability="reason.generate",
+            instruction=instruction,
+            parameters=parameters,
+            reason="use the strong model to diagnose the current repair attempt",
+        )
+
+    def _execute(
+        self,
+        state: ControllerState,
+        diagnosis: str,
+    ) -> ControllerDecision:
+        instruction = (
+            "Execute the diagnosed repair now. Use the current repository only. "
+            "Make the smallest necessary local changes and run relevant checks/tests. "
+            "Do not push, merge, access remote credentials, or run Docker directly; those effects "
+            "belong to Agent Kernel providers. Finish with a concise execution summary.\n\n"
+            f"Diagnosis and plan:\n{diagnosis}"
+        )
+        parameters: dict[str, Any] = {
+            "model": self.execution_model,
+            "phase": "execution",
+        }
+        if self.repo:
+            parameters["repo"] = self.repo
+            capability = "shell.exec"
+        else:
+            capability = "reason.generate"
+        return ControllerDecision(
+            controller_ref=state.id,
+            state_version=state.version,
+            kind=ControllerDecisionKind.INVOKE_CAPABILITY,
+            capability=capability,
+            instruction=instruction,
+            parameters=parameters,
+            reason="use the cheap model for bounded execution after diagnosis",
+        )
+
+    def _verify(self, state: ControllerState) -> ControllerDecision:
+        return ControllerDecision(
+            controller_ref=state.id,
+            state_version=state.version,
+            kind=ControllerDecisionKind.INVOKE_CAPABILITY,
+            capability="monitor.alert.active",
+            instruction="Verify whether the triggering Prometheus alert is still active.",
+            parameters={"labels": dict(self.verification_labels), "phase": "verification"},
+            reason="verify the real monitored condition through the kernel provider boundary",
+        )
 
     async def select(self, state: ControllerState) -> ControllerDecision:
         if state.status in {ControllerStatus.WAITING, ControllerStatus.REOPEN_REQUIRED}:
@@ -33,42 +146,206 @@ class UnattendedAlertPolicy:
                 controller_ref=state.id,
                 state_version=state.version,
                 kind=ControllerDecisionKind.REOPEN,
-                reason="resume the unattended read-only alert diagnosis loop",
+                reason="explicitly reopen a paused autonomous repair controller",
             )
         if state.status is ControllerStatus.CLOSED:
-            raise ValueError("closed unattended alert diagnosis must not be restarted implicitly")
-        if state.last_result_ref is None:
+            raise ValueError("closed repair controller must not restart implicitly")
+
+        invocations = [
+            decision
+            for decision in self.controller.decisions(state.id)
+            if decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+        ]
+        if not invocations:
+            return self._diagnosis(state)
+
+        results = _result_by_decision(self.controller, state.id)
+        last = invocations[-1]
+        last_result = results.get(last.id)
+        attempts = self._diagnosis_count(state)
+
+        if last_result is None:
+            return ControllerDecision(
+                controller_ref=state.id,
+                state_version=state.version,
+                kind=ControllerDecisionKind.WAIT,
+                reason="the previous capability has no durable observed result",
+            )
+
+        if last.capability == "reason.generate" and last.parameters.get("phase") == "diagnosis":
+            if not _succeeded(last_result):
+                if attempts < self.max_attempts:
+                    return self._diagnosis(state, retry_context=_message(last_result))
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.WAIT,
+                    reason="two strong-model diagnosis attempts failed",
+                )
+            return self._execute(state, _message(last_result))
+
+        if last.parameters.get("phase") == "execution":
+            if not _succeeded(last_result):
+                if attempts < self.max_attempts:
+                    return self._diagnosis(state, retry_context=_message(last_result))
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.WAIT,
+                    reason="the second cheap-model execution attempt failed",
+                )
+            if self.project:
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.INVOKE_CAPABILITY,
+                    capability="docker.compose.up",
+                    instruction="Apply the already prepared local repair for the configured project.",
+                    parameters={"project": self.project, "phase": "apply"},
+                    reason="apply the allowlisted personal project through the kernel effect boundary",
+                )
+            return self._verify(state)
+
+        if last.capability == "docker.compose.up":
+            if not _succeeded(last_result):
+                if attempts < self.max_attempts:
+                    return self._diagnosis(state, retry_context=_message(last_result))
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.WAIT,
+                    reason="the second kernel-managed project apply failed",
+                )
+            return self._verify(state)
+
+        if last.capability == "monitor.alert.active":
+            metadata = last_result.get("metadata", {}) if isinstance(last_result, dict) else {}
+            active = metadata.get("active") if isinstance(metadata, dict) else None
+            if _succeeded(last_result) and active is False:
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.CLOSE,
+                    reason="the triggering alert is no longer active after repair",
+                )
+            if attempts < self.max_attempts:
+                return self._diagnosis(state, retry_context=_message(last_result))
+            return ControllerDecision(
+                controller_ref=state.id,
+                state_version=state.version,
+                kind=ControllerDecisionKind.WAIT,
+                reason="the incident remains unresolved after two autonomous repair attempts",
+            )
+
+        return ControllerDecision(
+            controller_ref=state.id,
+            state_version=state.version,
+            kind=ControllerDecisionKind.WAIT,
+            reason=f"unexpected autonomous repair stage after {last.capability}",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ManualTaskPolicy:
+    """Strong-model interpretation followed by one cheap-model execution step."""
+
+    controller: CognitiveController = field(repr=False, compare=False)
+    prompt: str
+    diagnosis_model: str
+    execution_model: str
+    repo: str | None = None
+
+    @property
+    def policy_ref(self) -> str:
+        return "control-plane/manual-task-v1"
+
+    async def select(self, state: ControllerState) -> ControllerDecision:
+        if state.status in {ControllerStatus.WAITING, ControllerStatus.REOPEN_REQUIRED}:
+            return ControllerDecision(
+                controller_ref=state.id,
+                state_version=state.version,
+                kind=ControllerDecisionKind.REOPEN,
+                reason="explicitly resume the manual personal task",
+            )
+        if state.status is ControllerStatus.CLOSED:
+            raise ValueError("closed manual task must not restart implicitly")
+        invocations = [
+            decision
+            for decision in self.controller.decisions(state.id)
+            if decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+        ]
+        results = _result_by_decision(self.controller, state.id)
+        if not invocations:
+            params: dict[str, Any] = {"model": self.diagnosis_model, "phase": "diagnosis"}
+            if self.repo:
+                params["repo"] = self.repo
             return ControllerDecision(
                 controller_ref=state.id,
                 state_version=state.version,
                 kind=ControllerDecisionKind.INVOKE_CAPABILITY,
                 capability="reason.generate",
-                instruction=self.prompt,
-                parameters={"repo": self.repo} if self.repo else {},
-                reason="diagnose one current unattended alert through the kernel capability boundary",
+                instruction=(
+                    "Interpret this explicit personal command, identify the concrete work required, "
+                    "and give a bounded execution instruction.\n\n" + self.prompt
+                ),
+                parameters=params,
+                reason="use the strong model to interpret an explicit personal task",
+            )
+        last = invocations[-1]
+        result = results.get(last.id)
+        if last.parameters.get("phase") == "diagnosis":
+            if not _succeeded(result):
+                return ControllerDecision(
+                    controller_ref=state.id,
+                    state_version=state.version,
+                    kind=ControllerDecisionKind.WAIT,
+                    reason="manual task diagnosis failed and requires user attention",
+                )
+            params = {"model": self.execution_model, "phase": "execution"}
+            if self.repo:
+                params["repo"] = self.repo
+                capability = "shell.exec"
+            else:
+                capability = "reason.generate"
+            return ControllerDecision(
+                controller_ref=state.id,
+                state_version=state.version,
+                kind=ControllerDecisionKind.INVOKE_CAPABILITY,
+                capability=capability,
+                instruction=(
+                    "Execute this explicit personal task now within the available boundary. "
+                    "Do not claim effects you cannot verify.\n\n"
+                    + _message(result)
+                ),
+                parameters=params,
+                reason="use the cheap model for execution after strong-model interpretation",
             )
         return ControllerDecision(
             controller_ref=state.id,
             state_version=state.version,
             kind=ControllerDecisionKind.CLOSE,
-            reason="one read-only diagnosis result has been observed; stop before any repair effect",
+            reason="the explicit personal task received its execution result",
         )
 
 
-async def drive_alert_diagnosis(
+async def drive_policy(
     controller: CognitiveController,
     controller_id: str,
-    policy: UnattendedAlertPolicy,
+    policy: AutonomousRepairPolicy | ManualTaskPolicy,
     *,
-    max_steps: int = 4,
+    max_steps: int = 16,
 ) -> ControllerState:
-    """Run the small policy loop to explicit cognitive closure."""
+    """Drive one profile policy until explicit close or human wait."""
 
     state = controller.get(controller_id)
     if state is None:
         raise ValueError(f"unknown controller state: {controller_id}")
     for _ in range(max_steps):
-        if state.status is ControllerStatus.CLOSED:
+        if state.status in {ControllerStatus.CLOSED, ControllerStatus.WAITING}:
             return state
         state = await controller.step(controller_id, policy)
-    raise RuntimeError("unattended alert diagnosis did not reach closure within the bounded policy loop")
+    raise RuntimeError("personal controller policy exceeded its bounded step budget")
+
+
+# Compatibility import for callers/tests from the first unattended-only profile.
+UnattendedAlertPolicy = AutonomousRepairPolicy
