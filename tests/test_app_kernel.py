@@ -29,6 +29,7 @@ def test_app_is_thin_agent_kernel_profile(tmp_path: Path) -> None:
     assert "feishu-human" in provider_ids
     assert "personal-operations" in provider_ids
     assert app.state.controller.runtime is runtime
+    assert callable(app.state.controller.step)
 
 
 def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
@@ -37,3 +38,10 @@ def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
     assert registry.effect_rule("git.push").authorization_required is True
     assert registry.effect_rule("docker.restart").authorization_required is True
     assert registry.effect_rule("notify.send").authorization_required is False
+
+
+def test_interactive_task_surface_is_absent(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    paths = {route.path for route in app.routes}
+    assert "/v1/tasks" not in paths
+    assert "/v1/alerts/alertmanager" in paths
