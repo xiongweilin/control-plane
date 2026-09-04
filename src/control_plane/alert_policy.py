@@ -36,7 +36,9 @@ def _message(result: dict[str, Any] | None) -> str:
 
 
 def _succeeded(result: dict[str, Any] | None) -> bool:
-    return bool(result) and str(result.get("status", "")) == "succeeded"
+    if result is None:
+        return False
+    return str(result.get("status", "")) == "succeeded"
 
 
 @dataclass(frozen=True, slots=True)
