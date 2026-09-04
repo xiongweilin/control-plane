@@ -43,7 +43,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
 def is_cs2_running() -> bool:
     """Return whether Windows currently reports a ``cs2.exe`` process.
 
-    The control plane has no psutil dependency.  ``tasklist`` is a fixed,
+    The control plane has no psutil dependency. ``tasklist`` is a fixed,
     read-only Windows query; a missing executable, timeout, or malformed output
     fails open (``False``), so a stale game-mode state cannot silence alerts.
     """
@@ -52,7 +52,7 @@ def is_cs2_running() -> bool:
     if not tasklist:
         return False
     try:
-        result = subprocess.run(  # noqa: S603 - executable resolved from PATH; fixed read-only args
+        result = subprocess.run(
             [tasklist, "/FI", "IMAGENAME eq cs2.exe", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
@@ -81,19 +81,22 @@ def read_game_mode_state(
 ) -> GameModeStatus:
     """Read the launcher state and return an alert-suppression phase.
 
-    The state file is an advisory signal only.  ``Active`` requires a fresh
-    timestamp *and* a live ``cs2.exe`` process.  ``Restored`` is suppressible
-    only during a short, bounded post-restore grace period.  Any malformed,
+    The state file is an advisory signal only. ``Active`` requires a fresh
+    timestamp *and* a live ``cs2.exe`` process. ``Restored`` is suppressible
+    only during a short, bounded post-restore grace period. Any malformed,
     missing, stale, future-dated, or failed-restore state returns ``inactive``.
     """
 
     path = Path(state_path)
-    inactive = lambda reason, status="": GameModeStatus(  # noqa: E731
-        phase="inactive",
-        status=status,
-        reason=reason,
-        state_path=path,
-    )
+
+    def inactive(reason: str, status: str = "") -> GameModeStatus:
+        return GameModeStatus(
+            phase="inactive",
+            status=status,
+            reason=reason,
+            state_path=path,
+        )
+
     try:
         raw = path.read_text(encoding="utf-8-sig")
         payload = json.loads(raw)
