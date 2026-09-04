@@ -156,7 +156,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     async def live() -> dict[str, str]:
         return {"status": "ok", "runtime_id": runtime.runtime_id}
 
-    @app.get("/ready", include_in_schema=False)
+    @app.get("/ready", include_in_schema=False, response_model=None)
     async def ready() -> Response | dict[str, Any]:
         checks: dict[str, Any] = {}
         timeout = 5.0
