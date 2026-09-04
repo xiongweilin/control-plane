@@ -1,49 +1,27 @@
-# Windows Personal Platform profile
+# Windows personal deployment
 
-This directory preserves the legacy Windows deployment: Task Scheduler, PowerShell supervisor, VBS wrapper, watchdog, Prometheus/Alertmanager, Docker, Feishu.
+This directory is the personal Windows deployment shell around `agent-kernel`.
+It owns Task Scheduler, hidden launch, watchdog/liveness probing, local firewall
+setup and log protection. It does not own runtime, cognitive-control,
+responsibility, record, authority, recovery or verification semantics.
 
-In the portable refactoring, this profile becomes `profiles/personal-platform` equivalent (§56-§57):
+The Python application is `control_plane`; its generic kernel is installed from
+`xiongweilin/agent-kernel` as the `portable-runtime` distribution.
 
-- AlertmanagerTrigger -> Work(kind="incident") -> IncidentRepairWorkflow
-- CodexProvider (codex exec --model from [[providers]] / [agent] model)
-- Prometheus / Docker verifiers (verify.promql / verify.container / verify.http)
-- FeishuTrigger + FeishuHumanProvider + FeishuNotificationProvider
-- SQLiteStateStore + FilesystemArtifactStore
-- Legacy policies: SensitivePathPolicy, ExternalSideEffectPolicy, CandidateMergePolicy
-
-## Files in this profile
-
-- `install-control-plane.ps1` — registers the Windows Scheduled Task (Task Scheduler) that launches the supervisor on logon/boot
-- `Run-ControlPlane.ps1` — PowerShell supervisor: single-instance guard, PID file, restart recovery, model-gateway preflight, failure-driven recovery loop every `model_recovery_retry_seconds`
-- `Run-ControlPlaneHidden.vbs` — VBS wrapper to run the supervisor hidden (no console window)
-- `Watch-ControlPlane.ps1` / `Watch-ControlPlaneHidden.vbs` — watchdog that restarts the platform if the HTTP probe fails
-
-These files were moved from `scripts/` into this profile per §56. The originals are retained in `scripts/` for backwards compatibility during the cut-over; the canonical location is this directory.
-
-## Portable counterpart
-
-For a cross-platform deployment that needs no Windows, Codex, Feishu, Docker or Prometheus, see `deployments/portable-local/`:
+Install dependencies first:
 
 ```powershell
-uv sync
-uv run python -m portable_runtime --state data/portable-runtime.db status
+uv sync --extra dev
 ```
 
-Or via Docker (Core does not depend on Docker, Dockerfile at repo root only wraps the same entrypoint):
+Then run `install-control-plane.ps1` from an elevated PowerShell 7 session.
+`CONTROL_PLANE_API_KEY` must exist in the user environment.
 
-```powershell
-docker build -t portable-runtime:local .
-docker run --rm portable-runtime:local python -m portable_runtime --state /data/portable-runtime.db status
-```
+Canonical files:
 
-## Trigger replacement (§14)
+- `install-control-plane.ps1` — Scheduled Task and firewall setup.
+- `Run-ControlPlane.ps1` / `Run-ControlPlaneHidden.vbs` — process supervisor.
+- `Watch-ControlPlane.ps1` / `Watch-ControlPlaneHidden.vbs` — liveness watchdog.
 
-Windows Task Scheduler is replaced inside the Runtime by:
-
-- `src/portable_runtime/triggers/schedule/trigger.py` — `ScheduleTrigger` (asyncio `asyncio.sleep` loop, `interval_seconds`, `start(emit)` / `stop()` / `emit_once()`)
-- External cron can also trigger via `POST /v1/triggers/schedule/emit` or `POST /v1/triggers/webhook`
-
-Core never imports Task Scheduler, PowerShell, VBS or Docker; those remain only in this deployment profile.
-
-See `docs/deployment-windows-personal-platform.md`, `docs/architecture.md` and `docs/state-migration.md` for migration across Windows -> Linux.
-
+There is intentionally no portable-runtime copy, portable-local deployment, or
+migration shim in this repository.

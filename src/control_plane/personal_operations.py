@@ -1,16 +1,9 @@
-"""Typed personal Git/Docker operations for the private profile.
-
-These operations are deliberately separate from the Codex provider. Codex may
-recommend a merge, push, or runtime restart, but only this provider can perform
-the corresponding side effect after the portable Runtime has evaluated a
-scoped request and AuthorizationGrant.
-"""
-
 from __future__ import annotations
 
-import contextlib
-from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+import asyncio
+import shutil
+from pathlib import Path
+from typing import Any
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
@@ -21,62 +14,22 @@ from portable_runtime.core.capabilities import (
 )
 
 from .config import ControlPlaneConfig
-from .gitpush import push_with_ssh_fallback
-from .reconciliation import (
-    BaselineSnapshot,
-    DockerObservationCoordinates,
-    DockerOperation,
-    DockerPostcondition,
-    GitMergeObservationCoordinates,
-    GitMergeOperation,
-    GitMergePostcondition,
-    GitMergeReality,
-    GitPushObservationCoordinates,
-    GitPushOperation,
-    GitPushPostcondition,
-    ReconciliationDescriptor,
-    ReconciliationDescriptorStore,
-    ReconciliationObservation,
-    ReconciliationVerdict,
-    classify_docker_state,
-    classify_git_merge_ancestry,
-    classify_git_push_remote_ref,
-)
-from .tools import CommandExecutor, ToolError
-
-
-@dataclass(slots=True)
-class _OperationJournalEntry:
-    """Process-local recovery journal for provider invocations.
-
-    The portable runtime persists the request/attempt identity.  This small
-    provider journal keeps the operation-specific parameters needed to query
-    reality again.  It is intentionally non-authoritative: reconciliation
-    always reads Git/Docker state rather than trusting this record.
-    """
-
-    request: CapabilityRequest
-    state: str = "running"
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class PersonalOperationsProvider:
-    """Execute only explicitly named Git and Docker profile operations."""
+    """Profile-only Git/Docker effect provider.
 
-    def __init__(
-        self,
-        config: ControlPlaneConfig,
-        executor: CommandExecutor,
-        reconciliation_store: ReconciliationDescriptorStore | None = None,
-    ) -> None:
+    Agent Kernel owns admission, authority, dispatch, recovery and verification.
+    This provider only translates an already-admitted capability invocation into
+    the personal Windows/Git/Docker command boundary.
+    """
+
+    def __init__(self, config: ControlPlaneConfig) -> None:
         self.config = config
-        self.executor = executor
-        self.reconciliation_store = reconciliation_store
-        self._journal: dict[str, _OperationJournalEntry] = {}
         self._descriptor = ProviderDescriptor(
             id="personal-operations",
             name="Personal Git/Docker Operations",
-            version="1.0.0",
+            version="2.0.0",
             capabilities=["git.merge", "git.push", "git.rollback", "docker.restart", "docker.compose.up"],
             priority=20,
             tags={"personal-profile", "side-effect"},
@@ -86,7 +39,7 @@ class PersonalOperationsProvider:
             provider_family="personal-operations",
             execution_domain="windows-local",
             network_domain="github-docker",
-            trust_boundary="control-plane-authorized",
+            trust_boundary="agent-kernel-authorized",
         )
 
     @property
@@ -94,665 +47,108 @@ class PersonalOperationsProvider:
         return self._descriptor
 
     async def health(self) -> ProviderHealth:
-        return ProviderHealth(provider_id=self.descriptor.id, available=True, detail="personal operations ready")
+        git_ok = shutil.which("git.exe") is not None or shutil.which("git") is not None
+        docker_ok = shutil.which("docker.exe") is not None or shutil.which("docker") is not None
+        return ProviderHealth(
+            provider_id=self.descriptor.id,
+            available=git_ok or docker_ok,
+            detail=f"git={git_ok} docker={docker_ok}",
+        )
 
     async def invoke(self, request: CapabilityRequest, context: InvocationContext) -> CapabilityResult:
-        self._journal[request.id] = _OperationJournalEntry(request=request.model_copy(deep=True))
+        del context
         try:
-            await self._prepare_reconciliation_descriptor(request)
-            if request.capability == "git.merge":
-                output = await self._git_merge(request)
-            elif request.capability == "git.push":
-                output = await self._git_push(request)
-            elif request.capability == "git.rollback":
-                output = await self._git_rollback(request)
-            elif request.capability in {"docker.restart", "docker.compose.up"}:
-                output = await self._docker(request)
+            if request.capability.startswith("git."):
+                message = await self._git(request)
+            elif request.capability.startswith("docker."):
+                message = await self._docker(request)
             else:
-                return CapabilityResult(
-                    request_id=request.id,
-                    provider_id=self.descriptor.id,
-                    status="unavailable",
-                    message=f"unsupported personal operation {request.capability}",
-                    error={"code": "UnsupportedCapability"},
-                )
-            descriptor_result = await self._reconcile_descriptor(request.id)
-            if descriptor_result is not None and descriptor_result.status != "succeeded":
-                return descriptor_result
-            # A restart command plus a healthy postcondition does not prove
-            # that this particular restart event occurred.  Keep this
-            # capability non-terminal even when no durable reconciliation
-            # store is configured (for example, in an isolated provider
-            # harness).  Callers must not promote desired-state evidence to
-            # event attribution.
-            if request.capability == "docker.restart" and self.reconciliation_store is None:
-                entry = self._journal[request.id]
-                entry.state = "unknown"
-                entry.metadata.update(
-                    {
-                        "event_attribution": "unknown",
-                        "event_verified": False,
-                        "event_verification_basis": "not-observable",
-                    }
-                )
-                return CapabilityResult(
-                    request_id=request.id,
-                    provider_id=self.descriptor.id,
-                    status="unknown",
-                    message="Docker desired state confirmed; restart event attribution remains unknown",
-                    metadata={
-                        "operation": request.capability,
-                        "resource_ref": request.resource_ref or "",
-                        **entry.metadata,
-                    },
-                    reconciled=False,
-                )
-        except ToolError as exc:
-            entry = self._journal[request.id]
-            ambiguous = self._is_ambiguous_error(exc)
-            entry.state = "unknown" if ambiguous else "failed"
-            entry.metadata.setdefault("error", str(exc))
-            return CapabilityResult(
-                request_id=request.id,
-                provider_id=self.descriptor.id,
-                status="unknown" if ambiguous else "failed",
-                message=str(exc),
-                error={
-                    "code": "PersonalOperationUncertain" if ambiguous else "PersonalOperationFailed",
-                    "reason": str(exc),
-                },
-                metadata={
-                    "operation": request.capability,
-                    "resource_ref": request.resource_ref or "",
-                    **entry.metadata,
-                },
-            )
-        entry = self._journal[request.id]
-        entry.state = "succeeded"
-        return CapabilityResult(
-            request_id=request.id,
-            provider_id=self.descriptor.id,
-            status="succeeded",
-            message=output,
-            metadata={
-                "operation": request.capability,
-                "resource_ref": request.resource_ref or "",
-                **entry.metadata,
-            },
-        )
-
-    async def _prepare_reconciliation_descriptor(self, request: CapabilityRequest) -> None:
-        """Persist operation coordinates before a host or remote side effect."""
-
-        store = self.reconciliation_store
-        if store is None or request.capability == "git.rollback":
-            return
-        descriptor: ReconciliationDescriptor | None = None
-        if request.capability == "git.merge":
-            repo = self._required(request, "repo")
-            candidate_ref = self._required(request, "branch")
-            target_ref = str(request.parameters.get("target", "main"))
-            baseline_merge = (
-                await self.executor.run(["git", "-C", repo, "rev-parse", target_ref], timeout=60)
-            ).strip()
-            candidate = (await self.executor.run(["git", "-C", repo, "rev-parse", candidate_ref], timeout=60)).strip()
-            merge_operation = GitMergeOperation(
-                repo=repo,
-                target_ref=target_ref,
-                candidate_ref=candidate_ref,
-                candidate_commit=candidate,
-                target_baseline_commit=baseline_merge,
-            )
-            descriptor = ReconciliationDescriptor.from_request(
-                descriptor_id=f"recon_{request.id}",
-                request=request,
-                provider_id=self.descriptor.id,
-                provider_version=self.descriptor.version,
-                operation=merge_operation,
-                pre_effect_baseline=BaselineSnapshot(values={"target_tip": baseline_merge, "merge_head": None}),
-                expected_postcondition=GitMergePostcondition(
-                    target_ref=target_ref,
-                    candidate_commit=candidate,
-                    target_baseline_commit=baseline_merge,
-                ),
-                observation_coordinates=GitMergeObservationCoordinates(
-                    repo=repo,
-                    target_ref=target_ref,
-                    candidate_ref=candidate_ref,
-                    merge_head_path=f"{repo}\\.git\\MERGE_HEAD",
-                ),
-            )
-        elif request.capability == "git.push":
-            repo = self._required(request, "repo")
-            remote = str(request.parameters.get("remote", "origin"))
-            branch = str(request.parameters.get("branch", "main"))
-            expected = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
-            baseline_remote = await self._remote_ref(repo, remote, branch)
-            push_operation = GitPushOperation(repo=repo, remote=remote, branch=branch, expected_commit=expected)
-            descriptor = ReconciliationDescriptor.from_request(
-                descriptor_id=f"recon_{request.id}",
-                request=request,
-                provider_id=self.descriptor.id,
-                provider_version=self.descriptor.version,
-                operation=push_operation,
-                pre_effect_baseline=BaselineSnapshot(values={"remote_commit": baseline_remote}),
-                expected_postcondition=GitPushPostcondition(
-                    remote=remote, branch=branch, expected_commit=expected
-                ),
-                observation_coordinates=GitPushObservationCoordinates(
-                    repo=repo,
-                    remote=remote,
-                    branch=branch,
-                    remote_ref=f"refs/heads/{branch}",
-                ),
-            )
-        elif request.capability in {"docker.restart", "docker.compose.up"}:
-            project = str(request.parameters.get("project", ""))
-            if project not in self.config.allowed_auto_projects:
-                raise ToolError(f"docker project is not allowlisted: {project}")
-            project_dir = self.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
-            baseline = await self._docker_status(project)
-            docker_operation = DockerOperation(
-                kind=cast(Literal["docker.restart", "docker.compose.up"], request.capability),
-                project=project,
-                project_dir=str(project_dir),
-                desired_state="healthy",
-            )
-            descriptor = ReconciliationDescriptor.from_request(
-                descriptor_id=f"recon_{request.id}",
-                request=request,
-                provider_id=self.descriptor.id,
-                provider_version=self.descriptor.version,
-                operation=docker_operation,
-                pre_effect_baseline=BaselineSnapshot(values={"containers": baseline}),
-                expected_postcondition=DockerPostcondition(project=project, desired_state="healthy"),
-                observation_coordinates=DockerObservationCoordinates(
-                    project=project,
-                    project_dir=str(project_dir),
-                    compose_project_label=project,
-                ),
-            )
-        else:
-            return
-        if descriptor is None:
-            return
-        store.save(descriptor)
-        self._journal[request.id].metadata["reconciliation_descriptor_id"] = descriptor.id
-
-    async def _reconcile_descriptor(self, request_id: str) -> CapabilityResult | None:
-        """Re-observe reality from the durable descriptor, including after restart."""
-
-        store = self.reconciliation_store
-        if store is None:
-            return None
-        descriptor = store.get_by_request(request_id)
-        if descriptor is None:
-            return None
-        details: dict[str, Any] = {}
-        if isinstance(descriptor.operation, GitMergeOperation):
-            operation = descriptor.operation
-            status = await self._git_status(operation.repo)
-            merge_head = self._merge_in_progress(status)
-            target_tip: str | None
-            try:
-                target_tip = (
-                    await self.executor.run(
-                        ["git", "-C", operation.repo, "rev-parse", operation.target_ref], timeout=60
-                    )
-                ).strip()
-            except ToolError:
-                target_tip = None
-            candidate_is_ancestor: bool | None = None
-            if target_tip:
-                try:
-                    await self.executor.run(
-                        [
-                            "git",
-                            "-C",
-                            operation.repo,
-                            "merge-base",
-                            "--is-ancestor",
-                            operation.candidate_commit,
-                            operation.target_ref,
-                        ],
-                        timeout=60,
-                    )
-                    candidate_is_ancestor = True
-                except ToolError:
-                    candidate_is_ancestor = False
-            verdict = classify_git_merge_ancestry(
-                GitMergeReality(
-                    target_tip=target_tip,
-                    target_baseline_commit=operation.target_baseline_commit,
-                    candidate_commit=operation.candidate_commit,
-                    candidate_is_ancestor=candidate_is_ancestor,
-                    merge_head="MERGE_HEAD" if merge_head else None,
-                    conflicts=merge_head,
-                )
-            )
-            details.update(
-                {
-                    "target_tip": target_tip or "",
-                    "candidate_is_ancestor": candidate_is_ancestor,
-                    "merge_status": status,
-                }
-            )
-        elif isinstance(descriptor.operation, GitPushOperation):
-            push_operation = descriptor.operation
-            observed = await self._remote_ref(push_operation.repo, push_operation.remote, push_operation.branch)
-            verdict = classify_git_push_remote_ref(
-                expected_commit=push_operation.expected_commit,
-                observed_commit=observed,
-            )
-            details.update({"expected_commit": push_operation.expected_commit, "remote_commit": observed or ""})
-        elif isinstance(descriptor.operation, DockerOperation):
-            docker_operation = descriptor.operation
-            status = await self._docker_status(docker_operation.project)
-            healthy = self._containers_healthy(status)
-            desired_state_verdict = classify_docker_state(
-                healthy=healthy, desired_state=docker_operation.desired_state
-            )
-            # ``classify_docker_state`` intentionally answers only whether
-            # the desired state is true.  A restart additionally requires
-            # attribution to this request; container health alone cannot
-            # distinguish our restart from a pre-existing/recovered state.
-            # Until a restart identity (generation/start-time/restart-count)
-            # is observed, keep the reconciliation UNKNOWN and therefore
-            # non-terminal.
-            verdict = (
-                ReconciliationVerdict.UNKNOWN
-                if docker_operation.kind == "docker.restart"
-                else desired_state_verdict
-            )
-            details.update(
-                {
-                    "project": docker_operation.project,
-                    "container_status": status,
-                    "desired_state": docker_operation.desired_state,
-                    "desired_state_verified": healthy,
-                    "event_attribution": "unknown"
-                    if docker_operation.kind == "docker.restart"
-                    else "not-applicable",
-                    "event_verified": False,
-                    "event_verification_basis": "not-observable"
-                    if docker_operation.kind == "docker.restart"
-                    else "desired-state-operation",
-                }
-            )
-        else:
-            return None
-
-        observation = ReconciliationObservation(
-            verdict=verdict,
-            message=f"{descriptor.capability} reconciliation: {verdict.value}",
-            details=details,
-        )
-        store.record_observation(descriptor.id, observation)
-        entry = self._journal.get(request_id)
-        if entry is not None:
-            entry.state = (
-                "succeeded"
-                if verdict is ReconciliationVerdict.APPLIED
-                else "failed"
-                if verdict in {ReconciliationVerdict.NOT_APPLIED, ReconciliationVerdict.MISMATCH}
-                else "unknown"
-            )
-            entry.metadata.update({"reconciliation_verdict": verdict.value, **details})
-        result_status = (
-            "succeeded"
-            if verdict is ReconciliationVerdict.APPLIED
-            else "failed"
-            if verdict in {ReconciliationVerdict.NOT_APPLIED, ReconciliationVerdict.MISMATCH}
-            else "unknown"
-        )
-        return CapabilityResult(
-            request_id=request_id,
-            provider_id=self.descriptor.id,
-            status=result_status,  # type: ignore[arg-type]
-            message=observation.message,
-            metadata={"operation": descriptor.capability, "reconciliation_descriptor_id": descriptor.id, **details},
-            reconciled=True,
-        )
-
-    async def _git_merge(self, request: CapabilityRequest) -> str:
-        repo = self._required(request, "repo")
-        branch = self._required(request, "branch")
-        target = str(request.parameters.get("target", "main"))
-        await self.executor.run(["git", "-C", repo, "checkout", "-q", target], timeout=120)
-        try:
-            output = await self.executor.run(["git", "-C", repo, "merge", "--ff-only", branch], timeout=120)
-        except ToolError:
-            try:
-                output = await self.executor.run(["git", "-C", repo, "merge", "-q", "--no-edit", branch], timeout=120)
-            except ToolError as exc:
-                # A failed non-FF merge may leave MERGE_HEAD/index state.  An
-                # abort is best-effort, but the post-abort status is always
-                # captured so callers can distinguish a clean failure from an
-                # operation that still needs recovery.
-                abort_error = ""
-                try:
-                    await self.executor.run(["git", "-C", repo, "merge", "--abort"], timeout=120)
-                except ToolError as abort_exc:
-                    abort_error = str(abort_exc)
-                status = await self._git_status(repo)
-                self._journal[request.id].metadata.update(
-                    {
-                        "merge_aborted": not bool(abort_error),
-                        "merge_status": status,
-                        "merge_abort_error": abort_error,
-                    }
-                )
-                raise ToolError(f"git merge failed and was aborted; status={status}") from exc
-        status = await self._git_status(repo)
-        if self._merge_in_progress(status):
-            self._journal[request.id].metadata.update({"merge_status": status, "merge_in_progress": True})
-            raise ToolError(f"git merge returned but merge is still in progress; status={status}")
-        self._journal[request.id].metadata.update({"merge_status": status, "merge_in_progress": False})
-        return output
-
-    async def _git_push(self, request: CapabilityRequest) -> str:
-        repo = self._required(request, "repo")
-        remote = str(request.parameters.get("remote", "origin"))
-        branch = str(request.parameters.get("branch", "main"))
-        expected_commit = await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)
-        expected_commit = expected_commit.strip()
-        self._journal[request.id].metadata["expected_commit"] = expected_commit
-        self._journal[request.id].metadata.update({"remote": remote, "branch": branch, "repo": repo})
-        pushed, detail = await push_with_ssh_fallback(
-            self.executor,
-            repo,
-            remote=remote,
-            branch=branch,
-            timeout=self.config.git_push_timeout_seconds,
-            fallback_enabled=self.config.github_ssh_fallback,
-            fallback_host=self.config.github_ssh_host_port,
-        )
-        if not pushed:
-            raise ToolError(detail)
-        remote_commit = await self._remote_ref(repo, remote, branch)
-        if remote_commit is None:
-            raise ToolError("git push completed but remote ref could not be confirmed")
-        self._journal[request.id].metadata["remote_commit"] = remote_commit
-        if remote_commit != expected_commit:
-            raise ToolError(
-                f"git push remote ref mismatch: expected {expected_commit}, observed {remote_commit}"
-            )
-        return detail
-
-    async def _git_rollback(self, request: CapabilityRequest) -> str:
-        repo = self._required(request, "repo")
-        branch = self._required(request, "branch")
-        self._journal[request.id].metadata.update(
-            {
-                "repo": repo,
-                "branch": branch,
-                "mutation": "candidate-branch-delete",
-                "recovery_required": True,
-            }
-        )
-        # Candidate branch deletion is a persistent, destructive mutation.  It
-        # is not a reversible rollback and this compatibility provider has no
-        # owner-authorized recovery record or pre-delete commit evidence.  Do
-        # not let the legacy fallback turn a typed ``git.rollback`` request
-        # into an unmediated ``git branch -D``.  The dedicated
-        # GitPhysicalBoundary exposes the same fail-closed advisory path; an
-        # owner-authorized recovery workflow may be added later without
-        # widening this provider's authority.
-        raise ToolError(
-            "candidate branch deletion is disabled; use the owner-authorized "
-            "recovery workflow with durable pre-delete evidence"
-        )
-
-    async def _docker(self, request: CapabilityRequest) -> str:
-        project = str(request.parameters.get("project", ""))
-        if project not in self.config.allowed_auto_projects:
-            raise ToolError(f"docker project is not allowlisted: {project}")
-        project_dir = self.config.project_dirs.get(project, f"D:\\infrastructure\\compose\\{project}")
-        # A successful post-command health probe proves the desired state, not
-        # that a particular restart event was observed.  Keep those facts
-        # separate in the operation journal so callers cannot accidentally use
-        # healthy containers as restart attribution evidence.
-        is_restart = request.capability == "docker.restart"
-        self._journal[request.id].metadata.update(
-            {
-                "project": project,
-                "project_dir": project_dir,
-                "desired_state": "running",
-                "desired_state_verified": False,
-                "event_attribution": "unknown" if is_restart else "not-applicable",
-                "event_verified": False,
-                "event_verification_basis": "not-observable" if is_restart else "desired-state-operation",
-            }
-        )
-        command = (
-            ["docker", "compose", "restart"]
-            if is_restart
-            else ["docker", "compose", "up", "-d"]
-        )
-        output = await self.executor.run(command, cwd=project_dir, timeout=180)
-        status = await self._docker_status(project)
-        self._journal[request.id].metadata.update(
-            {"container_status": status, "desired_state_verified": self._containers_healthy(status)}
-        )
-        if not self._containers_healthy(status):
-            raise ToolError(f"docker operation completed but containers are not healthy: {status or '(none)'}")
-        return output or status
-
-    @staticmethod
-    def _required(request: CapabilityRequest, name: str) -> str:
-        value = request.parameters.get(name)
-        if not isinstance(value, str) or not value.strip():
-            raise ToolError(f"missing required operation parameter: {name}")
-        return value
+                return self._result(request, "unavailable", f"unsupported capability {request.capability}")
+        except TimeoutError as exc:
+            return self._result(request, "unknown", str(exc))
+        except (OSError, RuntimeError, ValueError) as exc:
+            return self._result(request, "failed", str(exc))
+        return self._result(request, "succeeded", message)
 
     async def cancel(self, request_id: str) -> None:
-        return None
+        del request_id
 
     async def reconcile(self, request_id: str) -> CapabilityResult | None:
-        if self.reconciliation_store is not None:
-            durable = await self._reconcile_descriptor(request_id)
-            if durable is not None:
-                return durable
-        entry = self._journal.get(request_id)
-        if entry is None:
-            return None
-        request = entry.request
-        try:
-            if request.capability == "git.merge":
-                status = await self._git_status(self._required(request, "repo"))
-                if self._merge_in_progress(status):
-                    with contextlib.suppress(ToolError):
-                        await self.executor.run(
-                            ["git", "-C", self._required(request, "repo"), "merge", "--abort"],
-                            timeout=120,
-                        )
-                    status = await self._git_status(self._required(request, "repo"))
-                    entry.state = "failed"
-                    aborted = not self._merge_in_progress(status)
-                    entry.metadata.update(
-                        {"merge_status": status, "merge_aborted": aborted}
-                    )
-                    return self._reconciled(
-                        request,
-                        "failed",
-                        "merge conflict aborted; merge was not applied"
-                        if aborted
-                        else "merge conflict remains unresolved; abort attempted",
-                        entry.metadata,
-                    )
-                entry.state = "succeeded" if not self._merge_in_progress(status) else "unknown"
-                entry.metadata["merge_status"] = status
-                return self._reconciled(request, "succeeded", "git merge state confirmed", entry.metadata)
-
-            if request.capability == "git.push":
-                repo = self._required(request, "repo")
-                remote = str(request.parameters.get("remote", "origin"))
-                branch = str(request.parameters.get("branch", "main"))
-                expected = str(entry.metadata.get("expected_commit") or "").strip()
-                if not expected:
-                    expected = (await self.executor.run(["git", "-C", repo, "rev-parse", branch], timeout=60)).strip()
-                observed = await self._remote_ref(repo, remote, branch)
-                entry.metadata.update({"expected_commit": expected, "remote_commit": observed or ""})
-                if observed is None:
-                    entry.state = "unknown"
-                    return self._reconciled(request, "unknown", "remote ref is not observable", entry.metadata)
-                if observed != expected:
-                    entry.state = "failed"
-                    return self._reconciled(
-                        request,
-                        "failed",
-                        f"remote ref mismatch: expected {expected}, observed {observed}",
-                        entry.metadata,
-                    )
-                entry.state = "succeeded"
-                return self._reconciled(request, "succeeded", "remote ref matches expected commit", entry.metadata)
-
-            if request.capability in {"docker.restart", "docker.compose.up"}:
-                project = str(request.parameters.get("project", ""))
-                status = await self._docker_status(project)
-                entry.metadata["container_status"] = status
-                desired_state_verified = self._containers_healthy(status)
-                entry.metadata["desired_state"] = "running"
-                entry.metadata["desired_state_verified"] = desired_state_verified
-                is_restart = request.capability == "docker.restart"
-                entry.metadata.setdefault(
-                    "event_attribution", "unknown" if is_restart else "not-applicable"
-                )
-                entry.metadata.setdefault("event_verified", False)
-                entry.metadata.setdefault(
-                    "event_verification_basis",
-                    "not-observable" if is_restart else "desired-state-operation",
-                )
-                if desired_state_verified:
-                    # Healthy containers prove only the desired state.  A
-                    # restart event is not attributable without an observed
-                    # restart identity, so preserve UNKNOWN and require a
-                    # later, effect-specific observation.
-                    if is_restart:
-                        entry.state = "unknown"
-                        return self._reconciled(
-                            request,
-                            "unknown",
-                            "Docker desired state confirmed; restart event attribution remains unknown",
-                            entry.metadata,
-                        )
-                    entry.state = "succeeded"
-                    return self._reconciled(request, "succeeded", "Docker desired state confirmed", entry.metadata)
-                entry.state = "unknown"
-                return self._reconciled(
-                    request,
-                    "unknown",
-                    "Docker desired state is not healthy or not yet observable",
-                    entry.metadata,
-                )
-
-            if request.capability == "git.rollback":
-                repo = self._required(request, "repo")
-                branch = self._required(request, "branch")
-                branch_listing = await self.executor.run(
-                    ["git", "-C", repo, "branch", "--list", branch],
-                    timeout=60,
-                )
-                exists = bool(branch_listing.strip())
-                entry.metadata.update({"repo": repo, "branch": branch, "branch_exists": exists})
-                entry.state = "failed" if exists else "succeeded"
-                return self._reconciled(
-                    request,
-                    "failed" if exists else "succeeded",
-                    "rollback branch still exists" if exists else "rollback branch absent",
-                    entry.metadata,
-                )
-        except ToolError as exc:
-            entry.state = "unknown"
-            entry.metadata["reconcile_error"] = str(exc)
-            return self._reconciled(request, "unknown", str(exc), entry.metadata)
+        # No profile-local durable effect ledger is retained. Agent Kernel must
+        # preserve ambiguous effects as unknown rather than inventing certainty.
+        del request_id
         return None
 
-    async def _git_status(self, repo: str) -> str:
-        return await self.executor.run(["git", "-C", repo, "status", "--short", "--branch"], timeout=60)
-
-    async def _remote_ref(self, repo: str, remote: str, branch: str) -> str | None:
-        output = await self.executor.run(
-            ["git", "-C", repo, "ls-remote", remote, f"refs/heads/{branch}"],
-            timeout=self.config.git_push_timeout_seconds,
-        )
-        for line in output.splitlines():
-            fields = line.strip().split()
-            if fields and fields[0] and fields[0] != "-":
-                return fields[0]
-        return None
-
-    async def _docker_status(self, project: str) -> str:
-        if project not in self.config.allowed_auto_projects:
-            raise ToolError(f"docker project is not allowlisted: {project}")
-        return await self.executor.run(
-            [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.project={project}",
-                "--format",
-                "{{.Names}}\t{{.Status}}",
-            ],
-            timeout=60,
-        )
-
-    @staticmethod
-    def _containers_healthy(status: str) -> bool:
-        lines = [line.strip() for line in status.splitlines() if line.strip()]
-        if not lines:
-            return False
-        return all(
-            len(line.split("\t", 1)) == 2
-            and line.split("\t", 1)[1].startswith("Up")
-            and "unhealthy" not in line.lower()
-            and "restarting" not in line.lower()
-            for line in lines
-        )
-
-    @staticmethod
-    def _merge_in_progress(status: str) -> bool:
-        lowered = status.lower()
-        if "merge_head" in lowered or "you are in the middle of a merge" in lowered or "unmerged paths" in lowered:
-            return True
-        return any(
-            line[:2] in {"uu", "aa", "dd", "au", "ua", "du", "ud"}
-            for line in (part.strip().lower() for part in status.splitlines())
-        )
-
-    @staticmethod
-    def _is_ambiguous_error(exc: ToolError) -> bool:
-        lowered = str(exc).lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "timed out",
-                "timeout",
-                "connection refused",
-                "connection reset",
-                "remote end hung up",
-                "network is unreachable",
-                "no route to host",
-                "could not resolve host",
-                "could not be confirmed",
-                "not healthy",
-                "not observable",
-                "not yet observable",
-            )
-        )
-
-    def _reconciled(
-        self,
-        request: CapabilityRequest,
-        status: str,
-        message: str,
-        metadata: dict[str, Any],
-    ) -> CapabilityResult:
+    def _result(self, request: CapabilityRequest, status: str, message: str) -> CapabilityResult:
         return CapabilityResult(
             request_id=request.id,
             provider_id=self.descriptor.id,
-            status=status,  # type: ignore[arg-type]
+            status=status,
             message=message,
-            metadata={"operation": request.capability, **metadata},
-            reconciled=True,
+            metadata={"capability": request.capability, "resource_ref": request.resource_ref or ""},
         )
+
+    async def _run(self, argv: list[str], *, cwd: str | None = None, timeout: float = 120) -> str:
+        executable = shutil.which(argv[0]) or argv[0]
+        proc = await asyncio.create_subprocess_exec(  # noqa: S603
+            executable,
+            *argv[1:],
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise TimeoutError(f"command outcome is ambiguous after timeout: {argv[0]}") from None
+        out = (stdout or b"").decode("utf-8", errors="replace").strip()
+        err = (stderr or b"").decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            raise RuntimeError(f"command failed ({proc.returncode}): {(err or out)[:800]}")
+        return out or "ok"
+
+    def _repo(self, request: CapabilityRequest) -> str:
+        repo = str(request.parameters.get("repo", "")).strip()
+        if not repo:
+            raise ValueError("git operation requires parameters.repo")
+        if not self.config.repo_allowed(repo):
+            raise ValueError(f"repo is outside personal allowlist: {repo}")
+        return repo
+
+    async def _git(self, request: CapabilityRequest) -> str:
+        repo = self._repo(request)
+        if request.capability == "git.push":
+            remote = str(request.parameters.get("remote", "origin"))
+            branch = str(request.parameters.get("branch", "main"))
+            return await self._run(["git", "push", remote, branch], cwd=repo)
+        if request.capability == "git.merge":
+            branch = str(request.parameters.get("branch", "")).strip()
+            target = str(request.parameters.get("target", "main"))
+            if not branch:
+                raise ValueError("git.merge requires parameters.branch")
+            await self._run(["git", "checkout", target], cwd=repo)
+            return await self._run(["git", "merge", "--no-ff", branch], cwd=repo)
+        if request.capability == "git.rollback":
+            target = str(request.parameters.get("target", "")).strip()
+            if not target:
+                raise ValueError("git.rollback requires parameters.target")
+            return await self._run(["git", "reset", "--hard", target], cwd=repo)
+        raise ValueError(f"unsupported git capability: {request.capability}")
+
+    async def _docker(self, request: CapabilityRequest) -> str:
+        project = str(request.parameters.get("project", "")).strip()
+        if project not in self.config.allowed_auto_projects:
+            raise ValueError(f"docker project is outside personal allowlist: {project}")
+        project_dir = self.config.project_dirs.get(project)
+        if not project_dir:
+            raise ValueError(f"no compose directory configured for project: {project}")
+        if request.capability == "docker.restart":
+            service = str(request.parameters.get("service", "")).strip()
+            if not service:
+                raise ValueError("docker.restart requires parameters.service")
+            return await self._run(["docker", "compose", "restart", service], cwd=project_dir, timeout=180)
+        if request.capability == "docker.compose.up":
+            return await self._run(["docker", "compose", "up", "-d"], cwd=project_dir, timeout=300)
+        raise ValueError(f"unsupported docker capability: {request.capability}")
