@@ -156,7 +156,7 @@ class PersonalKernelBridge:
         for ref in state.context_refs:
             value = self.responsibilities.journal.get(ref)
             if value is not None and value.object_type == "ResponsibilityAssessment":
-                return ref
+                return str(ref)
         raise ValueError("personal controller has no responsibility assessment")
 
     def work_for_proposal(self, proposal_ref: str) -> Work | None:
