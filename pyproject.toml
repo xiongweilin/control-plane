@@ -1,12 +1,12 @@
 [project]
 name = "control-plane"
-version = "0.2.0"
-description = "Personal Windows/monitoring/Feishu profile for Agent Kernel"
+version = "0.3.0"
+description = "Unattended personal operations profile for Agent Kernel"
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@6deb4ab80e4c22470a6c0f72c827c45569bcba54",
+    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@37eab897996ef626a4c0081f7a17378e9bff6628",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",
