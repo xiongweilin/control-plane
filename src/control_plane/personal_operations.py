@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from pathlib import Path
-from typing import Any
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
