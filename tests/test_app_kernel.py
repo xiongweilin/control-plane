@@ -72,7 +72,7 @@ def test_feishu_task_reply_can_address_waiting_controller() -> None:
     assert _split_controller_reply("ordinary task") is None
 
 
-def test_profile_models_are_frozen_to_luna(tmp_path: Path) -> None:
+def test_profile_models_remain_existing_luna_names(tmp_path: Path) -> None:
     cfg = make_config(tmp_path)
-    assert cfg.diagnosis_model == "codex/gpt-5.6-luna"
-    assert cfg.execution_model == "codex/gpt-5.6-luna"
+    assert cfg.diagnosis_model == "gpt-5.6-luna"
+    assert cfg.execution_model == "gpt-5.6-luna"
