@@ -1,7 +1,10 @@
 from pathlib import Path
 
+from portable_runtime.responsibility import ResponsibilityKernel
+
 from control_plane.app import _split_controller_reply, create_app
 from control_plane.config import ControlPlaneConfig
+from control_plane.kernel_bridge import PersonalKernelBridge
 
 
 def make_config(tmp_path: Path) -> ControlPlaneConfig:
@@ -31,6 +34,9 @@ def test_app_is_thin_agent_kernel_profile(tmp_path: Path) -> None:
     assert "personal-operations" in provider_ids
     assert app.state.controller.runtime is runtime
     assert callable(app.state.controller.step)
+    assert isinstance(app.state.kernel_bridge, PersonalKernelBridge)
+    assert app.state.kernel_bridge.runtime is runtime
+    assert isinstance(app.state.kernel_bridge.responsibilities, ResponsibilityKernel)
 
 
 def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
@@ -42,13 +48,20 @@ def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
     assert registry.effect_rule("notify.send").authorization_required is False
 
 
-def test_personal_task_and_waiting_command_surfaces_are_present(tmp_path: Path) -> None:
+def test_personal_task_and_waiting_command_surfaces_are_unchanged(tmp_path: Path) -> None:
     app = create_app(make_config(tmp_path))
     paths = {route.path for route in app.routes}
+    assert "/healthz" in paths
+    assert "/live" in paths
+    assert "/ready" in paths
+    assert "/metrics" in paths
+    assert "/status" in paths
+    assert "/v1/runtime" in paths
     assert "/v1/tasks" in paths
     assert "/v1/controllers/{controller_id}/command" in paths
     assert "/v1/alerts/alertmanager" in paths
-    assert "/status" in paths
+    assert "/v1/game-mode" in paths
+    assert "/v1/sessions/inspect" in paths
 
 
 def test_feishu_task_reply_can_address_waiting_controller() -> None:
@@ -59,7 +72,7 @@ def test_feishu_task_reply_can_address_waiting_controller() -> None:
     assert _split_controller_reply("ordinary task") is None
 
 
-def test_profile_models_are_frozen_to_luna(tmp_path: Path) -> None:
+def test_profile_models_remain_existing_luna_names(tmp_path: Path) -> None:
     cfg = make_config(tmp_path)
-    assert cfg.diagnosis_model == "codex/gpt-5.6-luna"
-    assert cfg.execution_model == "codex/gpt-5.6-luna"
+    assert cfg.diagnosis_model == "gpt-5.6-luna"
+    assert cfg.execution_model == "gpt-5.6-luna"

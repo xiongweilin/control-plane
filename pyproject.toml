@@ -1,12 +1,12 @@
 [project]
 name = "control-plane"
-version = "0.4.0"
+version = "0.5.0"
 description = "Autonomous personal operations profile for Agent Kernel"
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@37eab897996ef626a4c0081f7a17378e9bff6628",
+    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@49c9fd10ec8cbf378510229bf1b1711a050addaa",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",

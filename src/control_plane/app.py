@@ -23,7 +23,9 @@ from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
 from .audit import inspect_session_fields
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
+from .escalation_policy import preserve_blocked_wait
 from .game_mode import read_game_mode_state
+from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
 from .monitoring import PersonalMonitoringProvider
 from .personal_operations import PersonalOperationsProvider
 
@@ -102,7 +104,7 @@ def _register_profile_effect_rules(runtime: Any) -> None:
             exposure=2,
         ),
         # allowed_auto_projects is the standing personal authorization for this
-        # single bounded apply operation; the provider independently enforces it.
+        # one bounded apply operation; the provider independently enforces it.
         CapabilityEffectRule(
             capability="docker.compose.up",
             impact_class="write-remote",
@@ -117,21 +119,12 @@ def _register_profile_effect_rules(runtime: Any) -> None:
         runtime.contract_registry.register_effect_rule(rule)
 
 
-def _latest_result(runtime: Any, controller_id: str) -> dict[str, Any] | None:
-    for event in reversed(runtime.store.list_events(controller_id)):
-        if event.type != "ControllerCapabilityResultObserved":
-            continue
-        raw = event.payload.get("result")
-        if isinstance(raw, dict):
-            return dict(raw)
-    return None
-
-
-def _task_response(runtime: Any, state: Any) -> TaskResponse:
-    result = _latest_result(runtime, state.id)
+def _task_response(bridge: PersonalKernelBridge, state: Any) -> TaskResponse:
+    result = bridge.latest_result(state.id)
     message = str((result or {}).get("message", ""))[:20_000]
+    work = bridge.work_for_state(state)
     return TaskResponse(
-        work_id=str(state.subject_ref or ""),
+        work_id=work.id if work is not None else "",
         controller_id=state.id,
         status=state.status.value,
         message=message,
@@ -168,17 +161,24 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     runtime.registry.register(PersonalMonitoringProvider(cfg))
     runtime.registry.register(PersonalOperationsProvider(cfg))
     _register_profile_effect_rules(runtime)
+
     controller = CognitiveController(runtime)
+    bridge = PersonalKernelBridge(
+        runtime,
+        controller,
+        owner_principal=cfg.owner_principal,
+    )
 
     app = FastAPI(
         title="Personal Control Plane",
-        version="0.4.0",
+        version="0.5.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
     app.state.kernel_runtime = runtime
     app.state.controller = controller
+    app.state.kernel_bridge = bridge
     app.state.config = cfg
 
     def require_key(candidate: str) -> None:
@@ -200,7 +200,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         return resolved_repo or None, resolved_project or None
 
     async def notify(work_id: str, text: str) -> None:
-        if not cfg.notification_enabled:
+        if not cfg.notification_enabled or not work_id:
             return
         try:
             await runtime.run_capability(
@@ -213,24 +213,29 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             # Notification delivery never changes Work truth or repair closure.
             return
 
+    async def settle_personal_state(state: Any) -> Any:
+        return await preserve_blocked_wait(controller, bridge, state)
+
     async def run_manual_task(body: TaskRequest) -> TaskResponse:
         repo, project = resolve_repo(body.repo, body.project)
-        work = runtime.create_work(
+        state, _assessment_ref = bridge.begin(
             title="Personal task",
             description=body.prompt,
             kind="personal-command",
-            metadata={"repo": repo or "", "project": project or ""},
+            repo=repo,
+            project=project,
         )
-        state = controller.create(subject_ref=work.id, context_refs=[work.id])
         policy = ManualTaskPolicy(
             controller=controller,
+            bridge=bridge,
             prompt=body.prompt,
             diagnosis_model=cfg.diagnosis_model,
             execution_model=cfg.execution_model,
             repo=repo,
         )
         final_state = await drive_policy(controller, state.id, policy)
-        return _task_response(runtime, final_state)
+        final_state = await settle_personal_state(final_state)
+        return _task_response(bridge, final_state)
 
     async def run_alert_repair(
         *,
@@ -239,42 +244,29 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         repo: str | None,
         project: str | None,
         verification_labels: dict[str, str],
-        human_instruction: str | None = None,
-        parent_controller_id: str | None = None,
-        work_id: str | None = None,
     ) -> TaskResponse:
-        if work_id:
-            work = runtime.get_work(work_id)
-            if work is None:
-                raise HTTPException(status_code=404, detail="work not found")
-        else:
-            work = runtime.create_work(
-                title=title,
-                description=description,
-                kind="personal-incident-repair",
-                metadata={
-                    "repo": repo or "",
-                    "project": project or "",
-                    "verification_labels": dict(verification_labels),
-                },
-            )
-        context_refs = [work.id]
-        if parent_controller_id:
-            context_refs.append(parent_controller_id)
-        state = controller.create(subject_ref=work.id, context_refs=context_refs)
+        state, _assessment_ref = bridge.begin(
+            title=title,
+            description=description,
+            kind="personal-incident-repair",
+            repo=repo,
+            project=project,
+            verification_labels=verification_labels,
+        )
         policy = AutonomousRepairPolicy(
             controller=controller,
+            bridge=bridge,
             prompt=description,
             diagnosis_model=cfg.diagnosis_model,
             execution_model=cfg.execution_model,
             repo=repo,
             project=project if project in cfg.allowed_auto_projects else None,
             verification_labels=verification_labels,
-            human_instruction=human_instruction,
             max_attempts=2,
         )
         final_state = await drive_policy(controller, state.id, policy)
-        return _task_response(runtime, final_state)
+        final_state = await settle_personal_state(final_state)
+        return _task_response(bridge, final_state)
 
     async def continue_waiting_controller(controller_id: str, command: str) -> TaskResponse:
         previous = controller.get(controller_id)
@@ -282,38 +274,52 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="controller not found")
         if previous.status is not ControllerStatus.WAITING:
             raise HTTPException(status_code=409, detail="controller is not waiting for human input")
-        if not previous.subject_ref:
-            raise HTTPException(status_code=409, detail="controller has no work subject")
-        work = runtime.get_work(previous.subject_ref)
-        if work is None:
-            raise HTTPException(status_code=404, detail="work not found")
-        instruction_event = Event(
-            id=new_id("event"),
-            type="PersonalHumanInstructionObserved",
-            subject_ref=controller_id,
-            payload={"command": command, "actor_ref": cfg.owner_principal},
+
+        runtime.store.append_event(
+            Event(
+                id=new_id("event"),
+                type=PERSONAL_HUMAN_INSTRUCTION_EVENT,
+                subject_ref=controller_id,
+                payload={"command": command, "actor_ref": cfg.owner_principal},
+            )
         )
-        runtime.store.append_event(instruction_event)
-        metadata = work.metadata if isinstance(work.metadata, dict) else {}
-        raw_labels = metadata.get("verification_labels", {})
-        labels = (
-            {str(key): str(value) for key, value in raw_labels.items()}
-            if isinstance(raw_labels, dict)
-            else {}
-        )
-        repo = str(metadata.get("repo", "")) or None
-        project = str(metadata.get("project", "")) or None
-        result = await run_alert_repair(
-            title=work.title,
-            description=work.description,
-            repo=repo,
-            project=project,
-            verification_labels=labels,
-            human_instruction=command,
-            parent_controller_id=controller_id,
-            work_id=work.id,
-        )
-        if result.status == ControllerStatus.WAITING.value:
+        context = bridge.context(previous)
+        if context.kind == "personal-incident-repair":
+            policy: AutonomousRepairPolicy | ManualTaskPolicy = AutonomousRepairPolicy(
+                controller=controller,
+                bridge=bridge,
+                prompt=context.description,
+                diagnosis_model=cfg.diagnosis_model,
+                execution_model=cfg.execution_model,
+                repo=context.repo,
+                project=(
+                    context.project
+                    if context.project is not None
+                    and context.project in cfg.allowed_auto_projects
+                    else None
+                ),
+                verification_labels=context.verification_labels,
+                human_instruction=command,
+                max_attempts=2,
+            )
+        else:
+            policy = ManualTaskPolicy(
+                controller=controller,
+                bridge=bridge,
+                prompt=context.description,
+                diagnosis_model=cfg.diagnosis_model,
+                execution_model=cfg.execution_model,
+                repo=context.repo,
+                human_instruction=command,
+            )
+
+        final_state = await drive_policy(controller, previous.id, policy)
+        final_state = await settle_personal_state(final_state)
+        result = _task_response(bridge, final_state)
+        if (
+            context.kind == "personal-incident-repair"
+            and result.status == ControllerStatus.WAITING.value
+        ):
             await notify(
                 result.work_id,
                 "收到明确命令后仍未解决, 已再次停止.\n"
