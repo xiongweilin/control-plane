@@ -6,6 +6,7 @@ from portable_runtime.controller import (
 )
 from portable_runtime.core.models import Event, new_id
 from portable_runtime.core.runtime import Runtime
+
 from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy
 
 DIAGNOSIS_MODEL = "codex/gpt-5.6-sol"
