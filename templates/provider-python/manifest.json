@@ -1,9 +1,0 @@
-{
-  "id": "example",
-  "name": "Example Provider",
-  "version": "1.0.0",
-  "protocol_version": "1",
-  "transport": "python",
-  "capabilities": ["text.example"],
-  "entrypoint": "provider:invoke"
-}

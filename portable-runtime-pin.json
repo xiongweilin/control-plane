@@ -1,8 +1,0 @@
-{
-  "repository": "xiongweilin/portable-runtime",
-  "commit": "b26487a6efe3933c5d92d637b522eac211e153c1",
-  "scope": "src/portable_runtime",
-  "tree_algorithm": "sha256-path-and-content-v1",
-  "tree_sha256": "a9502ca2bd1b8ebe6868118195ae88bfbf2ef4d02e29f8eca4e0d8fdbb2732e4",
-  "line_endings": "lf"
-}
