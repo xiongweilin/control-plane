@@ -44,6 +44,15 @@ CONTROLLED_IGNORES = Counter(
     ["site"],
 )
 
+# Game-mode suppression is deliberately a bounded, allowlisted signal.  The
+# alert fingerprint is kept in SQLite audit settings instead of a metric label
+# so a noisy alert stream cannot create unbounded time series.
+GAME_MODE_SUPPRESSED = Counter(
+    "control_plane_game_mode_alerts_suppressed_total",
+    "Alerts suppressed while the CS2 game-mode state was active",
+    ["alertname", "phase"],
+)
+
 
 class ControlPlaneCollector:
     """Prometheus collector over the control-plane SQLite state."""

@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,13 @@ from .codex_runner import CodexCliUnavailableError, CodexRunner, CodexSessionRes
 from .config import PROJECT_ROOT, ControlPlaneConfig, canonical_human_principal
 from .errors import ErrorClass, TimeoutKind, classify_exec_error, classify_verify_error
 from .evidence import EvidenceRecord, write_evidence
-from .metrics import CONTROLLED_IGNORES, MODEL_CONNECTIVITY, MODEL_DRIFT
+from .game_mode import GameModeStatus, is_cs2_running, read_game_mode_state
+from .metrics import (
+    CONTROLLED_IGNORES,
+    GAME_MODE_SUPPRESSED,
+    MODEL_CONNECTIVITY,
+    MODEL_DRIFT,
+)
 from .models import Alert, AlertmanagerPayload, AlertResponse
 from .notify import Notifier
 from .outward_semantics import project_repair
@@ -238,6 +245,7 @@ class RepairService:
         capability_service: CapabilityService | None = None,
         provider_registry: ProviderRegistry | None = None,
         portable_runtime: Any | None = None,
+        game_mode_process_probe: Callable[[], bool] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -254,6 +262,7 @@ class RepairService:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._repair_tasks: dict[str, asyncio.Task[Any]] = {}
         self._fingerprint_locks: dict[str, asyncio.Lock] = {}
+        self._game_mode_process_probe = game_mode_process_probe or is_cs2_running
         self.run_id = config.run_id or current_run_id()
         self.portable_runtime = portable_runtime
         # The private provider remains available for legacy unit/service
@@ -703,6 +712,7 @@ class RepairService:
         paused = 0
         ignored = 0
         pending = 0
+        suppressed = 0
         for alert in payload.alerts:
             decision = await self._ingest_alert(alert)
             accepted += decision.get("accepted", 0)
@@ -712,6 +722,7 @@ class RepairService:
             paused += decision.get("paused", 0)
             ignored += decision.get("ignored", 0)
             pending += decision.get("pending", 0)
+            suppressed += decision.get("suppressed", 0)
         return AlertResponse(
             accepted=accepted,
             deduplicated=deduplicated,
@@ -720,6 +731,7 @@ class RepairService:
             paused=paused,
             ignored=ignored,
             pending=pending,
+            suppressed=suppressed,
         )
 
     async def _ingest_alert(self, alert: Alert) -> dict[str, int]:
@@ -743,6 +755,16 @@ class RepairService:
             f"alert_payload:{fingerprint}",
             json.dumps(alert.model_dump(mode="json", by_alias=True), ensure_ascii=False),
         )
+
+        game_mode = self._game_mode_suppression(alert)
+        if game_mode is not None:
+            self._record_game_mode_suppression(alert, game_mode)
+            GAME_MODE_SUPPRESSED.labels(
+                alertname=alertname,
+                phase=game_mode.phase,
+            ).inc()
+            return {"suppressed": 1}
+        self._release_game_mode_suppression(fingerprint)
 
         if self._is_noise_alert(alert):
             if known is None and self.config.notify_ignored_noise:
@@ -859,11 +881,115 @@ class RepairService:
 
         return await self._start_repair(alert, attempt)
 
+    def _game_mode_suppression(self, alert: Alert) -> GameModeStatus | None:
+        """Return the current game-mode phase when this alert is allowlisted.
+
+        This gate is intentionally fail-open.  A malformed/stale state file,
+        missing CS2 process, failed restore, or an alert outside the fixed
+        allowlist leaves the normal alert path untouched.
+        """
+
+        if not self.config.game_mode_enabled:
+            return None
+        alertname = alert.labels.get("alertname", "")
+        if alertname not in self.config.game_mode_alertnames:
+            return None
+        if not self._game_mode_target_allowed(alert):
+            return None
+        status = read_game_mode_state(
+            self.config.game_mode_state_path,
+            active_max_age_seconds=self.config.game_mode_active_max_age_seconds,
+            restore_grace_seconds=self.config.game_mode_restore_grace_seconds,
+            process_probe=self._game_mode_process_probe,
+        )
+        return status if status.suppress_alerts else None
+
+    def _game_mode_target_allowed(self, alert: Alert) -> bool:
+        """Keep suppression scoped to targets stopped by the CS2 launcher."""
+
+        alertname = alert.labels.get("alertname", "")
+        labels = alert.labels
+        if alertname == "PrometheusScrapeFailed":
+            return labels.get("job", "") in self.config.game_mode_scrape_jobs
+        if alertname == "ContainerRestartStorm":
+            return not labels.get("project") and not labels.get("repo")
+        if alertname == "ControlPlaneStaleReady":
+            team = labels.get("team", "")
+            return (
+                team in {"", "control-plane"}
+                and not labels.get("project")
+                and not labels.get("repo")
+            )
+        return False
+
+    def _record_game_mode_suppression(
+        self, alert: Alert, status: GameModeStatus
+    ) -> None:
+        fingerprint = alert_fingerprint(alert)
+        record = {
+            "status": "suppressed",
+            "alertname": alert.labels.get("alertname", "unknown"),
+            "job": alert.labels.get("job", ""),
+            "phase": status.phase,
+            "mode_status": status.status,
+            "reason": status.reason[:300],
+            "state_path": str(status.state_path),
+            "suppressed_at": int(time.time()),
+        }
+        self.store.set_setting(
+            f"game_mode:suppression:{fingerprint}",
+            json.dumps(record, ensure_ascii=False),
+        )
+
+    def _release_game_mode_suppression(self, fingerprint: str) -> None:
+        """Mark a stale suppression as released before normal processing."""
+
+        key = f"game_mode:suppression:{fingerprint}"
+        raw = self.store.get_setting(key, "")
+        if not raw:
+            return
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(record, dict) or record.get("status") != "suppressed":
+            return
+        record.update({"status": "released", "released_at": int(time.time())})
+        self.store.set_setting(key, json.dumps(record, ensure_ascii=False))
+
+    def _resolve_game_mode_suppression(self, fingerprint: str, ends_at: int | None) -> bool:
+        """Close a previously suppressed alert without a false recovery warning."""
+
+        key = f"game_mode:suppression:{fingerprint}"
+        raw = self.store.get_setting(key, "")
+        if not raw:
+            return False
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(record, dict) or record.get("status") != "suppressed":
+            return False
+        record.update(
+            {
+                "status": "resolved",
+                "resolved_at": ends_at or int(time.time()),
+            }
+        )
+        self.store.set_setting(key, json.dumps(record, ensure_ascii=False))
+        return True
+
     async def _handle_resolved(self, alert: Alert, ends_at: int | None) -> None:
         """Resolve one alert with recovery verification (webhook and reconcile share this)."""
         fingerprint = alert_fingerprint(alert)
         alertname = alert.labels.get("alertname", "unknown")
         self.store.mark_alert_resolved(fingerprint, ends_at)
+        if self._resolve_game_mode_suppression(fingerprint, ends_at):
+            logger.info(
+                "resolved game-mode-suppressed alert without recovery warning: %s",
+                fingerprint,
+            )
+            return
         recovered, evidence = await self._verify_alert_recovery(alert)
         if recovered:
             self.store.set_setting(f"attempt_reset:{fingerprint}", str(int(time.time())))
