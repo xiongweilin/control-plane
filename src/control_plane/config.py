@@ -33,6 +33,10 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _normalized(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
 @dataclass(frozen=True, slots=True)
 class ControlPlaneConfig:
     """Only profile-specific configuration.
@@ -50,7 +54,8 @@ class ControlPlaneConfig:
     artifact_root: Path = PROJECT_ROOT / "data" / "artifacts"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
 
-    model: str = "opencode-go/deepseek-v4-flash"
+    diagnosis_model: str = "codex/gpt-5.6-sol"
+    execution_model: str = "codex/gpt-5.6-luna"
     codex_cli: Path = field(default_factory=_resolve_codex_cli)
     gateway_base_url: str = "http://127.0.0.1:4101/v1"
     codex_isolate_worktree: bool = True
@@ -104,16 +109,30 @@ class ControlPlaneConfig:
         r"D:\agent",
     )
 
+    @property
+    def model(self) -> str:
+        """Compatibility alias for the provider default model."""
+        return self.diagnosis_model
+
     def repo_allowed(self, repo: str | Path) -> bool:
-        candidate = os.path.normcase(os.path.abspath(str(repo)))
+        candidate = _normalized(repo)
         for root in self.allowed_repo_roots:
-            normalized_root = os.path.normcase(os.path.abspath(root))
+            normalized_root = _normalized(root)
             try:
                 if os.path.commonpath([candidate, normalized_root]) == normalized_root:
                     return True
             except ValueError:
                 continue
         return False
+
+    def auto_project_for_repo(self, repo: str | Path) -> str | None:
+        """Return the standing auto-repair project for an exact configured repo."""
+        candidate = _normalized(repo)
+        for project in self.allowed_auto_projects:
+            project_dir = self.project_dirs.get(project)
+            if project_dir and candidate == _normalized(project_dir):
+                return project
+        return None
 
     @classmethod
     def load(cls, path: Path | None = None) -> ControlPlaneConfig:
@@ -141,33 +160,66 @@ class ControlPlaneConfig:
             if isinstance(raw_project_dirs, dict)
             else dict(base.project_dirs)
         )
+        legacy_model = str(model.get("name", "")).strip()
 
         return cls(
             host=str(server.get("host", base.host)),
             port=int(server.get("port", base.port)),
             api_key=api_key,
-            owner_principal=str(os.getenv("CONTROL_PLANE_OWNER_PRINCIPAL", kernel.get("owner_principal", base.owner_principal))),
+            owner_principal=str(
+                os.getenv(
+                    "CONTROL_PLANE_OWNER_PRINCIPAL",
+                    kernel.get("owner_principal", base.owner_principal),
+                )
+            ),
             state_db=Path(str(kernel.get("state_db", base.state_db))),
             artifact_root=Path(str(kernel.get("artifact_root", base.artifact_root))),
             agent_session_dir=Path(str(model.get("session_dir", base.agent_session_dir))),
-            model=str(model.get("name", base.model)),
+            diagnosis_model=str(
+                model.get("diagnosis_model", legacy_model or base.diagnosis_model)
+            ),
+            execution_model=str(model.get("execution_model", base.execution_model)),
             codex_cli=_resolve_codex_cli(str(model.get("codex_cli", ""))),
             gateway_base_url=str(model.get("gateway_base_url", base.gateway_base_url)),
-            codex_isolate_worktree=bool(model.get("isolate_worktree", base.codex_isolate_worktree)),
+            codex_isolate_worktree=bool(
+                model.get("isolate_worktree", base.codex_isolate_worktree)
+            ),
             codex_disable_docker=bool(model.get("disable_docker", base.codex_disable_docker)),
-            codex_disable_ssh_credentials=bool(model.get("disable_ssh_credentials", base.codex_disable_ssh_credentials)),
+            codex_disable_ssh_credentials=bool(
+                model.get("disable_ssh_credentials", base.codex_disable_ssh_credentials)
+            ),
             codex_worktree_root=Path(str(model.get("worktree_root", base.codex_worktree_root))),
             max_agent_output_bytes=int(model.get("max_output_bytes", base.max_agent_output_bytes)),
             prometheus_url=str(monitoring.get("prometheus_url", base.prometheus_url)),
             alertmanager_url=str(monitoring.get("alertmanager_url", base.alertmanager_url)),
-            notification_enabled=_env_bool("CONTROL_PLANE_NOTIFICATIONS", bool(monitoring.get("notification_enabled", base.notification_enabled))),
-            game_mode_enabled=_env_bool("CONTROL_PLANE_GAME_MODE", bool(game_mode.get("enabled", base.game_mode_enabled))),
-            game_mode_state_path=Path(str(game_mode.get("state_path", base.game_mode_state_path))),
-            game_mode_active_max_age_seconds=int(game_mode.get("active_max_age_seconds", base.game_mode_active_max_age_seconds)),
-            game_mode_restore_grace_seconds=int(game_mode.get("restore_grace_seconds", base.game_mode_restore_grace_seconds)),
-            game_mode_alertnames=tuple(str(v) for v in game_mode.get("alertnames", base.game_mode_alertnames)),
-            game_mode_scrape_jobs=tuple(str(v) for v in game_mode.get("scrape_jobs", base.game_mode_scrape_jobs)),
-            allowed_auto_projects=tuple(str(v) for v in projects.get("allowed_auto", base.allowed_auto_projects)),
+            notification_enabled=_env_bool(
+                "CONTROL_PLANE_NOTIFICATIONS",
+                bool(monitoring.get("notification_enabled", base.notification_enabled)),
+            ),
+            game_mode_enabled=_env_bool(
+                "CONTROL_PLANE_GAME_MODE",
+                bool(game_mode.get("enabled", base.game_mode_enabled)),
+            ),
+            game_mode_state_path=Path(
+                str(game_mode.get("state_path", base.game_mode_state_path))
+            ),
+            game_mode_active_max_age_seconds=int(
+                game_mode.get("active_max_age_seconds", base.game_mode_active_max_age_seconds)
+            ),
+            game_mode_restore_grace_seconds=int(
+                game_mode.get("restore_grace_seconds", base.game_mode_restore_grace_seconds)
+            ),
+            game_mode_alertnames=tuple(
+                str(v) for v in game_mode.get("alertnames", base.game_mode_alertnames)
+            ),
+            game_mode_scrape_jobs=tuple(
+                str(v) for v in game_mode.get("scrape_jobs", base.game_mode_scrape_jobs)
+            ),
+            allowed_auto_projects=tuple(
+                str(v) for v in projects.get("allowed_auto", base.allowed_auto_projects)
+            ),
             project_dirs=project_dirs,
-            allowed_repo_roots=tuple(str(v) for v in projects.get("allowed_repo_roots", base.allowed_repo_roots)),
+            allowed_repo_roots=tuple(
+                str(v) for v in projects.get("allowed_repo_roots", base.allowed_repo_roots)
+            ),
         )
