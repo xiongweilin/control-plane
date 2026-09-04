@@ -7,15 +7,17 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field
-
 from portable_runtime.controller import CognitiveController, ControllerStatus
 from portable_runtime.core.capability_contract import CapabilityEffectRule
 from portable_runtime.core.models import Event, new_id
 from portable_runtime.deployment.local import create_personal_platform_runtime
-from portable_runtime.interactions.feishu.provider import FeishuHumanProvider, FeishuNotificationProvider
+from portable_runtime.interactions.feishu.provider import (
+    FeishuHumanProvider,
+    FeishuNotificationProvider,
+)
 from portable_runtime.providers.codex.provider import CodexProvider
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import BaseModel, Field
 
 from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
 from .audit import inspect_session_fields
@@ -295,7 +297,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         metadata = work.metadata if isinstance(work.metadata, dict) else {}
         raw_labels = metadata.get("verification_labels", {})
         labels = (
-            {str(k): str(v) for k, v in raw_labels.items()}
+            {str(key): str(value) for key, value in raw_labels.items()}
             if isinstance(raw_labels, dict)
             else {}
         )
@@ -314,9 +316,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         if result.status == ControllerStatus.WAITING.value:
             await notify(
                 result.work_id,
-                "收到明确命令后仍未解决，已再次停止。\n"
+                "收到明确命令后仍未解决, 已再次停止.\n"
                 f"work={result.work_id}\ncontroller={result.controller_id}\n"
-                f"继续命令：/task {result.controller_id} <命令>",
+                f"继续命令: /task {result.controller_id} <命令>",
             )
         return result
 
@@ -352,7 +354,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 except httpx.HTTPError as exc:
                     checks[name] = {"ok": False, "detail": str(exc)}
         body = {
-            "status": "ok" if all(v["ok"] for v in checks.values()) else "degraded",
+            "status": "ok" if all(value["ok"] for value in checks.values()) else "degraded",
             "checks": checks,
             "kernel": await runtime.health(),
         }
@@ -415,7 +417,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         bearer = authorization.partition(" ")
         bearer_value = bearer[2] if len(bearer) == 3 and bearer[0].lower() == "bearer" else ""
         if not (
-            (x_control_plane_key and secrets.compare_digest(x_control_plane_key, cfg.api_key))
+            (
+                x_control_plane_key
+                and secrets.compare_digest(x_control_plane_key, cfg.api_key)
+            )
             or (bearer_value and secrets.compare_digest(bearer_value, cfg.api_key))
         ):
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -471,9 +476,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 waiting += 1
                 await notify(
                     result.work_id,
-                    "自动修复两次仍未解决，已停止并等待明确命令。\n"
-                    f"alert={alertname}\nwork={result.work_id}\ncontroller={result.controller_id}\n"
-                    f"回复：/task {result.controller_id} <明确命令>",
+                    "自动修复两次仍未解决, 已停止并等待明确命令.\n"
+                    f"alert={alertname}\nwork={result.work_id}\n"
+                    f"controller={result.controller_id}\n"
+                    f"回复: /task {result.controller_id} <明确命令>",
                 )
         return AlertIngestResponse(
             accepted=accepted,
