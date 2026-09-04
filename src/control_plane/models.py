@@ -36,6 +36,7 @@ class AlertResponse(BaseModel):
     paused: int = 0
     ignored: int = 0
     pending: int = 0
+    suppressed: int = 0
 
 
 class AlertPolicyRequest(BaseModel):

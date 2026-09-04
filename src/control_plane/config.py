@@ -147,6 +147,32 @@ class ControlPlaneConfig:
     # ---- readiness (batch2 item 6) ----
     alertmanager_url: str = ""
 
+    # ---- CS2 game-mode alert suppression ----
+    # The launcher state is an advisory, local-only signal.  RepairService
+    # still requires a live cs2.exe process for the Active phase and fails open
+    # for stale, malformed, or failed-restore state.
+    game_mode_enabled: bool = True
+    game_mode_state_path: Path = Path(r"D:\agent\cs2-game-mode\state.json")
+    game_mode_active_max_age_seconds: int = 12 * 60 * 60
+    game_mode_restore_grace_seconds: int = 10 * 60
+    game_mode_alertnames: tuple[str, ...] = (
+        "ContainerRestartStorm",
+        "PrometheusScrapeFailed",
+        "ControlPlaneStaleReady",
+    )
+    game_mode_scrape_jobs: tuple[str, ...] = (
+        "node",
+        "cadvisor",
+        "loki",
+        "prometheus",
+        "alertmanager",
+        "blackbox",
+        "blackbox-protected",
+        "feedback-analysis",
+        "feishu-dify-gateway",
+        "control-plane-ready",
+    )
+
     # ---- side-effect gate (batch2 item 15) ----
     external_side_effects_require_approval: bool = False
     blocked_paths: tuple[str, ...] = (
@@ -369,6 +395,47 @@ class ControlPlaneConfig:
             ),
             alertmanager_url=str(
                 policy.get("alertmanager_url", base.alertmanager_url)
+            ),
+            game_mode_enabled=_env_bool(
+                "CONTROL_PLANE_GAME_MODE_SUPPRESSION",
+                bool(policy.get("game_mode_enabled", base.game_mode_enabled)),
+            ),
+            game_mode_state_path=Path(
+                str(policy.get("game_mode_state_path", base.game_mode_state_path))
+            ),
+            game_mode_active_max_age_seconds=int(
+                policy.get(
+                    "game_mode_active_max_age_seconds",
+                    base.game_mode_active_max_age_seconds,
+                )
+            ),
+            game_mode_restore_grace_seconds=int(
+                policy.get(
+                    "game_mode_restore_grace_seconds",
+                    base.game_mode_restore_grace_seconds,
+                )
+            ),
+            game_mode_alertnames=tuple(
+                str(item)
+                for item in (
+                    policy.get("game_mode_alertnames", base.game_mode_alertnames)
+                    if isinstance(
+                        policy.get("game_mode_alertnames", base.game_mode_alertnames),
+                        (list, tuple),
+                    )
+                    else base.game_mode_alertnames
+                )
+            ),
+            game_mode_scrape_jobs=tuple(
+                str(item)
+                for item in (
+                    policy.get("game_mode_scrape_jobs", base.game_mode_scrape_jobs)
+                    if isinstance(
+                        policy.get("game_mode_scrape_jobs", base.game_mode_scrape_jobs),
+                        (list, tuple),
+                    )
+                    else base.game_mode_scrape_jobs
+                )
             ),
             prometheus_url=str(
                 policy.get("prometheus_url", base.prometheus_url)
