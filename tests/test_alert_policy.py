@@ -6,9 +6,7 @@ from portable_runtime.controller import (
 )
 from portable_runtime.core.models import Event, new_id
 from portable_runtime.core.runtime import Runtime
-
 from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy
-
 
 DIAGNOSIS_MODEL = "codex/gpt-5.6-sol"
 EXECUTION_MODEL = "codex/gpt-5.6-luna"
@@ -109,7 +107,13 @@ async def test_alert_policy_waits_after_second_unresolved_verification() -> None
 
         verify = await policy.select(state)
         assert verify.capability == "monitor.alert.active"
-        _record(controller, state, verify, message="still active", metadata={"active": True})
+        _record(
+            controller,
+            state,
+            verify,
+            message="still active",
+            metadata={"active": True},
+        )
 
     final = await policy.select(state)
     assert final.kind is ControllerDecisionKind.WAIT
