@@ -137,6 +137,14 @@ def _task_response(runtime: Any, state: Any) -> TaskResponse:
     )
 
 
+def _split_controller_reply(prompt: str) -> tuple[str, str] | None:
+    """Recognize `<controller_id> <explicit command>` from Feishu `/task`."""
+    first, sep, rest = prompt.strip().partition(" ")
+    if not sep or not first.startswith("controller_") or not rest.strip():
+        return None
+    return first, rest.strip()
+
+
 def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg = config or ControlPlaneConfig.load()
     cfg.state_db.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +274,52 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         final_state = await drive_policy(controller, state.id, policy)
         return _task_response(runtime, final_state)
 
+    async def continue_waiting_controller(controller_id: str, command: str) -> TaskResponse:
+        previous = controller.get(controller_id)
+        if previous is None:
+            raise HTTPException(status_code=404, detail="controller not found")
+        if previous.status is not ControllerStatus.WAITING:
+            raise HTTPException(status_code=409, detail="controller is not waiting for human input")
+        if not previous.subject_ref:
+            raise HTTPException(status_code=409, detail="controller has no work subject")
+        work = runtime.get_work(previous.subject_ref)
+        if work is None:
+            raise HTTPException(status_code=404, detail="work not found")
+        instruction_event = Event(
+            id=new_id("event"),
+            type="PersonalHumanInstructionObserved",
+            subject_ref=controller_id,
+            payload={"command": command, "actor_ref": cfg.owner_principal},
+        )
+        runtime.store.append_event(instruction_event)
+        metadata = work.metadata if isinstance(work.metadata, dict) else {}
+        raw_labels = metadata.get("verification_labels", {})
+        labels = (
+            {str(k): str(v) for k, v in raw_labels.items()}
+            if isinstance(raw_labels, dict)
+            else {}
+        )
+        repo = str(metadata.get("repo", "")) or None
+        project = str(metadata.get("project", "")) or None
+        result = await run_alert_repair(
+            title=work.title,
+            description=work.description,
+            repo=repo,
+            project=project,
+            verification_labels=labels,
+            human_instruction=command,
+            parent_controller_id=controller_id,
+            work_id=work.id,
+        )
+        if result.status == ControllerStatus.WAITING.value:
+            await notify(
+                result.work_id,
+                "收到明确命令后仍未解决，已再次停止。\n"
+                f"work={result.work_id}\ncontroller={result.controller_id}\n"
+                f"继续命令：/task {result.controller_id} <命令>",
+            )
+        return result
+
     @app.exception_handler(HTTPException)
     async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
@@ -313,11 +367,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     @app.get("/status")
     async def status_view(x_control_plane_key: str = Header(default="")) -> dict[str, Any]:
         require_key(x_control_plane_key)
-        waiting = [work for work in runtime.list_work() if work.status in {"waiting", "blocked"}]
         return {
             "status": "ok",
             "runtime": await runtime.health(),
-            "waiting_work": len(waiting),
             "diagnosis_model": cfg.diagnosis_model,
             "execution_model": cfg.execution_model,
         }
@@ -339,6 +391,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         x_control_plane_key: str = Header(default=""),
     ) -> TaskResponse:
         require_key(x_control_plane_key)
+        controller_reply = _split_controller_reply(body.prompt)
+        if controller_reply is not None:
+            controller_id, command = controller_reply
+            return await continue_waiting_controller(controller_id, command)
         return await run_manual_task(body)
 
     @app.post("/v1/controllers/{controller_id}/command", response_model=TaskResponse)
@@ -348,50 +404,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         x_control_plane_key: str = Header(default=""),
     ) -> TaskResponse:
         require_key(x_control_plane_key)
-        previous = controller.get(controller_id)
-        if previous is None:
-            raise HTTPException(status_code=404, detail="controller not found")
-        if previous.status is not ControllerStatus.WAITING:
-            raise HTTPException(status_code=409, detail="controller is not waiting for human input")
-        if not previous.subject_ref:
-            raise HTTPException(status_code=409, detail="controller has no work subject")
-        work = runtime.get_work(previous.subject_ref)
-        if work is None:
-            raise HTTPException(status_code=404, detail="work not found")
-        instruction_event = Event(
-            id=new_id("event"),
-            type="PersonalHumanInstructionObserved",
-            subject_ref=controller_id,
-            payload={"command": body.command, "actor_ref": cfg.owner_principal},
-        )
-        runtime.store.append_event(instruction_event)
-        metadata = work.metadata if isinstance(work.metadata, dict) else {}
-        raw_labels = metadata.get("verification_labels", {})
-        labels = (
-            {str(k): str(v) for k, v in raw_labels.items()}
-            if isinstance(raw_labels, dict)
-            else {}
-        )
-        repo = str(metadata.get("repo", "")) or None
-        project = str(metadata.get("project", "")) or None
-        result = await run_alert_repair(
-            title=work.title,
-            description=work.description,
-            repo=repo,
-            project=project,
-            verification_labels=labels,
-            human_instruction=body.command,
-            parent_controller_id=controller_id,
-            work_id=work.id,
-        )
-        if result.status == ControllerStatus.WAITING.value:
-            await notify(
-                result.work_id,
-                "收到明确命令后仍未解决，已再次停止。\n"
-                f"work={result.work_id}\ncontroller={result.controller_id}\n"
-                f"继续命令：/cp instruct {result.controller_id} <命令>",
-            )
-        return result
+        return await continue_waiting_controller(controller_id, body.command)
 
     @app.post("/v1/alerts/alertmanager", response_model=AlertIngestResponse)
     async def alertmanager(
@@ -460,7 +473,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     result.work_id,
                     "自动修复两次仍未解决，已停止并等待明确命令。\n"
                     f"alert={alertname}\nwork={result.work_id}\ncontroller={result.controller_id}\n"
-                    f"回复：/cp instruct {result.controller_id} <明确命令>",
+                    f"回复：/task {result.controller_id} <明确命令>",
                 )
         return AlertIngestResponse(
             accepted=accepted,
