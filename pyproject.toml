@@ -1,7 +1,7 @@
 [project]
 name = "control-plane"
-version = "0.3.0"
-description = "Unattended personal operations profile for Agent Kernel"
+version = "0.4.0"
+description = "Autonomous personal operations profile for Agent Kernel"
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
@@ -18,8 +18,8 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
-    "ruff>=0.9,<1",
-    "mypy>=1.10,<2",
+    "ruff>=0.8,<1",
+    "mypy>=1.13,<2",
 ]
 
 [project.scripts]
@@ -32,40 +32,22 @@ build-backend = "hatchling.build"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/control_plane"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.ruff]
+line-length = 100
 target-version = "py312"
-line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "S"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "E501"]
-"src/control_plane/app.py" = ["E501", "I001"]
-"src/control_plane/config.py" = ["E501"]
-"src/control_plane/codex_boundary.py" = ["E501", "S603", "S607"]
-"src/control_plane/personal_operations.py" = ["E501", "S603", "S607"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-pythonpath = ["src"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.12"
-check_untyped_defs = true
-warn_redundant_casts = true
-warn_unused_ignores = false
-no_implicit_optional = true
-show_error_codes = true
+strict = true
+packages = ["control_plane"]
 
 [[tool.mypy.overrides]]
-module = "portable_runtime.*"
+module = ["portable_runtime.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "control_plane.app"
-disable_error_code = ["union-attr"]

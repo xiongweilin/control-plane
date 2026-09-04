@@ -1,3 +1,3 @@
-"""Unattended personal operations deployment/profile for Agent Kernel."""
+"""Autonomous personal operations deployment/profile for Agent Kernel."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
