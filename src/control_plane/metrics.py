@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from time import time
 from typing import Any
 
-from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 _REPAIR_KIND = "personal-incident-repair"
 _REPAIR_STATUS_LABELS = ("active", "waiting", "blocked", "closed", "failed", "interrupted")
@@ -226,7 +226,7 @@ class ControlPlaneMetricsCollector:
 
         retry_failures, retry_errors = self._retry_failures()
         errors += retry_errors
-        retry_metric = GaugeMetricFamily(
+        retry_metric = CounterMetricFamily(
             "control_plane_recovery_retry_failed_total",
             "Observed failed idempotent recovery applications",
         )
