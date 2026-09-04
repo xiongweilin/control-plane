@@ -16,7 +16,7 @@ from portable_runtime.interactions.feishu.provider import (
     FeishuNotificationProvider,
 )
 from portable_runtime.providers.codex.provider import CodexProvider
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
 from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
@@ -26,6 +26,7 @@ from .config import ControlPlaneConfig
 from .escalation_policy import preserve_blocked_wait
 from .game_mode import read_game_mode_state
 from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
+from .metrics import ControlPlaneMetricsCollector
 from .monitoring import PersonalMonitoringProvider
 from .personal_operations import PersonalOperationsProvider
 
@@ -168,6 +169,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         controller,
         owner_principal=cfg.owner_principal,
     )
+    profile_metrics = ControlPlaneMetricsCollector(runtime, bridge.responsibilities)
+    profile_registry = CollectorRegistry(auto_describe=False)
+    profile_registry.register(profile_metrics)
 
     app = FastAPI(
         title="Personal Control Plane",
@@ -180,6 +184,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     app.state.controller = controller
     app.state.kernel_bridge = bridge
     app.state.config = cfg
+    app.state.profile_metrics = profile_metrics
 
     def require_key(candidate: str) -> None:
         if not candidate or not secrets.compare_digest(candidate, cfg.api_key):
@@ -365,12 +370,35 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "kernel": await runtime.health(),
         }
         if body["status"] == "ok":
+            profile_metrics.mark_ready()
             return body
         return JSONResponse(status_code=503, content=body)
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Response:
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        from portable_runtime.core import metrics as runtime_metrics
+
+        # Keep Agent Kernel's custom registry visible through the profile
+        # endpoint and refresh its current-state gauges on every scrape.
+        works = runtime.store.list_work()
+        work_counts: dict[str, int] = {}
+        for work in works:
+            work_counts[work.status] = work_counts.get(work.status, 0) + 1
+        runtime_metrics.snapshot_work_status(work_counts)
+        runs = runtime.store.list_runs()
+        run_counts: dict[str, int] = {}
+        for run in runs:
+            run_counts[run.status] = run_counts.get(run.status, 0) + 1
+        runtime_metrics.snapshot_run_status(run_counts)
+
+        content = b"".join(
+            (
+                generate_latest(),
+                generate_latest(profile_registry),
+                runtime_metrics.generate_metrics_content()[0],
+            )
+        )
+        return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/status")
     async def status_view(x_control_plane_key: str = Header(default="")) -> dict[str, Any]:
