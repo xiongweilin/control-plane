@@ -23,6 +23,7 @@ from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
 from .audit import inspect_session_fields
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
+from .escalation_policy import preserve_blocked_wait
 from .game_mode import read_game_mode_state
 from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
 from .monitoring import PersonalMonitoringProvider
@@ -212,6 +213,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             # Notification delivery never changes Work truth or repair closure.
             return
 
+    async def settle_personal_state(state: Any) -> Any:
+        return await preserve_blocked_wait(controller, bridge, state)
+
     async def run_manual_task(body: TaskRequest) -> TaskResponse:
         repo, project = resolve_repo(body.repo, body.project)
         state, _assessment_ref = bridge.begin(
@@ -230,6 +234,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             repo=repo,
         )
         final_state = await drive_policy(controller, state.id, policy)
+        final_state = await settle_personal_state(final_state)
         return _task_response(bridge, final_state)
 
     async def run_alert_repair(
@@ -260,6 +265,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             max_attempts=2,
         )
         final_state = await drive_policy(controller, state.id, policy)
+        final_state = await settle_personal_state(final_state)
         return _task_response(bridge, final_state)
 
     async def continue_waiting_controller(controller_id: str, command: str) -> TaskResponse:
@@ -308,6 +314,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             )
 
         final_state = await drive_policy(controller, previous.id, policy)
+        final_state = await settle_personal_state(final_state)
         result = _task_response(bridge, final_state)
         if (
             context.kind == "personal-incident-repair"
