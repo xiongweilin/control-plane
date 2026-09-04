@@ -54,7 +54,7 @@ class ControlPlaneConfig:
     artifact_root: Path = PROJECT_ROOT / "data" / "artifacts"
     agent_session_dir: Path = PROJECT_ROOT / "data" / "agent-sessions"
 
-    diagnosis_model: str = "codex/gpt-5.6-sol"
+    diagnosis_model: str = "codex/gpt-5.6-luna"
     execution_model: str = "codex/gpt-5.6-luna"
     codex_cli: Path = field(default_factory=_resolve_codex_cli)
     gateway_base_url: str = "http://127.0.0.1:4101/v1"
