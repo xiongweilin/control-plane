@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from portable_runtime.controller import (
@@ -108,7 +109,7 @@ class AutonomousRepairPolicy:
     def policy_ref(self) -> str:
         return "control-plane/autonomous-repair-v2"
 
-    def _session_cutoff(self, controller_id: str) -> object | None:
+    def _session_cutoff(self, controller_id: str) -> datetime | None:
         if not self.human_instruction:
             return None
         event = self.bridge.latest_human_instruction_event(controller_id)
@@ -188,7 +189,9 @@ class AutonomousRepairPolicy:
             subject_ref=state.subject_ref,
             problem_ref=assessment_ref,
             basis_refs=basis_refs,
-            selected_direction="execute the smallest bounded repair selected by the current diagnosis",
+            selected_direction=(
+                "execute the smallest bounded repair selected by the current diagnosis"
+            ),
             rationale=_message(diagnosis_result),
             acceptance_criteria=["the triggering alert is no longer active"],
             verification_plan=["query monitor.alert.active after the materialized Work executes"],
@@ -254,8 +257,14 @@ class AutonomousRepairPolicy:
         if not events:
             raise ValueError("repair revision requires durable Work result observations")
 
-        execution = next((event for event in events if event.payload.get("stage") == "execution"), None)
-        apply_event = next((event for event in events if event.payload.get("stage") == "apply"), None)
+        execution = next(
+            (event for event in events if event.payload.get("stage") == "execution"),
+            None,
+        )
+        apply_event = next(
+            (event for event in events if event.payload.get("stage") == "apply"),
+            None,
+        )
         verification = next(
             (event for event in events if event.payload.get("stage") == "verification"),
             None,
@@ -270,9 +279,7 @@ class AutonomousRepairPolicy:
             None,
         )
 
-        outcome_refs = [
-            event.id for event in (execution, apply_event) if event is not None
-        ]
+        outcome_refs = [event.id for event in (execution, apply_event) if event is not None]
         verification_refs = [verification.id] if verification is not None else []
         reason_refs = [event.id for event in events]
 
@@ -341,8 +348,12 @@ class AutonomousRepairPolicy:
         if work is None or not state.active_closure_ref:
             raise ValueError("human continuation requires materialized Work and active closure")
         events = self.bridge.result_events(state.id, work_id=work.id)
-        outcome_refs = [event.id for event in events if event.payload.get("stage") != "verification"]
-        verification_refs = [event.id for event in events if event.payload.get("stage") == "verification"]
+        outcome_refs = [
+            event.id for event in events if event.payload.get("stage") != "verification"
+        ]
+        verification_refs = [
+            event.id for event in events if event.payload.get("stage") == "verification"
+        ]
         if not outcome_refs and not verification_refs:
             raise ValueError("human continuation has no prior reality observation to revise")
         instruction_event = self.bridge.latest_human_instruction_event(state.id)
