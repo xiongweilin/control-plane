@@ -52,9 +52,13 @@ class BlockedEscalationPolicy:
             subject_ref=state.subject_ref,
             problem_ref=assessment_ref,
             basis_refs=basis_refs,
-            selected_direction="preserve the blocked personal task durably and wait for owner direction",
+            selected_direction=(
+                "preserve the blocked personal task durably and wait for owner direction"
+            ),
             rationale=str((self.failed_result or {}).get("message", "cognitive step failed")),
-            acceptance_criteria=["the blocked task has a durable Work identity for owner follow-up"],
+            acceptance_criteria=[
+                "the blocked task has a durable Work identity for owner follow-up"
+            ],
             verification_plan=["bind the observed cognitive failure to the materialized Work"],
             stop_conditions=["do not execute repair or task effects from a failed diagnosis"],
             escalation_conditions=["wait for an explicit owner command"],
@@ -97,7 +101,9 @@ class BlockedEscalationPolicy:
             raise ValueError("blocked escalation revision requires materialized Work and closure")
         events = self.bridge.result_events(state.id, work_id=work.id)
         if not events:
-            raise ValueError("blocked escalation revision requires a Work-bound failure observation")
+            raise ValueError(
+                "blocked escalation revision requires a Work-bound failure observation"
+            )
         event = events[-1]
         revision = RevisionAssessment(
             controller_ref=state.id,
@@ -111,7 +117,10 @@ class BlockedEscalationPolicy:
             failure_class="diagnosis-failure",
             revision_scope=RevisionScope.DECISION,
             recommended_disposition=RevisionDisposition.WAIT,
-            reason="cognition failed before safe effect execution; preserve Work and wait for owner direction",
+            reason=(
+                "cognition failed before safe effect execution; preserve Work and wait for "
+                "owner direction"
+            ),
             carry_forward_refs=[self.bridge.assessment_ref(state)],
         )
         return ControllerDecision(
