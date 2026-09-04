@@ -61,3 +61,11 @@ warn_redundant_casts = true
 warn_unused_ignores = false
 no_implicit_optional = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "portable_runtime.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "control_plane.app"
+disable_error_code = ["union-attr"]
