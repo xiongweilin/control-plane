@@ -50,7 +50,7 @@ PC / Prometheus / Alertmanager
              follow-up controller
 ```
 
-Autonomous repair is deliberately bounded to two attempts. Both diagnosis and execution use `codex/gpt-5.6-luna`; they remain distinct controller phases with different instructions and capabilities. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu `/task <controller_id> <command>` starts a follow-up controller on the same Agent Kernel Work.
+Autonomous repair is deliberately bounded to two attempts. Both diagnosis and execution use the official model name `gpt-5.6-luna` through the local LiteLLM route; they remain distinct controller phases with different instructions and capabilities. If the triggering Prometheus alert is still active after the second attempt, the controller stops and notifies the owner in Feishu. A later explicit Feishu `/task <controller_id> <command>` starts a follow-up controller on the same Agent Kernel Work.
 
 ## Boundary
 
@@ -116,9 +116,15 @@ Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task`
 
 ```toml
 [model]
-diagnosis_model = "codex/gpt-5.6-luna"
-execution_model = "codex/gpt-5.6-luna"
+diagnosis_model = "gpt-5.6-luna"
+execution_model = "gpt-5.6-luna"
+gateway_base_url = "http://127.0.0.1:4101/v1"
 ```
+
+The Codex CLI receives the same official model through `http://127.0.0.1:4100/v1`; the
+4100 proxy forwards to LiteLLM on 4101. The model list is generated from the official
+Codex cache by `D:\agent\litellm-gateway\scripts\sync-agent-gpt-models.ps1` without
+creating a filtered Codex catalog.
 
 Both phases are invoked through the same Agent Kernel `CodexProvider`; the phase distinction is carried by controller policy, instructions and capability parameters rather than by model tier.
 

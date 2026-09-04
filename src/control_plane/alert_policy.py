@@ -379,7 +379,8 @@ async def drive_policy(
     for _ in range(max_steps):
         if state.status in {ControllerStatus.CLOSED, ControllerStatus.WAITING}:
             return state
-        state = await controller.step(controller_id, policy)
+        decision = await policy.select(state)
+        state = await controller.apply(decision)
     raise RuntimeError("personal controller policy exceeded its bounded step budget")
 
 
