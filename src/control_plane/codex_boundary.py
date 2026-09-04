@@ -210,7 +210,7 @@ class CodexExecutionBoundary:
                     if source not in self._managed_auto_repos:
                         if not self._working_tree_clean(source):
                             raise RuntimeError(
-                                "standing auto-repair repository is not clean; human review required"
+                                "auto-repair repo is not clean; human review required"
                             )
                         self._managed_auto_repos.add(source)
                 else:
