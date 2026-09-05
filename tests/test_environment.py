@@ -16,6 +16,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
         cloud_protected_root="/srv/protected",
         cloud_tailscale_profile="/var/lib/tailscale/tailscaled.state",
         docker_build_cache_max_bytes=1024,
+        automatic_handling_enabled=True,
     )
 
 
@@ -68,6 +69,34 @@ def test_environment_evaluation_covers_fail_safe_findings(tmp_path: Path) -> Non
         item.name == "third_party_protection" and item.status == "unknown"
         for item in snapshot.observations
     )
+
+
+def test_environment_evaluation_covers_standing_control_plane_responsibilities(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    snapshot = evaluate_environment(
+        config,
+        {
+            "recovery_ok": False,
+            "recovery_missing_paths": ["D:/agent/docker备份"],
+            "synchronization_ok": False,
+            "synchronization_failures": ["D:/agent/ratio"],
+            "synchronization_checked": 2,
+            "known_garbage_count": 1,
+            "known_garbage_paths": ["D:/agent/portable-runtime-worktrees"],
+        },
+        provider_health={"personal-operations": {"available": True}},
+    )
+    observations = {item.name: item for item in snapshot.observations}
+
+    assert observations["recoverability"].status == "problem"
+    assert observations["recoverability"].severity == "critical"
+    assert observations["synchronization"].status == "problem"
+    assert observations["synchronization"].automation == "fail-safe"
+    assert observations["known_garbage"].status == "problem"
+    assert observations["known_garbage"].automation == "automatic"
+    assert observations["automatic_handling"].status == "ok"
 
 
 @pytest.mark.asyncio

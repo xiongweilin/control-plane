@@ -104,6 +104,9 @@ class AutonomousRepairPolicy:
     verification_labels: dict[str, str] = field(default_factory=dict)
     human_instruction: str | None = None
     max_attempts: int = 2
+    maintenance_capability: str | None = None
+    maintenance_parameters: dict[str, Any] = field(default_factory=dict)
+    fail_safe: bool = False
 
     @property
     def policy_ref(self) -> str:
@@ -163,6 +166,8 @@ class AutonomousRepairPolicy:
         values = ["shell.exec" if self.repo else "reason.generate"]
         if self.project:
             values.append("docker.compose.up")
+        if self.maintenance_capability:
+            values.append(self.maintenance_capability)
         values.append("monitor.alert.active")
         return values
 
@@ -170,6 +175,8 @@ class AutonomousRepairPolicy:
         if self.project:
             return EffectClass.EXTERNAL_EFFECT
         if self.repo:
+            return EffectClass.INTERNAL_REVERSIBLE
+        if self.maintenance_capability:
             return EffectClass.INTERNAL_REVERSIBLE
         return EffectClass.READ_ONLY
 
@@ -400,11 +407,19 @@ class AutonomousRepairPolicy:
         diagnosis = diagnosis_decisions[-1]
         diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
         instruction = (
-            "Execute the diagnosed repair now. Use the current repository only. Make the "
-            "smallest necessary local changes and run relevant checks/tests. Do not push, "
-            "merge, access remote credentials, or run Docker directly; remote/deployment "
-            "effects belong to Agent Kernel providers. Finish with a concise execution "
-            "summary.\n\nDiagnosis and plan:\n" + _message(diagnosis_result)
+            (
+                "Re-evaluate this fail-safe alert and provide a bounded human action plan. "
+                "Do not modify files, call effect capabilities, access credentials, or claim "
+                "recovery.\n\n"
+                if self.fail_safe
+                else "Execute the diagnosed repair now. Use the current repository only. Make the "
+                "smallest necessary local changes and run relevant checks/tests. Do not push, "
+                "merge, access remote credentials, or run Docker directly; remote/deployment "
+                "effects belong to Agent Kernel providers. Finish with a concise execution "
+                "summary.\n\n"
+            )
+            + "Diagnosis and plan:\n"
+            + _message(diagnosis_result)
         )
         parameters: dict[str, Any] = {"model": self.execution_model, "phase": "execution"}
         if self.repo:
@@ -428,6 +443,30 @@ class AutonomousRepairPolicy:
         )
         if result.status != "succeeded":
             return
+
+        if self.maintenance_capability:
+            maintenance_parameters = {
+                **self.maintenance_parameters,
+                "phase": "apply",
+            }
+            applied = await runtime.run_capability(
+                work.id,
+                self.maintenance_capability,
+                instruction="Apply the already approved bounded maintenance operation.",
+                run_id=run.id,
+                actor_ref=self.bridge.owner_principal,
+                **maintenance_parameters,
+            )
+            self.bridge.record_capability_result(
+                controller_id=state.id,
+                work_id=work.id,
+                run_id=run.id,
+                stage="apply",
+                capability=self.maintenance_capability,
+                result=applied,
+            )
+            if applied.status != "succeeded":
+                return
 
         if self.project:
             applied = await runtime.run_capability(

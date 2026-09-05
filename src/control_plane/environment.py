@@ -34,6 +34,10 @@ from portable_runtime.core.capabilities import (
 from .config import ControlPlaneConfig
 
 CHECK_NAMES = (
+    "recoverability",
+    "synchronization",
+    "known_garbage",
+    "automatic_handling",
     "codex_primary",
     "windows_defender",
     "third_party_protection",
@@ -57,6 +61,9 @@ FAIL_SAFE_ALERT_NAMES = frozenset(
         "ControlPlaneCodexLegacyPath",
         "ControlPlaneReadinessDegraded",
         "ControlPlaneReadyProviderMismatch",
+        "ControlPlaneRecoverabilityDegraded",
+        "ControlPlaneSynchronizationDegraded",
+        "ControlPlaneAutomaticHandlingUnavailable",
         "WinDefendStopped",
         "ThirdPartyProtectionUnknown",
         "DittoExposed",
@@ -159,17 +166,167 @@ def _problem(
     manual_action: str,
     *,
     severity: str = "warning",
+    automation: str = "fail-safe",
     metadata: Mapping[str, Any] | None = None,
 ) -> CheckObservation:
     return CheckObservation(
         name=name,
         status="problem",
         severity=severity,
-        automation="fail-safe",
+        automation=automation,
         detail=detail,
         manual_action=manual_action,
         metadata={"configured": True, **dict(metadata or {})},
     )
+
+
+def _lifecycle_observations(
+    config: ControlPlaneConfig,
+    payload: Mapping[str, Any],
+    *,
+    provider_health: Mapping[str, Any] | None,
+) -> list[CheckObservation]:
+    """Evaluate the four standing responsibilities of this profile.
+
+    Recovery and synchronization are evidence gates and therefore fail-safe.
+    Only the exact configured known-garbage set is eligible for the reversible
+    automatic handler; the inspector never performs that handler itself.
+    """
+
+    observations: list[CheckObservation] = []
+
+    recovery_value = payload.get("recovery_ok")
+    if recovery_value is True:
+        observations.append(
+            _ok(
+                "recoverability",
+                "recovery sources are present and readable",
+                metadata={"path_count": len(config.recovery_paths)},
+            )
+        )
+    elif recovery_value is False:
+        missing_raw = payload.get("recovery_missing_paths")
+        missing = (
+            [str(item) for item in missing_raw if item]
+            if isinstance(missing_raw, list)
+            else []
+        )
+        observations.append(
+            _problem(
+                "recoverability",
+                f"recovery source missing or unreadable: {len(missing)}",
+                "先恢复 ratio 文档源与 Docker 备份可读性，再执行任何环境变更；不得把缺少备份当作可恢复。",
+                severity="critical",
+                metadata={"missing_count": len(missing), "missing_paths": missing},
+            )
+        )
+    else:
+        observations.append(
+            _unknown("recoverability", "恢复源未能核验", configured=bool(config.recovery_paths))
+        )
+
+    sync_value = payload.get("synchronization_ok")
+    if sync_value is True:
+        observations.append(
+            _ok(
+                "synchronization",
+                "configured repositories and chezmoi source are synchronized",
+                metadata={
+                    "checked_count": int(payload.get("synchronization_checked", 0) or 0)
+                },
+            )
+        )
+    elif sync_value is False:
+        failures_raw = payload.get("synchronization_failures")
+        failures = (
+            [str(item) for item in failures_raw if item]
+            if isinstance(failures_raw, list)
+            else []
+        )
+        observations.append(
+            _problem(
+                "synchronization",
+                f"synchronization drift detected: {len(failures)}",
+                "保留本地与远端证据，按 ratio 清单逐仓库复核；只允许在确认无未提交变更后执行 fast-forward，同步失败不得自动 push 或覆盖本地内容。",
+                severity="critical",
+                metadata={
+                    "failure_count": len(failures),
+                    "failures": failures,
+                    "checked_count": int(payload.get("synchronization_checked", 0) or 0),
+                },
+            )
+        )
+    else:
+        observations.append(
+            _unknown(
+                "synchronization",
+                "仓库/chezmoi 同步状态未能核验",
+                configured=bool(config.synchronization_paths),
+            )
+        )
+
+    garbage_value = payload.get("known_garbage_count")
+    if isinstance(garbage_value, (int, float)):
+        paths_raw = payload.get("known_garbage_paths")
+        paths = (
+            [str(item) for item in paths_raw if item]
+            if isinstance(paths_raw, list)
+            else []
+        )
+        if int(garbage_value) > 0:
+            observations.append(
+                _problem(
+                    "known_garbage",
+                    f"known generated garbage paths present: {int(garbage_value)}",
+                    "control-plane 仅可将配置中的精确路径移入可恢复隔离区；其他缓存、容器、卷、镜像和历史经验必须人工确认，不得扩大清理范围。",
+                    automation="automatic",
+                    metadata={"count": int(garbage_value), "paths": paths},
+                )
+            )
+        else:
+            observations.append(
+                _ok("known_garbage", "no configured known-garbage path is present")
+            )
+    else:
+        observations.append(
+            _unknown(
+                "known_garbage",
+                "已知垃圾路径未能核验",
+                configured=bool(config.known_garbage_paths),
+            )
+        )
+
+    if not config.automatic_handling_enabled:
+        observations.append(
+            _problem(
+                "automatic_handling",
+                "automatic handling is disabled by configuration",
+                "恢复 control-plane 自动处理开关并验证 allowlist；在自动处理不可用期间，所有异常必须进入 fail-safe 等待人工指令。",
+                severity="critical",
+            )
+        )
+    else:
+        operations = dict(provider_health or {}).get("personal-operations")
+        available = operations.get("available") if isinstance(operations, dict) else None
+        if available is True:
+            observations.append(
+                _ok("automatic_handling", "personal operations handler is available")
+            )
+        elif available is False:
+            observations.append(
+                _problem(
+                    "automatic_handling",
+                    "personal operations handler is unavailable",
+                    "自动处理能力不可用时只保留告警与人工 Work，不得绕过 Agent Kernel 直接执行 effect。",
+                    severity="critical",
+                )
+            )
+        else:
+            observations.append(
+                _unknown("automatic_handling", "自动处理 provider 健康状态未能核验")
+            )
+
+    return observations
 
 
 def _parse_size(value: Any) -> int:
@@ -515,6 +672,11 @@ def evaluate_environment(
         else:
             observations.append(_unknown("cloud_cve", "CVE 状态未能核验"))
 
+    observations = _lifecycle_observations(
+        config,
+        payload,
+        provider_health=provider_health,
+    ) + observations
     return EnvironmentSnapshot(checked_at=time.time(), observations=tuple(observations))
 
 
@@ -644,7 +806,90 @@ class EnvironmentInspectionProvider:
             payload.update(self._run_windows_probe())
         if self.config.cloud_ssh_target:
             payload["cloud"] = self._run_cloud_probe()
+        payload.update(self._run_lifecycle_probe())
         return payload
+
+    def _run_lifecycle_probe(self) -> Mapping[str, Any]:
+        """Probe only the configured recovery, sync, and garbage boundaries.
+
+        Git and chezmoi output is intentionally discarded.  The probe records
+        booleans and bounded subject names, never command output or credentials.
+        """
+
+        missing_recovery: list[str] = []
+        for raw_path in self.config.recovery_paths:
+            path = Path(raw_path)
+            if not path.exists() or (path.is_dir() and not any(path.iterdir())):
+                missing_recovery.append(raw_path)
+
+        sync_failures: list[str] = []
+        checked = 0
+        git = shutil.which("git.exe") or shutil.which("git")
+        for raw_path in self.config.synchronization_paths:
+            path = Path(raw_path)
+            if not path.is_dir() or not (path / ".git").exists() or not git:
+                sync_failures.append(raw_path)
+                continue
+            checked += 1
+            status = subprocess.run(
+                [git, "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
+                capture_output=True,
+                timeout=min(self.config.environment_probe_timeout_seconds, 10),
+                check=False,
+            )
+            if status.returncode != 0 or status.stdout.strip():
+                sync_failures.append(raw_path)
+                continue
+            head = subprocess.run(
+                [git, "-C", str(path), "rev-parse", "HEAD"],
+                capture_output=True,
+                timeout=min(self.config.environment_probe_timeout_seconds, 10),
+                check=False,
+            )
+            remote = subprocess.run(
+                [git, "-C", str(path), "ls-remote", "--heads", "origin", "main"],
+                capture_output=True,
+                timeout=min(self.config.environment_probe_timeout_seconds, 10),
+                check=False,
+            )
+            head_text = head.stdout.decode("utf-8", errors="replace").strip()
+            remote_text = remote.stdout.decode("utf-8", errors="replace").strip()
+            remote_sha = remote_text.split()[0] if remote_text else ""
+            if (
+                head.returncode != 0
+                or remote.returncode != 0
+                or not head_text
+                or not remote_sha
+                or head_text != remote_sha
+            ):
+                sync_failures.append(raw_path)
+
+        chezmoi = shutil.which("chezmoi.exe") or shutil.which("chezmoi")
+        if chezmoi:
+            verify = subprocess.run(
+                [chezmoi, "verify", "--skip-secrets", "--no-tty"],
+                capture_output=True,
+                timeout=min(self.config.environment_probe_timeout_seconds, 10),
+                check=False,
+            )
+            if verify.returncode != 0:
+                sync_failures.append("chezmoi-runtime")
+        else:
+            sync_failures.append("chezmoi-runtime")
+
+        known_garbage = [
+            raw_path for raw_path in self.config.known_garbage_paths if Path(raw_path).exists()
+        ]
+        return {
+            "recovery_ok": bool(self.config.recovery_paths) and not missing_recovery,
+            "recovery_missing_paths": missing_recovery,
+            "synchronization_ok": bool(self.config.synchronization_paths)
+            and not sync_failures,
+            "synchronization_failures": sync_failures,
+            "synchronization_checked": checked,
+            "known_garbage_count": len(known_garbage),
+            "known_garbage_paths": known_garbage,
+        }
 
     def _run_windows_probe(self) -> Mapping[str, Any]:
         roots = json.dumps(list(self.config.windows_scan_roots), ensure_ascii=True)

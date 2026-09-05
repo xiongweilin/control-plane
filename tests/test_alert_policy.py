@@ -229,6 +229,30 @@ async def test_alert_policy_closure_declares_execution_apply_and_verification() 
     assert runtime.list_work() == []
 
 
+async def test_alert_policy_can_declare_bounded_automatic_maintenance() -> None:
+    _runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
+    policy = AutonomousRepairPolicy(
+        controller=controller,
+        bridge=bridge,
+        prompt="known garbage path is present",
+        diagnosis_model=DIAGNOSIS_MODEL,
+        execution_model=EXECUTION_MODEL,
+        verification_labels={"alertname": "ControlPlaneGarbageDetected"},
+        maintenance_capability="maintenance.cleanup_known_garbage",
+    )
+
+    diagnosis = await policy.select(state)
+    _record_cognitive_result(controller, state.id, diagnosis, message="quarantine exact path")
+    closure = await policy.select(state)
+
+    assert closure.closure is not None
+    assert closure.closure.requested_capabilities == [
+        "reason.generate",
+        "maintenance.cleanup_known_garbage",
+        "monitor.alert.active",
+    ]
+
+
 def _capability_result(*, status: str, message: str):
     from portable_runtime.core.capabilities import CapabilityResult
 
