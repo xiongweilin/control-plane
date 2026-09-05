@@ -62,7 +62,7 @@ PC / Prometheus / Alertmanager / Feishu
 
 There is no controller-to-effect shortcut. A reasoner result is not Work. A diagnosis must first become a `CognitiveClosure`; the closure can only hand off to `WorkProposal`; a proposal must pass the Agent Kernel persistent-responsibility admission/commitment path before Work exists. Execution and personal effects then run against that materialized Work through `Runtime.run_capability`. Reality is returned to cognition as a `RevisionAssessment` before retry, reopen or close.
 
-Autonomous incident repair remains deliberately bounded to two attempts per autonomous pass. Diagnosis and execution still use the configured Luna model, but they now occupy different semantic planes: diagnosis is read-class cognition; execution belongs to materialized Work. If monitoring still reports the triggering alert after the second attempt, the controller waits and notifies the owner. An explicit `/task <controller_id> <command>` does not bypass the failed Work: it records owner direction, creates a new reality-grounded revision, enters `REOPEN_REQUIRED`, and then explicitly reopens cognition on the same controller history.
+Autonomous incident repair remains deliberately bounded to the configured attempt count (two by default) and per-repair timeout. Alertmanager ingress authenticates, persists a sanitized alert envelope, deduplicates by fingerprint and returns immediately; a bounded background dispatcher then performs diagnosis, materialized Work, effects and verification. The dispatcher is concurrency-limited and recovers unfinished queue entries from the Agent Kernel event store after restart. If monitoring still reports the triggering alert after the bounded pass, the controller waits and notifies the owner. An explicit `/task <controller_id> <command>` does not bypass the failed Work: it records owner direction, creates a new reality-grounded revision, enters `REOPEN_REQUIRED`, and then explicitly reopens cognition on the same controller history.
 
 ## Boundary
 
@@ -122,7 +122,7 @@ The external personal surface is preserved:
 - `GET /status` — concise personal runtime/model status for Feishu `/cp status`.
 - `GET /v1/runtime` — Agent Kernel runtime/work/contract view (API key).
 - `POST /v1/tasks` — explicit personal command/task. A prompt beginning with `<controller_id> ` remains an explicit continuation command for that waiting controller.
-- `POST /v1/alerts/alertmanager` — authenticated unattended incident ingress; two autonomous repair attempts maximum.
+- `POST /v1/alerts/alertmanager` — authenticated unattended incident ingress; durable, deduplicated, immediately acknowledged, bounded background repair.
 - `POST /v1/controllers/{controller_id}/command` — direct authenticated equivalent of the Feishu continuation form.
 - `GET /v1/game-mode` — current personal game-mode projection.
 - `GET /v1/sessions/inspect` — reports sensitive field names only, never values.
@@ -156,6 +156,11 @@ uv run control-plane
 Example configuration is `control_plane.toml.example`.
 
 Windows deployment scripts live only under `deployments/windows-personal-platform/`.
+
+The Windows deployment binds the service to `0.0.0.0:18083` for Docker Desktop's
+`host.docker.internal` path while keeping the local supervisor probe on loopback. The
+installer maintains the narrow `LocalSubnet` firewall rule and is safe to rerun after a
+configuration change.
 
 ## Verification
 

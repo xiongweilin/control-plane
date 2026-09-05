@@ -1,5 +1,5 @@
 [server]
-host = "127.0.0.1"
+host = "0.0.0.0"
 port = 18083
 
 [kernel]
@@ -17,6 +17,16 @@ disable_ssh_credentials = true
 worktree_root = "../.control-plane-codex-worktrees"
 session_dir = "data/agent-sessions"
 max_output_bytes = 200000
+
+[agent]
+gateway_timeout_seconds = 120
+max_agent_calls_per_repair = 8
+
+[policy]
+cooldown_seconds = 600
+max_attempts = 2
+per_repair_timeout_seconds = 900
+max_concurrent = 2
 
 [monitoring]
 prometheus_url = "http://127.0.0.1:19090"

@@ -63,6 +63,8 @@ class ControlPlaneConfig:
     codex_disable_ssh_credentials: bool = True
     codex_worktree_root: Path = PROJECT_ROOT.parent / ".control-plane-codex-worktrees"
     max_agent_output_bytes: int = 200_000
+    gateway_timeout_seconds: float = 120.0
+    max_agent_calls_per_repair: int = 8
 
     prometheus_url: str = "http://127.0.0.1:19090"
     alertmanager_url: str = ""
@@ -72,6 +74,10 @@ class ControlPlaneConfig:
         "PrometheusScrapeFailed",
         "ControlPlaneStaleReady",
     )
+    cooldown_seconds: int = 600
+    max_attempts: int = 2
+    per_repair_timeout_seconds: int = 900
+    max_concurrent: int = 2
 
     environment_enabled: bool = True
     environment_cache_seconds: int = 60
@@ -184,6 +190,7 @@ class ControlPlaneConfig:
         server = _section(data, "server")
         kernel = _section(data, "kernel")
         model = _section(data, "model")
+        agent = _section(data, "agent")
         monitoring = _section(data, "monitoring")
         policy = _section(data, "policy")
         environment = _section(data, "environment")
@@ -230,6 +237,12 @@ class ControlPlaneConfig:
             ),
             codex_worktree_root=Path(str(model.get("worktree_root", base.codex_worktree_root))),
             max_agent_output_bytes=int(model.get("max_output_bytes", base.max_agent_output_bytes)),
+            gateway_timeout_seconds=float(
+                agent.get("gateway_timeout_seconds", base.gateway_timeout_seconds)
+            ),
+            max_agent_calls_per_repair=int(
+                agent.get("max_agent_calls_per_repair", base.max_agent_calls_per_repair)
+            ),
             prometheus_url=str(
                 monitoring.get("prometheus_url", policy.get("prometheus_url", base.prometheus_url))
             ),
@@ -253,6 +266,12 @@ class ControlPlaneConfig:
                 str(v)
                 for v in monitoring.get("auto_repair_alertnames", base.auto_repair_alertnames)
             ),
+            cooldown_seconds=int(policy.get("cooldown_seconds", base.cooldown_seconds)),
+            max_attempts=int(policy.get("max_attempts", base.max_attempts)),
+            per_repair_timeout_seconds=int(
+                policy.get("per_repair_timeout_seconds", base.per_repair_timeout_seconds)
+            ),
+            max_concurrent=max(1, int(policy.get("max_concurrent", base.max_concurrent))),
             environment_enabled=_env_bool(
                 "CONTROL_PLANE_ENVIRONMENT_CHECKS",
                 bool(environment.get("enabled", base.environment_enabled)),

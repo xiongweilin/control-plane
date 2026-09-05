@@ -800,6 +800,36 @@ class EnvironmentInspectionProvider:
     async def cancel(self, request_id: str) -> None:
         del request_id
 
+    def _run_bounded_command(
+        self,
+        args: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Run a probe command and terminate its process tree on timeout."""
+
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=max(0.1, timeout))
+        except subprocess.TimeoutExpired as exc:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+            else:
+                process.kill()
+            stdout, stderr = process.communicate()
+            del stdout, stderr
+            raise TimeoutError(f"probe command timed out after {timeout:.1f}s") from exc
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
     def _run_local_probe(self) -> Mapping[str, Any]:
         payload: dict[str, Any] = {}
         if os.name == "nt":
@@ -831,26 +861,20 @@ class EnvironmentInspectionProvider:
                 sync_failures.append(raw_path)
                 continue
             checked += 1
-            status = subprocess.run(
+            status = self._run_bounded_command(
                 [git, "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
-                capture_output=True,
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
-                check=False,
             )
             if status.returncode != 0 or status.stdout.strip():
                 sync_failures.append(raw_path)
                 continue
-            head = subprocess.run(
+            head = self._run_bounded_command(
                 [git, "-C", str(path), "rev-parse", "HEAD"],
-                capture_output=True,
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
-                check=False,
             )
-            remote = subprocess.run(
+            remote = self._run_bounded_command(
                 [git, "-C", str(path), "ls-remote", "--heads", "origin", "main"],
-                capture_output=True,
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
-                check=False,
             )
             head_text = head.stdout.decode("utf-8", errors="replace").strip()
             remote_text = remote.stdout.decode("utf-8", errors="replace").strip()
@@ -866,11 +890,9 @@ class EnvironmentInspectionProvider:
 
         chezmoi = shutil.which("chezmoi.exe") or shutil.which("chezmoi")
         if chezmoi:
-            verify = subprocess.run(
+            verify = self._run_bounded_command(
                 [chezmoi, "verify", "--skip-secrets", "--no-tty"],
-                capture_output=True,
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
-                check=False,
             )
             if verify.returncode != 0:
                 sync_failures.append("chezmoi-runtime")
@@ -926,11 +948,9 @@ if ($dockerAvailable) {{
 }} | ConvertTo-Json -Depth 5 -Compress
 """
         executable = shutil.which("powershell.exe") or shutil.which("pwsh") or "powershell.exe"
-        result = subprocess.run(
+        result = self._run_bounded_command(
             [executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-            capture_output=True,
             timeout=self.config.environment_probe_timeout_seconds,
-            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).decode("utf-8", errors="replace")[:500])
@@ -964,11 +984,9 @@ if ($dockerAvailable) {{
             args.extend(["-i", self.config.cloud_ssh_identity_file])
         args.extend([self.config.cloud_ssh_target, remote])
         executable = shutil.which("ssh.exe") or shutil.which("ssh") or "ssh"
-        result = subprocess.run(
+        result = self._run_bounded_command(
             [executable, *args],
-            capture_output=True,
             timeout=self.config.cloud_probe_timeout_seconds,
-            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).decode("utf-8", errors="replace")[:500])
