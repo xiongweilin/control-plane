@@ -23,7 +23,8 @@ from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
 from .audit import inspect_session_fields
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
-from .escalation_policy import preserve_blocked_wait
+from .environment import FAIL_SAFE_ALERT_NAMES, EnvironmentInspectionProvider
+from .escalation_policy import create_fail_safe_alert_work, preserve_blocked_wait
 from .game_mode import read_game_mode_state
 from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
 from .metrics import ControlPlaneMetricsCollector
@@ -161,6 +162,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         runtime.registry.register(FeishuNotificationProvider())
     runtime.registry.register(PersonalMonitoringProvider(cfg))
     runtime.registry.register(PersonalOperationsProvider(cfg))
+    environment_provider = EnvironmentInspectionProvider(cfg)
+    runtime.registry.register(environment_provider)
     _register_profile_effect_rules(runtime)
 
     controller = CognitiveController(runtime)
@@ -185,6 +188,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     app.state.kernel_bridge = bridge
     app.state.config = cfg
     app.state.profile_metrics = profile_metrics
+    app.state.environment_provider = environment_provider
 
     def require_key(candidate: str) -> None:
         if not candidate or not secrets.compare_digest(candidate, cfg.api_key):
@@ -364,19 +368,50 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     }
                 except httpx.HTTPError as exc:
                     checks[name] = {"ok": False, "detail": str(exc)}
-        body = {
-            "status": "ok" if all(value["ok"] for value in checks.values()) else "degraded",
-            "checks": checks,
-            "kernel": await runtime.health(),
+        kernel = await runtime.health()
+        provider_health = {
+            str(item.get("provider_id")): item
+            for item in kernel.get("providers", [])
+            if isinstance(item, dict) and item.get("provider_id")
         }
+        environment_provider.set_provider_health(provider_health)
+        unavailable_providers = [
+            str(provider.get("provider_id", "unknown"))
+            for provider in kernel.get("providers", [])
+            if isinstance(provider, dict) and provider.get("available") is False
+        ]
+        ready_ok = all(value["ok"] for value in checks.values()) and not unavailable_providers
+        profile_metrics.record_readiness(ready_ok, kernel)
+        body = {
+            "status": (
+                "ok"
+                if ready_ok
+                else "degraded"
+            ),
+            "checks": checks,
+            "kernel": kernel,
+        }
+        if unavailable_providers:
+            body["unavailable_providers"] = unavailable_providers
         if body["status"] == "ok":
-            profile_metrics.mark_ready()
             return body
         return JSONResponse(status_code=503, content=body)
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Response:
         from portable_runtime.core import metrics as runtime_metrics
+
+        kernel = await runtime.health()
+        environment_provider.set_provider_health(
+            {
+                str(item.get("provider_id")): item
+                for item in kernel.get("providers", [])
+                if isinstance(item, dict) and item.get("provider_id")
+            }
+        )
+        profile_metrics.record_current_provider_health(kernel)
+        if cfg.environment_enabled:
+            profile_metrics.set_environment_snapshot(await environment_provider.refresh())
 
         # Keep Agent Kernel's custom registry visible through the profile
         # endpoint and refresh its current-state gauges on every scrape.
@@ -496,22 +531,44 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 if str(labels.get(key, ""))
             }
             description = json.dumps(raw, ensure_ascii=False, default=str)
-            result = await run_alert_repair(
-                title=f"Alert: {alertname}",
-                description=description,
-                repo=repo,
-                project=project,
-                verification_labels=verification_labels,
-            )
+            if alertname in FAIL_SAFE_ALERT_NAMES or alertname not in cfg.auto_repair_alertnames:
+                safe_state = await create_fail_safe_alert_work(
+                    controller,
+                    bridge,
+                    title=f"Alert (fail-safe): {alertname}",
+                    description=(
+                        "This alert is fail-safe only and must not trigger automatic effects.\n"
+                        f"{description}"
+                    ),
+                    verification_labels=verification_labels,
+                )
+                result = _task_response(bridge, safe_state)
+            else:
+                result = await run_alert_repair(
+                    title=f"Alert: {alertname}",
+                    description=description,
+                    repo=repo,
+                    project=project,
+                    verification_labels=verification_labels,
+                )
             controllers.append(result.controller_id)
             if result.status == ControllerStatus.CLOSED.value:
                 repaired += 1
             else:
                 waiting += 1
+                if (
+                    alertname in FAIL_SAFE_ALERT_NAMES
+                    or alertname not in cfg.auto_repair_alertnames
+                ):
+                    message = (
+                        "环境告警已按 fail-safe 处理, 未执行任何修复 effect, 等待人工升级。\n"
+                    )
+                else:
+                    message = "自动修复两次仍未解决, 已停止并等待明确命令。\n"
                 await notify(
                     result.work_id,
-                    "自动修复两次仍未解决, 已停止并等待明确命令.\n"
-                    f"alert={alertname}\nwork={result.work_id}\n"
+                    message
+                    + f"alert={alertname}\nwork={result.work_id}\n"
                     f"controller={result.controller_id}\n"
                     f"回复: /task {result.controller_id} <明确命令>",
                 )

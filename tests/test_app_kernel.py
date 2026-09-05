@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import httpx
+import pytest
 from portable_runtime.responsibility import ResponsibilityKernel
 
 from control_plane.app import _split_controller_reply, create_app
@@ -32,6 +34,7 @@ def test_app_is_thin_agent_kernel_profile(tmp_path: Path) -> None:
     assert "feishu-human" in provider_ids
     assert "personal-monitoring" in provider_ids
     assert "personal-operations" in provider_ids
+    assert "environment-inspection" in provider_ids
     assert app.state.controller.runtime is runtime
     assert callable(app.state.controller.step)
     assert isinstance(app.state.kernel_bridge, PersonalKernelBridge)
@@ -76,3 +79,60 @@ def test_profile_models_remain_existing_luna_names(tmp_path: Path) -> None:
     cfg = make_config(tmp_path)
     assert cfg.diagnosis_model == "gpt-5.6-luna"
     assert cfg.execution_model == "gpt-5.6-luna"
+
+
+@pytest.mark.asyncio
+async def test_ready_blocks_when_a_kernel_provider_is_unavailable(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+
+    async def unhealthy_runtime() -> dict[str, object]:
+        return {
+            "runtime_id": "personal-platform",
+            "providers": [
+                {"provider_id": "codex-primary", "available": False},
+                {"provider_id": "personal-monitoring", "available": True},
+            ],
+        }
+
+    app.state.kernel_runtime.health = unhealthy_runtime  # type: ignore[method-assign]
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["unavailable_providers"] == ["codex-primary"]
+
+
+@pytest.mark.asyncio
+async def test_ready_is_ok_when_checks_and_kernel_providers_are_healthy(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+
+    async def healthy_runtime() -> dict[str, object]:
+        return {
+            "runtime_id": "personal-platform",
+            "providers": [{"provider_id": "codex-primary", "available": True}],
+        }
+
+    app.state.kernel_runtime.health = healthy_runtime  # type: ignore[method-assign]
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_metrics_refreshes_read_only_environment_provider(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    app.state.environment_provider._probe_runner = lambda: {"docker_available": False}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    text = response.text
+    assert "control_plane_environment_last_check_timestamp_seconds" in text
+    assert 'check="docker_exited_containers"' in text
+    assert 'status="unknown"' in text

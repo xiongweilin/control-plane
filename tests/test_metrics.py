@@ -3,6 +3,7 @@ from portable_runtime.core.runtime import Runtime
 from portable_runtime.records.knowledge import KnowledgeProjection
 from prometheus_client import CollectorRegistry, generate_latest
 
+from control_plane.environment import CheckObservation, EnvironmentSnapshot
 from control_plane.metrics import ControlPlaneMetricsCollector
 
 
@@ -36,3 +37,42 @@ def test_profile_metrics_project_kernel_v2_state() -> None:
     assert 'control_plane_repairs_total{status="active"} 1.0' in text
     assert "control_plane_repairs_active 1.0" in text
     assert "control_plane_candidates 1.0" in text
+
+
+def test_profile_metrics_expose_environment_state() -> None:
+    runtime = Runtime(runtime_id="test")
+    collector = ControlPlaneMetricsCollector(runtime)
+    collector.set_environment_snapshot(
+        EnvironmentSnapshot(
+            checked_at=123.0,
+            observations=(
+                CheckObservation(
+                    name="docker_build_cache",
+                    status="problem",
+                    severity="warning",
+                    automation="fail-safe",
+                    detail="too large",
+                    manual_action="manual",
+                    metadata={"configured": True, "bytes": 2048},
+                ),
+            ),
+        )
+    )
+    collector.record_readiness(
+        True,
+        {"providers": [{"provider_id": "codex-primary", "available": True}]},
+    )
+    collector.record_current_provider_health(
+        {"providers": [{"provider_id": "codex-primary", "available": False}]}
+    )
+    registry = CollectorRegistry(auto_describe=False)
+    registry.register(collector)
+    text = generate_latest(registry).decode("utf-8")
+
+    assert (
+        'control_plane_environment_check{automation="fail-safe",check="docker_build_cache",'
+        'configured="true",severity="warning",status="problem"} 1.0'
+        in text
+    )
+    assert "control_plane_docker_build_cache_bytes 2048.0" in text
+    assert 'control_plane_ready_provider_mismatch{provider="codex-primary"} 1.0' in text

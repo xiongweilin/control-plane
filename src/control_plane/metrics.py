@@ -17,6 +17,8 @@ from typing import Any
 
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
+from .environment import EnvironmentSnapshot
+
 _REPAIR_KIND = "personal-incident-repair"
 _REPAIR_STATUS_LABELS = ("active", "waiting", "blocked", "closed", "failed", "interrupted")
 _CALL_EVENT_SUFFIX = "CapabilityResultObserved"
@@ -52,15 +54,47 @@ def _nested_value(payload: Any, *keys: str) -> Any:
 class ControlPlaneMetricsCollector:
     """Collect current profile metrics from Agent Kernel's canonical stores."""
 
-    def __init__(self, runtime: Any, responsibilities: Any | None = None) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        responsibilities: Any | None = None,
+    ) -> None:
         self.runtime = runtime
         self.responsibilities = responsibilities
         self._last_ready = 0.0
+        self._last_ready_ok: bool | None = None
+        self._last_ready_providers: dict[str, bool] = {}
+        self._current_providers: dict[str, bool] = {}
+        self._environment_snapshot: EnvironmentSnapshot | None = None
 
     def mark_ready(self) -> None:
         """Record a successful /ready probe without changing kernel state."""
 
         self._last_ready = time()
+
+    def record_readiness(self, ready: bool, kernel: dict[str, Any]) -> None:
+        """Keep the last readiness proof separate from current provider health."""
+
+        self._last_ready_ok = ready
+        providers = kernel.get("providers", []) if isinstance(kernel, dict) else []
+        self._last_ready_providers = {
+            str(item.get("provider_id")): bool(item.get("available"))
+            for item in providers
+            if isinstance(item, dict) and item.get("provider_id")
+        }
+        if ready:
+            self.mark_ready()
+
+    def record_current_provider_health(self, kernel: dict[str, Any]) -> None:
+        providers = kernel.get("providers", []) if isinstance(kernel, dict) else []
+        self._current_providers = {
+            str(item.get("provider_id")): bool(item.get("available"))
+            for item in providers
+            if isinstance(item, dict) and item.get("provider_id")
+        }
+
+    def set_environment_snapshot(self, snapshot: EnvironmentSnapshot | None) -> None:
+        self._environment_snapshot = snapshot
 
     def _works(self) -> tuple[list[Any], int]:
         try:
@@ -140,7 +174,7 @@ class ControlPlaneMetricsCollector:
                 count += 1
         return count, 0
 
-    def collect(self) -> Iterator[GaugeMetricFamily]:
+    def collect(self) -> Iterator[GaugeMetricFamily | CounterMetricFamily]:
         errors = 0
         works, work_errors = self._works()
         errors += work_errors
@@ -248,6 +282,102 @@ class ControlPlaneMetricsCollector:
         )
         errors_metric.add_metric([], errors)
         yield errors_metric
+
+        ready_metric = GaugeMetricFamily(
+            "control_plane_ready_status",
+            "Last observed control-plane readiness result",
+        )
+        ready_metric.add_metric([], 1 if self._last_ready_ok is True else 0)
+        yield ready_metric
+
+        mismatch_metric = GaugeMetricFamily(
+            "control_plane_ready_provider_mismatch",
+            "Current provider health differs from the last readiness proof",
+            labels=["provider"],
+        )
+        provider_ids = sorted(set(self._last_ready_providers) | set(self._current_providers))
+        for provider_id in provider_ids:
+            mismatch = (
+                int(
+                    self._last_ready_providers[provider_id]
+                    != self._current_providers[provider_id]
+                )
+                if provider_id in self._last_ready_providers
+                and provider_id in self._current_providers
+                else 0
+            )
+            mismatch_metric.add_metric([provider_id], mismatch)
+        yield mismatch_metric
+
+        snapshot = self._environment_snapshot
+        environment_metric = GaugeMetricFamily(
+            "control_plane_environment_check",
+            "Read-only environment check state: 0=ok, 1=problem, 2=unknown",
+            labels=["check", "status", "severity", "automation", "configured"],
+        )
+        environment_timestamp = GaugeMetricFamily(
+            "control_plane_environment_last_check_timestamp_seconds",
+            "Unix timestamp of the last environment inspection",
+        )
+        environment_errors = GaugeMetricFamily(
+            "control_plane_environment_probe_errors",
+            "Whether the last environment inspection failed at the probe boundary",
+        )
+        if snapshot is None:
+            environment_timestamp.add_metric([], 0)
+            environment_errors.add_metric([], 0)
+        else:
+            environment_timestamp.add_metric([], snapshot.checked_at)
+            environment_errors.add_metric([], 1 if snapshot.probe_error else 0)
+            state_values = {"ok": 0, "problem": 1, "unknown": 2}
+            for item in snapshot.observations:
+                environment_metric.add_metric(
+                    [
+                        item.name,
+                        item.status,
+                        item.severity,
+                        item.automation,
+                        str(bool(item.metadata.get("configured", True))).lower(),
+                    ],
+                    state_values.get(item.status, 2),
+                )
+        yield environment_metric
+        yield environment_timestamp
+        yield environment_errors
+
+        if snapshot is not None:
+            for metric_name, check_name, label_name in (
+                (
+                    "control_plane_docker_exited_containers",
+                    "docker_exited_containers",
+                    "exited_count",
+                ),
+                (
+                    "control_plane_windows_recursive_scan_access_errors",
+                    "windows_recursive_scan",
+                    "access_errors",
+                ),
+            ):
+                metric = GaugeMetricFamily(metric_name, f"Current value from {check_name}")
+                env_item = next(
+                    (entry for entry in snapshot.observations if entry.name == check_name),
+                    None,
+                )
+                value = env_item.metadata.get(label_name, 0) if env_item is not None else 0
+                metric.add_metric([], float(value or 0))
+                yield metric
+            cache_metric = GaugeMetricFamily(
+                "control_plane_docker_build_cache_bytes",
+                "Observed Docker build cache size in bytes",
+            )
+            cache_item = next(
+                (entry for entry in snapshot.observations if entry.name == "docker_build_cache"),
+                None,
+            )
+            cache_metric.add_metric(
+                [], float((cache_item.metadata if cache_item else {}).get("bytes", 0) or 0)
+            )
+            yield cache_metric
 
 
 __all__ = ["ControlPlaneMetricsCollector"]

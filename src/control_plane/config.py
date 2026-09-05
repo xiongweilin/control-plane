@@ -67,6 +67,23 @@ class ControlPlaneConfig:
     prometheus_url: str = "http://127.0.0.1:19090"
     alertmanager_url: str = ""
     notification_enabled: bool = True
+    auto_repair_alertnames: tuple[str, ...] = (
+        "ContainerRestartStorm",
+        "PrometheusScrapeFailed",
+        "ControlPlaneStaleReady",
+    )
+
+    environment_enabled: bool = True
+    environment_cache_seconds: int = 60
+    environment_probe_timeout_seconds: int = 30
+    cloud_probe_timeout_seconds: int = 30
+    windows_scan_roots: tuple[str, ...] = (r"D:\agent",)
+    docker_build_cache_max_bytes: int = 5 * 1024**3
+    v2rayn_expected_path: str | None = r"D:\agent\v2rayN-windows-64\v2rayN.exe"
+    cloud_ssh_target: str = ""
+    cloud_ssh_identity_file: str = ""
+    cloud_protected_root: str = ""
+    cloud_tailscale_profile: str = ""
 
     game_mode_enabled: bool = True
     game_mode_state_path: Path = Path(r"D:\agent\cs2-game-mode\state.json")
@@ -147,6 +164,8 @@ class ControlPlaneConfig:
         kernel = _section(data, "kernel")
         model = _section(data, "model")
         monitoring = _section(data, "monitoring")
+        policy = _section(data, "policy")
+        environment = _section(data, "environment")
         game_mode = _section(data, "game_mode")
         projects = _section(data, "projects")
 
@@ -190,11 +209,66 @@ class ControlPlaneConfig:
             ),
             codex_worktree_root=Path(str(model.get("worktree_root", base.codex_worktree_root))),
             max_agent_output_bytes=int(model.get("max_output_bytes", base.max_agent_output_bytes)),
-            prometheus_url=str(monitoring.get("prometheus_url", base.prometheus_url)),
-            alertmanager_url=str(monitoring.get("alertmanager_url", base.alertmanager_url)),
+            prometheus_url=str(
+                monitoring.get("prometheus_url", policy.get("prometheus_url", base.prometheus_url))
+            ),
+            alertmanager_url=str(
+                monitoring.get(
+                    "alertmanager_url", policy.get("alertmanager_url", base.alertmanager_url)
+                )
+            ),
             notification_enabled=_env_bool(
                 "CONTROL_PLANE_NOTIFICATIONS",
-                bool(monitoring.get("notification_enabled", base.notification_enabled)),
+                bool(
+                    monitoring.get(
+                        "notification_enabled",
+                        _section(data, "notifications").get(
+                            "enabled", base.notification_enabled
+                        ),
+                    )
+                ),
+            ),
+            auto_repair_alertnames=tuple(
+                str(v)
+                for v in monitoring.get("auto_repair_alertnames", base.auto_repair_alertnames)
+            ),
+            environment_enabled=_env_bool(
+                "CONTROL_PLANE_ENVIRONMENT_CHECKS",
+                bool(environment.get("enabled", base.environment_enabled)),
+            ),
+            environment_cache_seconds=int(
+                environment.get("cache_seconds", base.environment_cache_seconds)
+            ),
+            environment_probe_timeout_seconds=int(
+                environment.get(
+                    "probe_timeout_seconds", base.environment_probe_timeout_seconds
+                )
+            ),
+            cloud_probe_timeout_seconds=int(
+                environment.get("cloud_probe_timeout_seconds", base.cloud_probe_timeout_seconds)
+            ),
+            windows_scan_roots=tuple(
+                str(v) for v in environment.get("windows_scan_roots", base.windows_scan_roots)
+            ),
+            docker_build_cache_max_bytes=int(
+                environment.get(
+                    "docker_build_cache_max_bytes", base.docker_build_cache_max_bytes
+                )
+            ),
+            v2rayn_expected_path=(
+                str(environment["v2rayn_expected_path"])
+                if environment.get("v2rayn_expected_path")
+                else base.v2rayn_expected_path
+            ),
+            cloud_ssh_target=str(environment.get("cloud_ssh_target", base.cloud_ssh_target)),
+            cloud_ssh_identity_file=str(
+                environment.get("cloud_ssh_identity_file", base.cloud_ssh_identity_file)
+            ),
+            cloud_protected_root=str(
+                environment.get("cloud_protected_root", base.cloud_protected_root)
+            ),
+            cloud_tailscale_profile=str(
+                environment.get("cloud_tailscale_profile", base.cloud_tailscale_profile)
             ),
             game_mode_enabled=_env_bool(
                 "CONTROL_PLANE_GAME_MODE",
