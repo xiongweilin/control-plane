@@ -345,6 +345,48 @@ class ControlPlaneMetricsCollector:
         yield environment_timestamp
         yield environment_errors
 
+        lifecycle_metrics = (
+            ("control_plane_recoverability_status", "recoverability"),
+            ("control_plane_synchronization_status", "synchronization"),
+            ("control_plane_automatic_handling_status", "automatic_handling"),
+        )
+        for metric_name, check_name in lifecycle_metrics:
+            metric = GaugeMetricFamily(
+                metric_name,
+                f"Current {check_name} state: 1=ok, 0=problem, -1=unknown",
+            )
+            lifecycle_item = next(
+                (
+                    entry
+                    for entry in (snapshot.observations if snapshot else ())
+                    if entry.name == check_name
+                ),
+                None,
+            )
+            value = {"ok": 1, "problem": 0, "unknown": -1}.get(
+                lifecycle_item.status if lifecycle_item else "unknown",
+                -1,
+            )
+            metric.add_metric([], value)
+            yield metric
+
+        garbage_metric = GaugeMetricFamily(
+            "control_plane_known_garbage_paths",
+            "Number of configured known-garbage paths awaiting bounded cleanup",
+        )
+        garbage_item = next(
+            (
+                entry
+                for entry in (snapshot.observations if snapshot else ())
+                if entry.name == "known_garbage"
+            ),
+            None,
+        )
+        garbage_metric.add_metric(
+            [], float((garbage_item.metadata if garbage_item else {}).get("count", 0) or 0)
+        )
+        yield garbage_metric
+
         if snapshot is not None:
             for metric_name, check_name, label_name in (
                 (

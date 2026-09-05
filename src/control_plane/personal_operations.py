@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import time
+from pathlib import Path
 
 from portable_runtime.core.capabilities import (
     CapabilityRequest,
@@ -34,6 +37,7 @@ class PersonalOperationsProvider:
                 "git.rollback",
                 "docker.restart",
                 "docker.compose.up",
+                "maintenance.cleanup_known_garbage",
             ],
             priority=20,
             tags={"personal-profile", "side-effect"},
@@ -53,10 +57,12 @@ class PersonalOperationsProvider:
     async def health(self) -> ProviderHealth:
         git_ok = shutil.which("git.exe") is not None or shutil.which("git") is not None
         docker_ok = shutil.which("docker.exe") is not None or shutil.which("docker") is not None
+        maintenance_ok = self._maintenance_boundary_is_valid()
         return ProviderHealth(
             provider_id=self.descriptor.id,
-            available=git_ok or docker_ok,
-            detail=f"git={git_ok} docker={docker_ok}",
+            available=git_ok or docker_ok or maintenance_ok,
+            detail=f"git={git_ok} docker={docker_ok} maintenance={maintenance_ok}",
+            metadata={"maintenance_cleanup_available": maintenance_ok},
         )
 
     async def invoke(
@@ -70,6 +76,8 @@ class PersonalOperationsProvider:
                 message = await self._git(request)
             elif request.capability.startswith("docker."):
                 message = await self._docker(request)
+            elif request.capability == "maintenance.cleanup_known_garbage":
+                message = await self._cleanup_known_garbage()
             else:
                 return self._result(
                     request,
@@ -81,6 +89,66 @@ class PersonalOperationsProvider:
         except (OSError, RuntimeError, ValueError) as exc:
             return self._result(request, "failed", str(exc))
         return self._result(request, "succeeded", message)
+
+    async def _cleanup_known_garbage(self) -> str:
+        """Move only exact configured disposable paths to a rollback location.
+
+        This is intentionally narrower than Docker prune or recursive cleanup:
+        the source list is configuration-owned, and moving to quarantine keeps a
+        recovery path if a path was classified incorrectly.
+        """
+
+        if not self.config.automatic_handling_enabled:
+            raise ValueError("automatic handling is disabled")
+        if not self._maintenance_boundary_is_valid():
+            raise ValueError("known-garbage quarantine boundary is invalid")
+        quarantine = Path(self.config.garbage_quarantine_dir)
+        moved: list[str] = []
+        quarantine_resolved = quarantine.resolve(strict=False)
+        for raw_path in self.config.known_garbage_paths:
+            source = Path(raw_path)
+            if not source.exists() and not source.is_symlink():
+                continue
+            if source.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(source):
+                raise ValueError(f"refusing symlink/reparse garbage path: {raw_path}")
+            resolved_source = source.resolve(strict=False)
+            configured = {
+                Path(item).resolve(strict=False) for item in self.config.known_garbage_paths
+            }
+            if resolved_source not in configured:
+                raise ValueError(f"garbage path is outside exact allowlist: {raw_path}")
+            if quarantine_resolved == resolved_source or str(quarantine_resolved).startswith(
+                str(resolved_source) + "\\"
+            ):
+                raise ValueError("quarantine directory must not be inside a source path")
+            if source.stat().st_dev != quarantine.parent.stat().st_dev:
+                raise ValueError("cross-volume garbage quarantine is not reversible")
+            quarantine.mkdir(parents=True, exist_ok=True)
+            destination = quarantine / f"{source.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+            suffix = 0
+            while destination.exists():
+                suffix += 1
+                destination = quarantine / (
+                    f"{source.name}-{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
+                )
+            shutil.move(str(source), str(destination))
+            moved.append(raw_path)
+        return f"quarantined {len(moved)} configured known-garbage path(s)"
+
+    def _maintenance_boundary_is_valid(self) -> bool:
+        if not self.config.automatic_handling_enabled or not self.config.known_garbage_paths:
+            return False
+        try:
+            quarantine = Path(self.config.garbage_quarantine_dir).resolve(strict=False)
+            if any(
+                quarantine == Path(raw).resolve(strict=False)
+                or str(quarantine).startswith(str(Path(raw).resolve(strict=False)) + "\\")
+                for raw in self.config.known_garbage_paths
+            ):
+                return False
+            return not (quarantine.exists() and not quarantine.is_dir())
+        except OSError:
+            return False
 
     async def cancel(self, request_id: str) -> None:
         del request_id

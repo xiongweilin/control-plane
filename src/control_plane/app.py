@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -20,11 +20,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 from pydantic import BaseModel, Field
 
 from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
-from .audit import inspect_session_fields
+from .audit import inspect_session_fields, redact_value
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
 from .environment import FAIL_SAFE_ALERT_NAMES, EnvironmentInspectionProvider
-from .escalation_policy import create_fail_safe_alert_work, preserve_blocked_wait
+from .escalation_policy import preserve_blocked_wait
 from .game_mode import read_game_mode_state
 from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
 from .metrics import ControlPlaneMetricsCollector
@@ -116,6 +116,15 @@ def _register_profile_effect_rules(runtime: Any) -> None:
             blast_radius=3,
             exposure=3,
         ),
+        CapabilityEffectRule(
+            capability="maintenance.cleanup_known_garbage",
+            impact_class="write-local",
+            authorization_required=False,
+            resource_required=False,
+            version_required=False,
+            blast_radius=1,
+            exposure=1,
+        ),
     ]
     for rule in rules:
         runtime.contract_registry.register_effect_rule(rule)
@@ -140,6 +149,33 @@ def _split_controller_reply(prompt: str) -> tuple[str, str] | None:
     if not sep or not first.startswith("controller_") or not rest.strip():
         return None
     return first, rest.strip()
+
+
+def _safe_alert_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep durable alert context bounded and free of arbitrary webhook fields."""
+
+    labels = raw.get("labels")
+    annotations = raw.get("annotations")
+    safe_labels = {
+        key: str(labels[key])
+        for key in ("alertname", "job", "project", "instance", "severity")
+        if isinstance(labels, dict) and key in labels
+    }
+    safe_annotations = {
+        key: str(annotations[key])[:2000]
+        for key in ("summary", "description")
+        if isinstance(annotations, dict) and key in annotations
+    }
+    return cast(
+        dict[str, Any],
+        redact_value(
+            {
+                "status": str(raw.get("status", "firing")),
+                "labels": safe_labels,
+                "annotations": safe_annotations,
+            }
+        ),
+    )
 
 
 def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
@@ -253,6 +289,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         repo: str | None,
         project: str | None,
         verification_labels: dict[str, str],
+        maintenance_capability: str | None = None,
+        fail_safe: bool = False,
     ) -> TaskResponse:
         state, _assessment_ref = bridge.begin(
             title=title,
@@ -272,6 +310,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             project=project if project in cfg.allowed_auto_projects else None,
             verification_labels=verification_labels,
             max_attempts=2,
+            maintenance_capability=maintenance_capability,
+            fail_safe=fail_safe,
         )
         final_state = await drive_policy(controller, state.id, policy)
         final_state = await settle_personal_state(final_state)
@@ -530,19 +570,42 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 for key in ("alertname", "job", "project", "instance")
                 if str(labels.get(key, ""))
             }
-            description = json.dumps(raw, ensure_ascii=False, default=str)
-            if alertname in FAIL_SAFE_ALERT_NAMES or alertname not in cfg.auto_repair_alertnames:
-                safe_state = await create_fail_safe_alert_work(
-                    controller,
-                    bridge,
+            description = json.dumps(
+                _safe_alert_payload(raw),
+                ensure_ascii=False,
+                default=str,
+            )[:12_000]
+            automatic_maintenance = (
+                cfg.automatic_handling_enabled
+                and alertname in cfg.auto_maintenance_alertnames
+            )
+            fail_safe = alertname in FAIL_SAFE_ALERT_NAMES
+            if fail_safe:
+                result = await run_alert_repair(
                     title=f"Alert (fail-safe): {alertname}",
                     description=(
-                        "This alert is fail-safe only and must not trigger automatic effects.\n"
+                        "This alert is fail-safe only. Invoke Codex for diagnosis, but do not "
+                        "execute any effect without explicit owner authorization.\n"
                         f"{description}"
                     ),
+                    repo=None,
+                    project=None,
                     verification_labels=verification_labels,
+                    fail_safe=True,
                 )
-                result = _task_response(bridge, safe_state)
+            elif alertname not in cfg.auto_repair_alertnames and not automatic_maintenance:
+                result = await run_alert_repair(
+                    title=f"Alert (blocked): {alertname}",
+                    description=(
+                        "This alert is not allowlisted for effects. Invoke Codex for diagnosis, "
+                        "but do not execute any effect without explicit owner authorization.\n"
+                        f"{description}"
+                    ),
+                    repo=None,
+                    project=None,
+                    verification_labels=verification_labels,
+                    fail_safe=True,
+                )
             else:
                 result = await run_alert_repair(
                     title=f"Alert: {alertname}",
@@ -550,6 +613,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     repo=repo,
                     project=project,
                     verification_labels=verification_labels,
+                    maintenance_capability=(
+                        "maintenance.cleanup_known_garbage"
+                        if automatic_maintenance
+                        else None
+                    ),
                 )
             controllers.append(result.controller_id)
             if result.status == ControllerStatus.CLOSED.value:
@@ -558,7 +626,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 waiting += 1
                 if (
                     alertname in FAIL_SAFE_ALERT_NAMES
-                    or alertname not in cfg.auto_repair_alertnames
+                    or (
+                        alertname not in cfg.auto_repair_alertnames
+                        and not automatic_maintenance
+                    )
                 ):
                     message = (
                         "环境告警已按 fail-safe 处理, 未执行任何修复 effect, 等待人工升级。\n"

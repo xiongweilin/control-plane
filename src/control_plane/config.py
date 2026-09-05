@@ -79,6 +79,27 @@ class ControlPlaneConfig:
     cloud_probe_timeout_seconds: int = 30
     windows_scan_roots: tuple[str, ...] = (r"D:\agent",)
     docker_build_cache_max_bytes: int = 5 * 1024**3
+    recovery_paths: tuple[str, ...] = (
+        r"D:\agent\ratio",
+        r"D:\agent\docker备份",
+    )
+    synchronization_paths: tuple[str, ...] = (
+        r"D:\agent\ratio",
+        r"D:\agent\control-plane",
+        r"D:\infrastructure\compose\dify",
+        r"D:\infrastructure\compose\observability",
+        r"D:\infrastructure\compose\commerce-orchestrator",
+        r"D:\infrastructure\compose\feishu-dify-gateway",
+        r"C:\Users\metra\.local\share\chezmoi",
+    )
+    known_garbage_paths: tuple[str, ...] = (
+        r"D:\agent\portable-runtime-worktrees",
+    )
+    garbage_quarantine_dir: str = r"D:\agent\_recovery-quarantine"
+    automatic_handling_enabled: bool = False
+    auto_maintenance_alertnames: tuple[str, ...] = (
+        "ControlPlaneGarbageDetected",
+    )
     v2rayn_expected_path: str | None = r"D:\agent\v2rayN-windows-64\v2rayN.exe"
     cloud_ssh_target: str = ""
     cloud_ssh_identity_file: str = ""
@@ -253,6 +274,36 @@ class ControlPlaneConfig:
             docker_build_cache_max_bytes=int(
                 environment.get(
                     "docker_build_cache_max_bytes", base.docker_build_cache_max_bytes
+                )
+            ),
+            recovery_paths=tuple(
+                str(v) for v in environment.get("recovery_paths", base.recovery_paths)
+            ),
+            synchronization_paths=tuple(
+                str(v)
+                for v in environment.get(
+                    "synchronization_paths", base.synchronization_paths
+                )
+            ),
+            known_garbage_paths=tuple(
+                str(v)
+                for v in environment.get("known_garbage_paths", base.known_garbage_paths)
+            ),
+            garbage_quarantine_dir=str(
+                environment.get("garbage_quarantine_dir", base.garbage_quarantine_dir)
+            ),
+            automatic_handling_enabled=_env_bool(
+                "CONTROL_PLANE_AUTOMATIC_HANDLING",
+                bool(
+                    environment.get(
+                        "automatic_handling_enabled", base.automatic_handling_enabled
+                    )
+                ),
+            ),
+            auto_maintenance_alertnames=tuple(
+                str(v)
+                for v in environment.get(
+                    "auto_maintenance_alertnames", base.auto_maintenance_alertnames
                 )
             ),
             v2rayn_expected_path=(

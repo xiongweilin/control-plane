@@ -48,6 +48,7 @@ def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
     assert registry.effect_rule("git.push").authorization_required is True
     assert registry.effect_rule("docker.restart").authorization_required is True
     assert registry.effect_rule("docker.compose.up").authorization_required is False
+    assert registry.effect_rule("maintenance.cleanup_known_garbage").authorization_required is False
     assert registry.effect_rule("notify.send").authorization_required is False
 
 
