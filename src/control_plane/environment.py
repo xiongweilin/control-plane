@@ -55,6 +55,7 @@ FAIL_SAFE_ALERT_NAMES = frozenset(
     {
         "ControlPlaneCodexUnavailable",
         "ControlPlaneCodexLegacyPath",
+        "ControlPlaneReadinessDegraded",
         "ControlPlaneReadyProviderMismatch",
         "WinDefendStopped",
         "ThirdPartyProtectionUnknown",

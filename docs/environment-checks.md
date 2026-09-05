@@ -53,9 +53,9 @@ control_plane_windows_recursive_scan_access_errors
 | 云端保护/Tailscale | `ProtectedDirectoryRootVerificationMissing` / `CloudTailscaleProfileMissing` |
 | 云端基线/CVE | `CloudSwapMissing` / `CloudSELinuxPermissive` / `CloudCVEDetected` |
 
-这些告警名在 control-plane 中均属于 fail-safe 集合。由于 observability 仓库不在本次
-写入范围内，指标和名称由本仓库提供给现有 Prometheus/Alertmanager 配置使用；配置变更
-应由 observability 的 owner 单独审查。
+这些告警名在 control-plane 中均属于 fail-safe 集合；`ControlPlaneReadinessDegraded` 和
+`ControlPlaneReadyProviderMismatch` 已由 observability 的 `rules/control-plane.yml` 使用
+上述同源指标进行告警。指标告警只负责通知和形成 waiting Work，不代表修复已经授权或成功。
 
 ## 自动处理边界
 
