@@ -102,3 +102,6 @@ async def test_fail_safe_alert_materializes_no_effect_work() -> None:
     assert work is not None
     assert work.requested_capabilities == []
     assert work.kind == "personal-incident-repair-blocked"
+    assert work.status == "waiting"
+    run = runtime.store.list_runs(work.id)[-1]
+    assert run.status == "interrupted"

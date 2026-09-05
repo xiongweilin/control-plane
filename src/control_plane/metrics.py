@@ -19,7 +19,9 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from .environment import CHECK_NAMES, EnvironmentSnapshot
 
-_REPAIR_KIND = "personal-incident-repair"
+_REPAIR_KINDS = frozenset(
+    {"personal-incident-repair", "personal-incident-repair-blocked"}
+)
 _REPAIR_STATUS_LABELS = ("active", "waiting", "blocked", "closed", "failed", "interrupted")
 _CALL_EVENT_SUFFIX = "CapabilityResultObserved"
 _RETRY_MODES = {"retry-idempotent", "retry-request"}
@@ -27,8 +29,10 @@ _FAILURE_STATUSES = {"failed", "failure", "error"}
 
 
 def _repair_status(status: str) -> str:
-    if status in {"open", "ready", "running"}:
+    if status == "running":
         return "active"
+    if status in {"open", "ready", "waiting"}:
+        return "waiting"
     if status in _REPAIR_STATUS_LABELS:
         return status
     if status == "completed":
@@ -181,7 +185,7 @@ class ControlPlaneMetricsCollector:
 
         repair_counts: Counter[str] = Counter()
         for work in works:
-            if getattr(work, "kind", None) == _REPAIR_KIND:
+            if getattr(work, "kind", None) in _REPAIR_KINDS:
                 repair_counts[_repair_status(str(work.status))] += 1
 
         repairs = GaugeMetricFamily(
@@ -204,7 +208,7 @@ class ControlPlaneMetricsCollector:
         active = repair_counts["active"]
         active_metric = GaugeMetricFamily(
             "control_plane_repairs_active",
-            "Current personal incident-repair Work count in active states",
+            "Current personal incident-repair Work count with canonical status running",
         )
         active_metric.add_metric([], active)
         yield active_metric

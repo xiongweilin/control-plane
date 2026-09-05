@@ -6,8 +6,9 @@ from portable_runtime.controller import (
 )
 from portable_runtime.core.models import Event, new_id
 from portable_runtime.core.runtime import Runtime
+from portable_runtime.responsibility import EffectClass
 
-from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy
+from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, classify_safety
 from control_plane.kernel_bridge import PersonalKernelBridge
 
 DIAGNOSIS_MODEL = "codex/gpt-5.6-luna"
@@ -214,7 +215,12 @@ async def test_alert_policy_closure_declares_execution_apply_and_verification() 
     diagnosis = await policy.select(state)
     assert diagnosis.kind is ControllerDecisionKind.INVOKE_CAPABILITY
     assert diagnosis.capability == "reason.generate"
-    _record_cognitive_result(controller, state.id, diagnosis, message="repair plan")
+    _record_cognitive_result(
+        controller,
+        state.id,
+        diagnosis,
+        message="SAFETY_CLASS=REVERSIBLE\nrepair plan",
+    )
 
     closure = await policy.select(state)
     assert closure.kind is ControllerDecisionKind.FORM_CLOSURE
@@ -242,7 +248,12 @@ async def test_alert_policy_can_declare_bounded_automatic_maintenance() -> None:
     )
 
     diagnosis = await policy.select(state)
-    _record_cognitive_result(controller, state.id, diagnosis, message="quarantine exact path")
+    _record_cognitive_result(
+        controller,
+        state.id,
+        diagnosis,
+        message="SAFETY_CLASS=REVERSIBLE\nquarantine exact path",
+    )
     closure = await policy.select(state)
 
     assert closure.closure is not None
@@ -251,6 +262,46 @@ async def test_alert_policy_can_declare_bounded_automatic_maintenance() -> None:
         "maintenance.cleanup_known_garbage",
         "monitor.alert.active",
     ]
+
+
+def test_safety_class_requires_the_current_codex_marker() -> None:
+    assert (
+        classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=REVERSIBLE\nplan"})
+        == "reversible"
+    )
+    assert (
+        classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=IRREVERSIBLE\nplan"})
+        == "irreversible"
+    )
+    assert classify_safety({"status": "succeeded", "message": "historical label only"}) == "unknown"
+
+
+async def test_non_reversible_judgment_forms_read_only_closure() -> None:
+    _runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
+    policy = AutonomousRepairPolicy(
+        controller=controller,
+        bridge=bridge,
+        prompt="unsafe alert",
+        diagnosis_model=DIAGNOSIS_MODEL,
+        execution_model=EXECUTION_MODEL,
+        repo="C:/repo",
+        project="test",
+        verification_labels={"alertname": "Unsafe"},
+    )
+    diagnosis = await policy.select(state)
+    _record_cognitive_result(
+        controller,
+        state.id,
+        diagnosis,
+        message="SAFETY_CLASS=IRREVERSIBLE\nrequires owner decision",
+    )
+    closure = await policy.select(state)
+    assert closure.closure is not None
+    assert closure.closure.requested_capabilities == [
+        "reason.generate",
+        "monitor.alert.active",
+    ]
+    assert closure.closure.effect_class is EffectClass.READ_ONLY
 
 
 def _capability_result(*, status: str, message: str):

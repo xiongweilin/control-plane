@@ -32,6 +32,7 @@ from portable_runtime.core.capabilities import (
 )
 
 from .config import ControlPlaneConfig
+from .game_mode import read_game_mode_state
 
 CHECK_NAMES = (
     "recoverability",
@@ -55,7 +56,7 @@ CHECK_NAMES = (
     "cloud_cve",
 )
 
-FAIL_SAFE_ALERT_NAMES = frozenset(
+HISTORICAL_SAFETY_HINT_ALERT_NAMES = frozenset(
     {
         "ControlPlaneCodexUnavailable",
         "ControlPlaneCodexLegacyPath",
@@ -372,6 +373,7 @@ def evaluate_environment(
     payload: Mapping[str, Any],
     *,
     provider_health: Mapping[str, Any] | None = None,
+    game_mode_suppresses_docker: bool = False,
 ) -> EnvironmentSnapshot:
     """Convert raw read-only probe data into stable, alertable observations."""
 
@@ -511,7 +513,22 @@ def evaluate_environment(
     exited = payload.get("docker_exited_count")
     cache_raw = payload.get("docker_build_cache_bytes", payload.get("docker_build_cache_size"))
     cache_bytes = _parse_size(cache_raw)
-    if docker_available is False:
+    if game_mode_suppresses_docker:
+        observations.extend(
+            [
+                _ok(
+                    "docker_exited_containers",
+                    "Docker containers are intentionally stopped by active CS2 game mode",
+                    metadata={"expected_down": True, "suppressed_by_game_mode": True},
+                ),
+                _ok(
+                    "docker_build_cache",
+                    "Docker Desktop is intentionally stopped by active CS2 game mode",
+                    metadata={"expected_down": True, "suppressed_by_game_mode": True},
+                ),
+            ]
+        )
+    elif docker_available is False:
         observations.extend(
             [
                 _unknown("docker_exited_containers", "Docker CLI/daemon 未能核验"),
@@ -762,6 +779,14 @@ class EnvironmentInspectionProvider:
                     self.config,
                     payload,
                     provider_health=self._provider_health,
+                    game_mode_suppresses_docker=(
+                        self.config.game_mode_enabled
+                        and read_game_mode_state(
+                            self.config.game_mode_state_path,
+                            active_max_age_seconds=self.config.game_mode_active_max_age_seconds,
+                            restore_grace_seconds=self.config.game_mode_restore_grace_seconds,
+                        ).suppress_alerts
+                    ),
                 )
             except Exception as exc:  # pragma: no cover - defensive boundary
                 probe_error = str(exc)[:500]
@@ -929,9 +954,14 @@ foreach ($root in @($roots)) {{
     $scanErrors += @($errors).Count
   }}
 }}
-$dockerAvailable = $null -ne (Get-Command docker -ErrorAction SilentlyContinue)
+$docker = Get-Command docker -ErrorAction SilentlyContinue
+$dockerAvailable = $false
 $exited = $null
 $cache = $null
+if ($docker) {{
+  docker info --format '{{{{.ServerVersion}}}}' 2>$null | Out-Null
+  $dockerAvailable = $LASTEXITCODE -eq 0
+}}
 if ($dockerAvailable) {{
   $exited = @(docker ps -a --filter status=exited --format '{{{{json .}}}}').Count
   $cache = @(docker system df --format '{{{{json .}}}}' 2>$null | ConvertFrom-Json | Where-Object {{ $_.Type -match 'Build Cache' }} | Select-Object -ExpandProperty Size -First 1)
@@ -997,7 +1027,7 @@ if ($dockerAvailable) {{
 
 __all__ = [
     "CHECK_NAMES",
-    "FAIL_SAFE_ALERT_NAMES",
+    "HISTORICAL_SAFETY_HINT_ALERT_NAMES",
     "CheckObservation",
     "EnvironmentInspectionProvider",
     "EnvironmentSnapshot",

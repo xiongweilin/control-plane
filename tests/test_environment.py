@@ -17,6 +17,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
         cloud_tailscale_profile="/var/lib/tailscale/tailscaled.state",
         docker_build_cache_max_bytes=1024,
         automatic_handling_enabled=True,
+        game_mode_enabled=False,
     )
 
 
@@ -97,6 +98,19 @@ def test_environment_evaluation_covers_standing_control_plane_responsibilities(
     assert observations["known_garbage"].status == "problem"
     assert observations["known_garbage"].automation == "automatic"
     assert observations["automatic_handling"].status == "ok"
+
+
+def test_game_mode_treats_docker_down_as_expected_state(tmp_path: Path) -> None:
+    snapshot = evaluate_environment(
+        make_config(tmp_path),
+        {"docker_available": False},
+        game_mode_suppresses_docker=True,
+    )
+    observations = {item.name: item for item in snapshot.observations}
+
+    assert observations["docker_exited_containers"].status == "ok"
+    assert observations["docker_build_cache"].status == "ok"
+    assert observations["docker_exited_containers"].metadata["expected_down"] is True
 
 
 @pytest.mark.asyncio

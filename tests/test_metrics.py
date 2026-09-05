@@ -27,6 +27,11 @@ def test_profile_metrics_project_kernel_v2_state() -> None:
     runtime = Runtime(runtime_id="test")
     runtime.store.save_work(Work(kind="personal-incident-repair", title="failed", status="failed"))
     runtime.store.save_work(Work(kind="personal-incident-repair", title="active", status="running"))
+    runtime.store.save_work(Work(kind="personal-incident-repair", title="open", status="open"))
+    runtime.store.save_work(Work(kind="personal-incident-repair", title="ready", status="ready"))
+    runtime.store.save_work(
+        Work(kind="personal-incident-repair-blocked", title="blocked", status="waiting")
+    )
     runtime.store.save_work(Work(kind="personal-command", title="unrelated"))
     runtime.store.save_knowledge_projection(KnowledgeProjection(title="candidate"))
 
@@ -35,7 +40,9 @@ def test_profile_metrics_project_kernel_v2_state() -> None:
     assert 'control_plane_repairs_total{status="closed"} 0.0' in text
     assert 'control_plane_repairs_total{status="failed"} 1.0' in text
     assert 'control_plane_repairs_total{status="active"} 1.0' in text
+    assert 'control_plane_repairs_total{status="waiting"} 3.0' in text
     assert "control_plane_repairs_active 1.0" in text
+    assert "control_plane_repairs_recoverable 3.0" in text
     assert "control_plane_candidates 1.0" in text
 
 

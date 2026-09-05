@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -61,6 +62,23 @@ def _message(result: dict[str, Any] | None) -> str:
 
 def _succeeded(result: dict[str, Any] | None) -> bool:
     return result is not None and str(result.get("status", "")) == "succeeded"
+
+
+_SAFETY_CLASS_PATTERN = re.compile(
+    r"(?im)^\s*SAFETY_CLASS\s*[=:]\s*(REVERSIBLE|IRREVERSIBLE|UNKNOWN)\s*$"
+)
+
+
+def classify_safety(result: dict[str, Any] | None) -> str:
+    """Read the current Codex safety judgment from the diagnosis result.
+
+    A missing or malformed judgment is ``unknown``. Unknown is deliberately
+    not called fail-safe, but it is still denied all effect capabilities until
+    a later diagnosis explicitly proves reversibility.
+    """
+
+    match = _SAFETY_CLASS_PATTERN.search(_message(result))
+    return match.group(1).lower() if match else "unknown"
 
 
 def _event_result(event: Event) -> dict[str, Any]:
@@ -137,9 +155,15 @@ class AutonomousRepairPolicy:
         instruction = (
             f"Diagnose this incident for autonomous repair attempt {attempt}/"
             f"{self.max_attempts}.\n"
-            "Identify the most likely root cause and give one concrete bounded execution "
-            "instruction. Do not claim recovery or completion. Prefer the smallest repair "
-            "that can be tested.\n\n"
+            "This diagnosis must first judge whether the proposed bounded repair is reversible "
+            "in the current reality. On the first line, emit exactly one of: "
+            "SAFETY_CLASS=REVERSIBLE, SAFETY_CLASS=IRREVERSIBLE, or SAFETY_CLASS=UNKNOWN. "
+            "Use IRREVERSIBLE only when the current action cannot be undone or safely rolled "
+            "back; use UNKNOWN when reversibility cannot be established from current evidence. "
+            "The safety class is a current judgment, not a historical alert-name label. "
+            "After that line, identify the most likely root cause and give one concrete bounded "
+            "execution instruction. Do not claim recovery or completion. Prefer the smallest "
+            "repair that can be tested.\n\n"
             f"Incident:\n{self.prompt}"
         )
         if self.human_instruction:
@@ -162,7 +186,31 @@ class AutonomousRepairPolicy:
             reason="collect a bounded diagnosis before cognitive closure",
         )
 
-    def _requested_capabilities(self) -> list[str]:
+    def _latest_diagnosis_result(self, state: ControllerState) -> dict[str, Any] | None:
+        diagnosis_decisions = [
+            decision
+            for _event, decision in _ordered_decisions(self.controller, state.id)
+            if (
+                decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+                and decision.capability == "reason.generate"
+                and decision.parameters.get("phase") == "diagnosis"
+            )
+        ]
+        if not diagnosis_decisions:
+            return None
+        return _result_by_decision(self.controller, state.id).get(diagnosis_decisions[-1].id)
+
+    def safety_class(self, state: ControllerState) -> str:
+        return classify_safety(self._latest_diagnosis_result(state))
+
+    def _effects_allowed(self, diagnosis_result: dict[str, Any] | None) -> bool:
+        return not self.fail_safe and classify_safety(diagnosis_result) == "reversible"
+
+    def _requested_capabilities(
+        self, diagnosis_result: dict[str, Any] | None = None
+    ) -> list[str]:
+        if not self._effects_allowed(diagnosis_result):
+            return ["reason.generate", "monitor.alert.active"]
         values = ["shell.exec" if self.repo else "reason.generate"]
         if self.project:
             values.append("docker.compose.up")
@@ -171,7 +219,9 @@ class AutonomousRepairPolicy:
         values.append("monitor.alert.active")
         return values
 
-    def _effect_class(self) -> EffectClass:
+    def _effect_class(self, diagnosis_result: dict[str, Any] | None = None) -> EffectClass:
+        if not self._effects_allowed(diagnosis_result):
+            return EffectClass.READ_ONLY
         if self.project:
             return EffectClass.EXTERNAL_EFFECT
         if self.repo:
@@ -209,8 +259,8 @@ class AutonomousRepairPolicy:
                 "project apply fails",
                 "monitoring shows the triggering alert remains active",
             ],
-            requested_capabilities=self._requested_capabilities(),
-            effect_class=self._effect_class(),
+            requested_capabilities=self._requested_capabilities(diagnosis_result),
+            effect_class=self._effect_class(diagnosis_result),
         )
         return ControllerDecision(
             controller_ref=state.id,
@@ -224,6 +274,7 @@ class AutonomousRepairPolicy:
         if not state.active_closure_ref:
             raise ValueError("repair proposal requires an active cognitive closure")
         context = self.bridge.context(state)
+        diagnosis_result = self._latest_diagnosis_result(state)
         return ControllerDecision(
             controller_ref=state.id,
             state_version=state.version,
@@ -233,11 +284,11 @@ class AutonomousRepairPolicy:
             work_kind="personal-incident-repair",
             work_title=context.title,
             work_description=context.description,
-            requested_capabilities=self._requested_capabilities(),
+            requested_capabilities=self._requested_capabilities(diagnosis_result),
             expected_result="the triggering alert is no longer active",
             stop_conditions=["stop after the bounded autonomous attempt budget"],
             escalation_conditions=["require an explicit owner command before further attempts"],
-            effect_class=self._effect_class().value,
+            effect_class=self._effect_class(diagnosis_result).value,
             reason="handoff the closure to the persistent responsibility kernel as WorkProposal",
         )
 
@@ -406,25 +457,37 @@ class AutonomousRepairPolicy:
             raise ValueError("materialized repair Work has no diagnosis")
         diagnosis = diagnosis_decisions[-1]
         diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
-        instruction = (
-            (
-                "Re-evaluate this fail-safe alert and provide a bounded human action plan. "
-                "Do not modify files, call effect capabilities, access credentials, or claim "
-                "recovery.\n\n"
-                if self.fail_safe
-                else "Execute the diagnosed repair now. Use the current repository only. Make the "
-                "smallest necessary local changes and run relevant checks/tests. Do not push, "
-                "merge, access remote credentials, or run Docker directly; remote/deployment "
-                "effects belong to Agent Kernel providers. Finish with a concise execution "
-                "summary.\n\n"
+        safety = classify_safety(diagnosis_result)
+        effects_allowed = self._effects_allowed(diagnosis_result)
+        if self.fail_safe or safety == "irreversible":
+            execution_prefix = (
+                "The current Codex safety judgment is IRREVERSIBLE. Re-evaluate this alert "
+                "and provide a bounded human action plan only. Do not modify files, call "
+                "effect capabilities, access credentials, or claim recovery.\n\n"
             )
+        elif safety == "unknown":
+            execution_prefix = (
+                "Codex could not prove that this repair is reversible. Provide a read-only "
+                "diagnostic and explicitly state what evidence is missing. Do not modify "
+                "files, call effect capabilities, access credentials, or claim recovery.\n\n"
+            )
+        else:
+            execution_prefix = (
+                "Execute the diagnosed reversible repair now. Use the current repository only. "
+                "Make the smallest necessary local changes and run relevant checks/tests. Do "
+                "not push, merge, access remote credentials, or run Docker directly; "
+                "remote/deployment effects belong to Agent Kernel providers. Finish with a "
+                "concise execution summary.\n\n"
+            )
+        instruction = (
+            execution_prefix
             + "Diagnosis and plan:\n"
             + _message(diagnosis_result)
         )
         parameters: dict[str, Any] = {"model": self.execution_model, "phase": "execution"}
-        if self.repo:
+        if effects_allowed and self.repo:
             parameters["repo"] = self.repo
-        capability = "shell.exec" if self.repo else "reason.generate"
+        capability = "shell.exec" if effects_allowed and self.repo else "reason.generate"
         result = await runtime.run_capability(
             work.id,
             capability,
@@ -444,7 +507,7 @@ class AutonomousRepairPolicy:
         if result.status != "succeeded":
             return
 
-        if self.maintenance_capability:
+        if effects_allowed and self.maintenance_capability:
             maintenance_parameters = {
                 **self.maintenance_parameters,
                 "phase": "apply",
@@ -468,7 +531,7 @@ class AutonomousRepairPolicy:
             if applied.status != "succeeded":
                 return
 
-        if self.project:
+        if effects_allowed and self.project:
             applied = await runtime.run_capability(
                 work.id,
                 "docker.compose.up",
