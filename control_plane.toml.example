@@ -19,13 +19,13 @@ session_dir = "data/agent-sessions"
 max_output_bytes = 200000
 
 [agent]
-gateway_timeout_seconds = 120
+gateway_timeout_seconds = 900
 max_agent_calls_per_repair = 8
 
 [policy]
 cooldown_seconds = 600
 max_attempts = 2
-per_repair_timeout_seconds = 900
+per_repair_timeout_seconds = 1800
 max_concurrent = 2
 
 [monitoring]

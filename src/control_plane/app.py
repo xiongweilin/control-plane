@@ -26,17 +26,28 @@ from portable_runtime.providers.codex.provider import CodexProvider
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
-from .alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, drive_policy
+from .alert_policy import (
+    AutonomousRepairPolicy,
+    ManualTaskPolicy,
+    drive_policy,
+)
 from .audit import inspect_session_fields, redact_value
 from .codex_boundary import CodexExecutionBoundary
 from .config import ControlPlaneConfig
-from .environment import FAIL_SAFE_ALERT_NAMES, EnvironmentInspectionProvider
+from .environment import (
+    HISTORICAL_SAFETY_HINT_ALERT_NAMES,
+    EnvironmentInspectionProvider,
+)
 from .escalation_policy import preserve_blocked_wait
 from .game_mode import read_game_mode_state
 from .kernel_bridge import PERSONAL_HUMAN_INSTRUCTION_EVENT, PersonalKernelBridge
 from .metrics import ControlPlaneMetricsCollector
 from .monitoring import PersonalMonitoringProvider
 from .personal_operations import PersonalOperationsProvider
+from .state_reconciliation import (
+    reconcile_repair_state,
+    settle_waiting_execution_claims,
+)
 
 
 class TaskRequest(BaseModel):
@@ -83,6 +94,7 @@ class AlertRepair:
     verification_labels: dict[str, str]
     maintenance_capability: str | None
     fail_safe: bool
+    deadline_at: float
 
 
 def _register_profile_effect_rules(runtime: Any) -> None:
@@ -227,6 +239,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg.agent_session_dir.mkdir(parents=True, exist_ok=True)
 
     runtime = create_personal_platform_runtime(cfg.state_db, cfg.artifact_root)
+    reconcile_repair_state(runtime, stale_after_seconds=max(1, cfg.per_repair_timeout_seconds))
     runtime.registry.register(
         CodexProvider(
             model=cfg.diagnosis_model,
@@ -315,7 +328,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             return
 
     async def settle_personal_state(state: Any) -> Any:
-        return await preserve_blocked_wait(controller, bridge, state)
+        settled = await preserve_blocked_wait(controller, bridge, state)
+        if settled.status is ControllerStatus.WAITING:
+            settle_waiting_execution_claims(runtime, bridge.work_for_state(settled))
+        return settled
 
     async def kernel_health() -> dict[str, Any]:
         nonlocal health_cache
@@ -442,6 +458,34 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         final_state = await settle_personal_state(final_state)
         return _task_response(bridge, final_state)
 
+    def repair_deadline_for_fingerprint(fingerprint: str) -> float | None:
+        """Keep one bounded repair deadline across webhook retries and restarts."""
+
+        events = runtime.store.list_events(fingerprint)
+        resolved = [event for event in events if event.type == ALERT_RESOLVED_EVENT]
+        last_resolved = max(resolved, key=lambda event: event.created_at) if resolved else None
+        queued = [
+            event
+            for event in events
+            if event.type == ALERT_QUEUED_EVENT
+            and (last_resolved is None or event.created_at > last_resolved.created_at)
+        ]
+        if not queued:
+            return None
+        first = min(queued, key=lambda event: event.created_at)
+        raw_deadline = first.payload.get("repair_deadline_at")
+        try:
+            if raw_deadline is not None:
+                return float(raw_deadline)
+        except (TypeError, ValueError):
+            pass
+        raw_queued_at = first.payload.get("queued_at")
+        try:
+            queued_at = float(raw_queued_at)
+        except (TypeError, ValueError):
+            queued_at = first.created_at.timestamp()
+        return queued_at + max(1, cfg.per_repair_timeout_seconds)
+
     def begin_alert_repair(
         *,
         fingerprint: str,
@@ -452,7 +496,12 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         verification_labels: dict[str, str],
         maintenance_capability: str | None = None,
         fail_safe: bool = False,
+        deadline_at: float | None = None,
     ) -> AlertRepair:
+        if deadline_at is None:
+            deadline_at = repair_deadline_for_fingerprint(fingerprint)
+        if deadline_at is None:
+            deadline_at = time.time() + max(1, cfg.per_repair_timeout_seconds)
         state, _assessment_ref = bridge.begin(
             title=title,
             description=description,
@@ -471,6 +520,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             verification_labels=verification_labels,
             maintenance_capability=maintenance_capability,
             fail_safe=fail_safe,
+            deadline_at=deadline_at,
         )
 
     def alert_policy(spec: AlertRepair) -> AutonomousRepairPolicy:
@@ -499,6 +549,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "verification_labels": dict(spec.verification_labels),
             "maintenance_capability": spec.maintenance_capability,
             "fail_safe": spec.fail_safe,
+            "repair_deadline_at": spec.deadline_at,
         }
 
     def append_alert_event(event_type: str, spec: AlertRepair, **extra: Any) -> None:
@@ -512,28 +563,68 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             )
         )
 
+    def requires_safety_recheck(fingerprint: str) -> bool:
+        """Migrate a still-active alert created by the pre-Codex safety policy."""
+
+        queued = [
+            event
+            for event in runtime.store.list_events(fingerprint)
+            if event.type == ALERT_QUEUED_EVENT
+        ]
+        if not queued:
+            return False
+        latest = max(queued, key=lambda event: event.created_at)
+        return bool(latest.payload.get("fail_safe", False))
+
     async def process_alert_repair(spec: AlertRepair) -> None:
         async with repair_slots:
             try:
+                remaining = spec.deadline_at - time.time()
+                if remaining <= 0:
+                    append_alert_event(
+                        ALERT_FINISHED_EVENT,
+                        spec,
+                        status="timeout",
+                        repair_deadline_exceeded=True,
+                        finished_at=time.time(),
+                    )
+                    await notify(
+                        spec.controller_id,
+                        "同一 Alertmanager fingerprint 的累计 repair deadline 已到达; "
+                        "不再创建新的 Codex 调用, 未执行 effect, 等待明确命令。\n"
+                        f"alert={spec.title}\nwork={spec.controller_id}\n"
+                        f"controller={spec.controller_id}",
+                    )
+                    return
+                policy = alert_policy(spec)
                 final_state = await asyncio.wait_for(
-                    drive_policy(controller, spec.controller_id, alert_policy(spec)),
-                    timeout=max(1, cfg.per_repair_timeout_seconds),
+                    drive_policy(controller, spec.controller_id, policy),
+                    timeout=remaining,
                 )
                 final_state = await settle_personal_state(final_state)
                 result = _task_response(bridge, final_state)
+                safety_class = policy.safety_class(final_state)
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
                     status=result.status,
                     work_id=result.work_id,
+                    safety_class=safety_class,
                     finished_at=time.time(),
                 )
                 if result.status == ControllerStatus.WAITING.value:
-                    message = (
-                        "环境告警已按 fail-safe 处理, 未执行任何修复 effect, 等待人工升级。\n"
-                        if spec.fail_safe
-                        else "自动修复达到边界后仍未解决, 已停止并等待明确命令。\n"
-                    )
+                    if spec.fail_safe or safety_class == "irreversible":
+                        message = (
+                            "Codex 判定当前告警不可逆, 已转为 fail-safe; 未执行修复 effect, "
+                            "等待人工升级。\n"
+                        )
+                    elif safety_class == "unknown":
+                        message = (
+                            "Codex 无法证明当前修复可逆, 未执行任何 effect, "
+                            "等待补充证据或明确命令。\n"
+                        )
+                    else:
+                        message = "自动修复达到边界后仍未解决, 已停止并等待明确命令。\n"
                     await notify(
                         result.work_id,
                         message
@@ -544,13 +635,29 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
+                current = controller.get(spec.controller_id)
+                if current is not None:
+                    with suppress(Exception):
+                        await settle_personal_state(current)
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
                     status="timeout",
+                    repair_deadline_exceeded=True,
                     finished_at=time.time(),
                 )
+                await notify(
+                    spec.controller_id,
+                    "同一 Alertmanager fingerprint 的累计 repair deadline 已到达; "
+                    "未执行 effect, 不再重试, 等待明确命令。\n"
+                    f"alert={spec.title}\nwork={spec.controller_id}\n"
+                    f"controller={spec.controller_id}",
+                )
             except Exception as exc:
+                current = controller.get(spec.controller_id)
+                if current is not None:
+                    with suppress(Exception):
+                        await settle_personal_state(current)
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
@@ -559,7 +666,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     finished_at=time.time(),
                 )
 
-    def recoverable_alert_specs() -> tuple[dict[str, str], list[AlertRepair]]:
+    def recoverable_alert_specs() -> tuple[
+        dict[str, str], list[AlertRepair], list[AlertRepair]
+    ]:
         latest: dict[str, Event] = {}
         queued: dict[str, AlertRepair] = {}
         journal_types = {ALERT_QUEUED_EVENT, ALERT_FINISHED_EVENT, ALERT_RESOLVED_EVENT}
@@ -608,9 +717,15 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         else None
                     ),
                     fail_safe=bool(event.payload.get("fail_safe", False)),
+                    deadline_at=(
+                        repair_deadline_for_fingerprint(fingerprint)
+                        or event.created_at.timestamp()
+                        + max(1, cfg.per_repair_timeout_seconds)
+                    ),
                 )
         active: dict[str, str] = {}
         pending: list[AlertRepair] = []
+        legacy_recheck: list[AlertRepair] = []
         for fingerprint, event in latest.items():
             if event.type == ALERT_RESOLVED_EVENT:
                 continue
@@ -620,15 +735,24 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             if event.type == ALERT_QUEUED_EVENT:
                 spec = queued.get(fingerprint)
                 if spec is not None and controller_id and controller.get(controller_id) is not None:
-                    pending.append(spec)
+                    if spec.fail_safe:
+                        legacy_recheck.append(spec)
+                    else:
+                        pending.append(spec)
             elif event.type == ALERT_FINISHED_EVENT and event.payload.get("status") in {
                 "failed",
                 "timeout",
             }:
                 spec = queued.get(fingerprint)
                 if spec is not None and controller.get(spec.controller_id) is not None:
-                    pending.append(spec)
-        return active, pending
+                    if spec.fail_safe:
+                        legacy_recheck.append(spec)
+                    else:
+                        pending.append(spec)
+            spec = queued.get(fingerprint)
+            if spec is not None and spec.fail_safe and spec not in legacy_recheck:
+                legacy_recheck.append(spec)
+        return active, pending, legacy_recheck
 
     async def schedule_alert(spec: AlertRepair) -> None:
         task = asyncio.create_task(process_alert_repair(spec))
@@ -642,14 +766,85 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
         task.add_done_callback(consume_task_result)
 
+    async def current_alertmanager_fingerprints() -> set[str] | None:
+        if not cfg.alertmanager_url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(
+                    f"{cfg.alertmanager_url.rstrip('/')}/api/v2/alerts"
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except Exception:
+            return None
+        if not isinstance(payload, list):
+            return None
+        return {
+            _alert_fingerprint(alert)
+            for alert in payload
+            if isinstance(alert, dict)
+            and isinstance(alert.get("status"), dict)
+            and alert["status"].get("state") == "active"
+        }
+
     async def recover_alert_dispatcher_background() -> None:
         try:
-            recovered, pending = await asyncio.to_thread(recoverable_alert_specs)
+            recovered, pending, legacy_recheck = await asyncio.to_thread(
+                recoverable_alert_specs
+            )
+            current_fingerprints = await current_alertmanager_fingerprints()
             async with alert_lock:
-                active_alerts.update(recovered)
+                if current_fingerprints is None:
+                    active_alerts.update(recovered)
+                else:
+                    for fingerprint, controller_id in recovered.items():
+                        if fingerprint in current_fingerprints:
+                            active_alerts[fingerprint] = controller_id
+                            continue
+                        runtime.store.append_event(
+                            Event(
+                                id=new_id("event"),
+                                type=ALERT_RESOLVED_EVENT,
+                                subject_ref=fingerprint,
+                                payload={
+                                    "fingerprint": fingerprint,
+                                    "resolved_at": time.time(),
+                                    "reconciled_from_alertmanager": True,
+                                },
+                            )
+                        )
                 for spec in pending:
-                    if spec.fingerprint not in alert_tasks:
+                    if (
+                        current_fingerprints is not None
+                        and spec.fingerprint in current_fingerprints
+                        and spec.fingerprint not in alert_tasks
+                    ):
                         await schedule_alert(spec)
+                for spec in legacy_recheck:
+                    if (
+                        current_fingerprints is None
+                        or spec.fingerprint not in current_fingerprints
+                    ):
+                        continue
+                    migrated = begin_alert_repair(
+                        fingerprint=spec.fingerprint,
+                        title=spec.title,
+                        description=spec.description,
+                        repo=spec.repo,
+                        project=spec.project,
+                        verification_labels=spec.verification_labels,
+                        maintenance_capability=spec.maintenance_capability,
+                        fail_safe=False,
+                    )
+                    active_alerts[spec.fingerprint] = migrated.controller_id
+                    append_alert_event(
+                        ALERT_QUEUED_EVENT,
+                        migrated,
+                        migrated_from_legacy_fail_safe=True,
+                    )
+                    if migrated.fingerprint not in alert_tasks:
+                        await schedule_alert(migrated)
         finally:
             recovery_complete.set()
 
@@ -756,6 +951,16 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     async def ready() -> Response | dict[str, Any]:
         checks: dict[str, Any] = {}
         timeout = 5.0
+        game = (
+            read_game_mode_state(
+                cfg.game_mode_state_path,
+                active_max_age_seconds=cfg.game_mode_active_max_age_seconds,
+                restore_grace_seconds=cfg.game_mode_restore_grace_seconds,
+            )
+            if cfg.game_mode_enabled
+            else None
+        )
+        game_mode_active = game is not None and game.suppress_alerts
         async with httpx.AsyncClient(timeout=timeout) as client:
             for name, base_url in (
                 ("prometheus", cfg.prometheus_url),
@@ -771,6 +976,12 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     }
                 except httpx.HTTPError as exc:
                     checks[name] = {"ok": False, "detail": str(exc)}
+                if (
+                    game_mode_active
+                    and name in {"prometheus", "alertmanager"}
+                    and not checks[name]["ok"]
+                ):
+                    checks[name]["expected_down"] = True
         kernel = await kernel_health()
         provider_health = {
             str(item.get("provider_id")): item
@@ -783,7 +994,20 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             for provider in kernel.get("providers", [])
             if isinstance(provider, dict) and provider.get("available") is False
         ]
-        ready_ok = all(value["ok"] for value in checks.values()) and not unavailable_providers
+        expected_monitoring_down = game_mode_active and any(
+            value.get("expected_down") is True for value in checks.values()
+        )
+        expected_unavailable = (
+            expected_monitoring_down
+            and set(unavailable_providers) <= {"personal-monitoring"}
+        )
+        checks_ok = all(
+            value["ok"] or value.get("expected_down") is True
+            for value in checks.values()
+        )
+        ready_ok = checks_ok and (
+            not unavailable_providers or expected_unavailable
+        )
         profile_metrics.record_readiness(ready_ok, kernel)
         body: dict[str, Any] = {
             "status": (
@@ -794,6 +1018,14 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "checks": checks,
             "kernel": kernel,
         }
+        if expected_monitoring_down:
+            body["expected_degraded"] = {
+                "reason": "game_mode_active",
+                "detail": (
+                    "Prometheus/Alertmanager and the personal-monitoring provider "
+                    "are expected to be unavailable while game mode stops containers."
+                ),
+            }
         if unavailable_providers:
             body["unavailable_providers"] = unavailable_providers
         if body["status"] == "ok":
@@ -920,9 +1152,11 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 continue
             if alert_status != "firing":
                 continue
-            if game is not None and game.suppress_alerts and (
-                alertname in cfg.game_mode_alertnames or job in cfg.game_mode_scrape_jobs
-            ):
+            game_mode_suppressible = alertname in cfg.game_mode_alertnames or (
+                alertname == "PrometheusScrapeFailed"
+                and job in cfg.game_mode_scrape_jobs
+            )
+            if game is not None and game.suppress_alerts and game_mode_suppressible:
                 suppressed += 1
                 continue
             project_label = str(labels.get("project", "")) or None
@@ -939,10 +1173,17 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             async with alert_lock:
                 existing_controller = active_alerts.get(fingerprint)
                 if existing_controller:
-                    deduplicated += 1
-                    waiting += 1
-                    controllers.append(existing_controller)
-                    continue
+                    safety_recheck = requires_safety_recheck(fingerprint)
+                    if not safety_recheck:
+                        deduplicated += 1
+                        waiting += 1
+                        controllers.append(existing_controller)
+                        continue
+                    # The only allowed replacement is migration of a legacy
+                    # name-based fail-safe record. A live fingerprint never
+                    # creates a second controller/Work after a Codex outcome;
+                    # retries remain inside the original Work.
+                    active_alerts.pop(fingerprint, None)
             automatic_maintenance = (
                 cfg.automatic_handling_enabled
                 and alertname in cfg.auto_maintenance_alertnames
@@ -950,38 +1191,28 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             automatic_repair = (
                 cfg.automatic_handling_enabled and alertname in cfg.auto_repair_alertnames
             )
-            fail_safe = alertname in FAIL_SAFE_ALERT_NAMES or not (
-                automatic_repair or automatic_maintenance
+            project = project_label if project_label in cfg.allowed_auto_projects else None
+            safety_hint = (
+                "Historical safety hint only: this alert class normally requires extra safety "
+                "review. Do not use the hint as the current safety decision; Codex must judge "
+                "the current evidence.\n"
+                if alertname in HISTORICAL_SAFETY_HINT_ALERT_NAMES
+                else ""
             )
-            if fail_safe:
-                spec = begin_alert_repair(
-                    fingerprint=fingerprint,
-                    title=f"Alert (fail-safe): {alertname}",
-                    description=(
-                        "This alert is fail-safe only. Invoke Codex for diagnosis, but do not "
-                        "execute any effect without explicit owner authorization.\n"
-                        f"{description}"
-                    ),
-                    repo=None,
-                    project=None,
-                    verification_labels=verification_labels,
-                    fail_safe=True,
-                )
-            else:
-                project = project_label if project_label in cfg.allowed_auto_projects else None
-                spec = begin_alert_repair(
-                    fingerprint=fingerprint,
-                    title=f"Alert: {alertname}",
-                    description=description,
-                    repo=cfg.project_dirs.get(project) if project else None,
-                    project=project,
-                    verification_labels=verification_labels,
-                    maintenance_capability=(
-                        "maintenance.cleanup_known_garbage"
-                        if automatic_maintenance
-                        else None
-                    ),
-                )
+            spec = begin_alert_repair(
+                fingerprint=fingerprint,
+                title=f"Alert: {alertname}",
+                description=safety_hint + description,
+                repo=(cfg.project_dirs.get(project) if automatic_repair and project else None),
+                project=project if automatic_repair else None,
+                verification_labels=verification_labels,
+                maintenance_capability=(
+                    "maintenance.cleanup_known_garbage"
+                    if automatic_maintenance
+                    else None
+                ),
+                fail_safe=False,
+            )
 
             async with alert_lock:
                 existing_controller = active_alerts.get(fingerprint)

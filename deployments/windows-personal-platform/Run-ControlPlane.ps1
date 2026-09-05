@@ -66,6 +66,49 @@ function Write-LauncherEvent {
     Add-Content -LiteralPath $launcherLog -Value "$timestamp $Message" -Encoding utf8
 }
 
+function Get-DescendantProcess {
+    param([Parameter(Mandatory)][int]$RootProcessId)
+
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $frontier = [System.Collections.Generic.HashSet[int]]::new()
+    $seen = [System.Collections.Generic.HashSet[int]]::new()
+    $null = $frontier.Add($RootProcessId)
+    $null = $seen.Add($RootProcessId)
+    $descendants = [System.Collections.Generic.List[object]]::new()
+
+    while ($frontier.Count -gt 0) {
+        $next = [System.Collections.Generic.HashSet[int]]::new()
+        foreach ($process in $allProcesses) {
+            $parentId = [int]$process.ParentProcessId
+            $processId = [int]$process.ProcessId
+            if ($frontier.Contains($parentId) -and $seen.Add($processId)) {
+                $descendants.Add($process)
+                $null = $next.Add($processId)
+            }
+        }
+        $frontier = $next
+    }
+
+    return $descendants
+}
+
+function Test-ActiveCodexDescendant {
+    param([Parameter(Mandatory)][int]$RootProcessId)
+
+    try {
+        $descendants = @(Get-DescendantProcess -RootProcessId $RootProcessId)
+        return @($descendants | Where-Object {
+            $_.CommandLine -match '(?i)\bcodex(?:\.cmd)?\s+exec\b'
+        }).Count -gt 0
+    }
+    catch {
+        # An inability to inspect the tree is not evidence that it is safe to
+        # terminate it. Fail closed and let the child continue.
+        Write-LauncherEvent 'process_tree_probe_failed action=continue_child'
+        return $true
+    }
+}
+
 Protect-LogDirectory
 Rotate-ExactLog -Path $stdoutLog
 Rotate-ExactLog -Path $stderrLog
@@ -108,7 +151,13 @@ try {
         }
 
         if ($consecutiveFailures -ge $LivenessFailureThreshold) {
-            Write-LauncherEvent "liveness_threshold_reached action=terminate_child"
+            if (Test-ActiveCodexDescendant -RootProcessId $child.Id) {
+                Write-LauncherEvent 'liveness_threshold_reached action=defer_due_to_active_codex'
+                $consecutiveFailures = 0
+                continue
+            }
+
+            Write-LauncherEvent 'liveness_threshold_reached action=terminate_child_no_active_codex'
             $taskkill = Join-Path $env:WINDIR 'System32\taskkill.exe'
             & $taskkill /PID $child.Id /T /F *> $null
             $child.WaitForExit()

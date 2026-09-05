@@ -15,7 +15,7 @@ from portable_runtime.controller import (
     RevisionScope,
 )
 from portable_runtime.core.capabilities import CapabilityResult
-from portable_runtime.core.models import new_id
+from portable_runtime.core.models import new_id, utcnow
 from portable_runtime.responsibility import EffectClass
 
 from .kernel_bridge import PersonalKernelBridge
@@ -153,6 +153,15 @@ class BlockedEscalationPolicy:
             stage="cognitive-blocker",
             capability="reason.generate",
             result=self._capability_result(),
+        )
+        # ``start_run`` is only used here to bind durable evidence. It is not
+        # a live execution after the failure has been recorded. Close that
+        # execution claim explicitly and leave the Work waiting for an owner.
+        self.bridge.runtime.store.save_run(
+            run.model_copy(update={"status": "interrupted", "ended_at": utcnow()})
+        )
+        self.bridge.runtime.store.save_work(
+            work.model_copy(update={"status": "waiting", "updated_at": utcnow()})
         )
 
     async def select(self, state: ControllerState) -> ControllerDecision:

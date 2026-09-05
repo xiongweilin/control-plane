@@ -63,7 +63,10 @@ class ControlPlaneConfig:
     codex_disable_ssh_credentials: bool = True
     codex_worktree_root: Path = PROJECT_ROOT.parent / ".control-plane-codex-worktrees"
     max_agent_output_bytes: int = 200_000
-    gateway_timeout_seconds: float = 120.0
+    # A Codex invocation is a complete agent session, not a single HTTP
+    # round-trip. Keep enough time for multi-turn reasoning before treating
+    # the provider as unavailable.
+    gateway_timeout_seconds: float = 900.0
     max_agent_calls_per_repair: int = 8
 
     prometheus_url: str = "http://127.0.0.1:19090"
@@ -76,7 +79,8 @@ class ControlPlaneConfig:
     )
     cooldown_seconds: int = 600
     max_attempts: int = 2
-    per_repair_timeout_seconds: int = 900
+    # Two bounded Codex diagnosis attempts may each use the provider budget.
+    per_repair_timeout_seconds: int = 1800
     max_concurrent: int = 2
 
     environment_enabled: bool = True

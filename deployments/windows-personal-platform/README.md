@@ -25,6 +25,12 @@ Canonical files:
 - `Run-ControlPlane.ps1` / `Run-ControlPlaneHidden.vbs` — process supervisor.
 - `Watch-ControlPlane.ps1` / `Watch-ControlPlaneHidden.vbs` — liveness watchdog.
 
+The supervisor treats `/live` failures as degraded health, not as proof that the
+process tree is safe to terminate. When an active Codex descendant exists, a
+liveness threshold is recorded and restart is deferred so a long diagnosis or
+repair cannot be killed by the probe. Recovery remains available when the child
+process exits or when a liveness threshold is reached with no active Codex work.
+
 The supervisor and installer resolve the repository root two levels above this
 deployment directory, so the scheduled task can run from any working directory.
 
