@@ -5,6 +5,31 @@
 Kernel。provider 的 `available` 表示“探针本身可用”，不表示被检查对象健康；对象健康
 由 `control_plane_environment_check` 的 `status` 标签表达。
 
+## 告警接收与恢复
+
+control-plane 监听 `0.0.0.0:18083`，本机守护脚本仍使用
+`http://127.0.0.1:18083/live`；Prometheus 和 Alertmanager 通过 Docker Desktop 的
+`host.docker.internal:18083` 访问。Windows 防火墙由安装脚本幂等维护为 TCP、入站、
+`RemoteAddress=LocalSubnet`、`Profile=Any`、禁止边界穿透。不要把 Docker Desktop 的
+动态网关地址写入配置，也不要把 Docker Compose 改成 host network。
+
+Alertmanager webhook 只做认证、字段清洗、指纹去重和 durable enqueue，然后立即返回
+2xx；Codex 诊断、Agent Kernel Work/Run 闭环、效果执行和 Prometheus 验证由后台有界
+dispatcher 完成。`policy.max_concurrent` 限制并发修复数，
+`policy.per_repair_timeout_seconds` 限制单个闭环时长；同一 Alertmanager fingerprint
+在收到 resolved 之前只对应一个 controller。接收、完成、解析状态写入 Agent Kernel
+事件存储，进程重启时未完成或失败的队列项会恢复，已 resolved 的 fingerprint 不会
+重新执行。
+
+自动 effect 仍必须同时满足 `environment.automatic_handling_enabled` 和告警 allowlist；
+开关关闭时，即使告警名在 allowlist 中也强制走 fail-safe 的 Codex 诊断路径。Prometheus
+未提供 project 映射的告警不会凭 job/instance 猜测项目或执行 Compose effect。
+
+`/ready` 与 `/metrics` 共用短时 kernel health cache，避免 Prometheus 抓取并发触发
+重复 provider 探针；环境巡检的 Git、PowerShell 和 SSH 子进程使用 control-plane 自己
+的有界终止路径，超时后不保留失控子进程。`/live` 只证明 HTTP 进程存活，不等待 Codex、
+环境巡检或外部依赖。
+
 ## 覆盖范围
 
 当前检查项为：

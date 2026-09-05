@@ -17,7 +17,7 @@ from typing import Any
 
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
-from .environment import EnvironmentSnapshot
+from .environment import CHECK_NAMES, EnvironmentSnapshot
 
 _REPAIR_KIND = "personal-incident-repair"
 _REPAIR_STATUS_LABELS = ("active", "waiting", "blocked", "closed", "failed", "interrupted")
@@ -326,6 +326,8 @@ class ControlPlaneMetricsCollector:
         if snapshot is None:
             environment_timestamp.add_metric([], 0)
             environment_errors.add_metric([], 0)
+            for name in CHECK_NAMES:
+                environment_metric.add_metric([name, "unknown", "warning", "none", "false"], 2)
         else:
             environment_timestamp.add_metric([], snapshot.checked_at)
             environment_errors.add_metric([], 1 if snapshot.probe_error else 0)

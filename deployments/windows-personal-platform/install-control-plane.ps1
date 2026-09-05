@@ -58,8 +58,33 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $ruleName = 'ControlPlane 18083'
-if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18083 -RemoteAddress LocalSubnet | Out-Null
+$rule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+if ($null -eq $rule) {
+    New-NetFirewallRule `
+        -DisplayName $ruleName `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol TCP `
+        -LocalPort 18083 `
+        -RemoteAddress LocalSubnet `
+        -Profile Any `
+        -EdgeTraversalPolicy Block | Out-Null
+} else {
+    $rule | Set-NetFirewallRule `
+        -Enabled True `
+        -Direction Inbound `
+        -Action Allow `
+        -Profile Any `
+        -EdgeTraversalPolicy Block
+    $addressFilter = $rule | Get-NetFirewallAddressFilter
+    Set-NetFirewallAddressFilter -InputObject $addressFilter `
+        -LocalAddress Any `
+        -RemoteAddress LocalSubnet
+    $portFilter = $rule | Get-NetFirewallPortFilter
+    Set-NetFirewallPortFilter -InputObject $portFilter `
+        -Protocol TCP `
+        -LocalPort 18083 `
+        -RemotePort Any
 }
 
 Register-ScheduledTask -TaskName 'ControlPlane' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null

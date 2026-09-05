@@ -1,10 +1,12 @@
+import asyncio
 from pathlib import Path
 
 import httpx
 import pytest
 from portable_runtime.responsibility import ResponsibilityKernel
 
-from control_plane.app import _split_controller_reply, create_app
+import control_plane.app as app_module
+from control_plane.app import ALERT_QUEUED_EVENT, _split_controller_reply, create_app
 from control_plane.config import ControlPlaneConfig
 from control_plane.kernel_bridge import PersonalKernelBridge
 
@@ -131,9 +133,64 @@ async def test_metrics_refreshes_read_only_environment_provider(tmp_path: Path) 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/metrics")
+        await asyncio.sleep(1)
+        response = await client.get("/metrics")
 
     assert response.status_code == 200
     text = response.text
     assert "control_plane_environment_last_check_timestamp_seconds" in text
     assert 'check="docker_exited_containers"' in text
     assert 'status="unknown"' in text
+
+
+@pytest.mark.asyncio
+async def test_alert_ingress_is_deduplicated_and_does_not_wait_for_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(make_config(tmp_path))
+
+    async def fake_drive(controller: object, controller_id: str, policy: object) -> object:
+        del policy
+        await asyncio.sleep(0.05)
+        return controller.get(controller_id)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(app_module, "drive_policy", fake_drive)
+    payload = {
+        "alerts": [
+            {
+                "status": "firing",
+                "fingerprint": "stable-fingerprint",
+                "labels": {"alertname": "PrometheusScrapeFailed", "job": "control-plane"},
+                "annotations": {"summary": "probe failed"},
+            }
+        ]
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post(
+            "/v1/alerts/alertmanager",
+            json=payload,
+            headers={"X-Control-Plane-Key": "test-key"},
+        )
+        second = await client.post(
+            "/v1/alerts/alertmanager",
+            json=payload,
+            headers={"X-Control-Plane-Key": "test-key"},
+        )
+
+    assert first.status_code == 200
+    assert first.json()["queued"] == 1
+    assert first.json()["deduplicated"] == 0
+    assert second.status_code == 200
+    assert second.json()["queued"] == 0
+    assert second.json()["deduplicated"] == 1
+    assert second.json()["controllers"] == first.json()["controllers"]
+
+    queued = [
+        event
+        for event in app.state.kernel_runtime.store.list_events()
+        if event.type == ALERT_QUEUED_EVENT
+    ]
+    assert len(queued) == 1
+    assert queued[0].payload["fail_safe"] is True
+    await asyncio.sleep(0.1)
