@@ -22,6 +22,21 @@ max_output_bytes = 200000
 prometheus_url = "http://127.0.0.1:19090"
 alertmanager_url = ""
 notification_enabled = true
+auto_repair_alertnames = ["ContainerRestartStorm", "PrometheusScrapeFailed", "ControlPlaneStaleReady"]
+
+[environment]
+# 全部为只读巡检。未配置 cloud_ssh_target 时，云端项目标记为未配置，不会发起 SSH。
+enabled = true
+cache_seconds = 60
+probe_timeout_seconds = 30
+cloud_probe_timeout_seconds = 30
+windows_scan_roots = ["D:\\agent"]
+docker_build_cache_max_bytes = 5368709120
+v2rayn_expected_path = "D:\\agent\\v2rayN-windows-64\\v2rayN.exe"
+cloud_ssh_target = ""
+cloud_ssh_identity_file = ""
+cloud_protected_root = ""
+cloud_tailscale_profile = ""
 
 [game_mode]
 enabled = true

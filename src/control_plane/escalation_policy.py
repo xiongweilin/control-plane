@@ -194,3 +194,32 @@ async def preserve_blocked_wait(
     if state.status is not ControllerStatus.WAITING or bridge.work_for_state(state) is None:
         raise RuntimeError("blocked personal task did not settle into durable WAITING Work")
     return state
+
+
+async def create_fail_safe_alert_work(
+    controller: CognitiveController,
+    bridge: PersonalKernelBridge,
+    *,
+    title: str,
+    description: str,
+    verification_labels: dict[str, str] | None = None,
+) -> ControllerState:
+    """Create a durable no-effect escalation for an unsafe environment alert."""
+
+    state, _assessment_ref = bridge.begin(
+        title=title,
+        description=description,
+        kind="personal-incident-repair",
+        verification_labels=verification_labels or {},
+    )
+    wait = ControllerDecision(
+        controller_ref=state.id,
+        state_version=state.version,
+        kind=ControllerDecisionKind.WAIT,
+        reason=(
+            "environment alert is fail-safe only; preserve evidence and require explicit "
+            "owner direction before any effect"
+        ),
+    )
+    waiting = await controller.apply(wait)
+    return await preserve_blocked_wait(controller, bridge, waiting)

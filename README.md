@@ -127,6 +127,9 @@ The external personal surface is preserved:
 - `GET /v1/game-mode` — current personal game-mode projection.
 - `GET /v1/sessions/inspect` — reports sensitive field names only, never values.
 
+Environment inspection, metric names, fail-safe alert routing and manual escalation boundaries
+are documented in [`docs/environment-checks.md`](docs/environment-checks.md).
+
 Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task` continue to dispatch to `/v1/tasks`, so no second Feishu command protocol is introduced. Escalation still tells the owner to send `/task <controller_id> <explicit command>`.
 
 ## Models
