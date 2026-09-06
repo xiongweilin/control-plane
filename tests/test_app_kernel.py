@@ -69,6 +69,7 @@ def test_personal_effect_rules_are_kernel_owned(tmp_path: Path) -> None:
         "git.push": ("write-remote", True, True, True, 2, 2),
         "git.fast_forward": ("write-local", False, True, True, 1, 1),
         "git.push_exact_ref": ("write-remote", False, True, True, 2, 2),
+        "git.discard_line_ending_changes": ("write-local", False, True, False, 1, 1),
         "chezmoi.apply": ("write-local", False, True, True, 1, 1),
         "git.rollback": ("write-local", True, True, True, 2, 2),
         "docker.restart": ("write-remote", True, True, False, 2, 2),
@@ -343,6 +344,59 @@ async def test_any_project_alert_enters_the_auto_repair_scope_without_name_allow
     assert len(queued) == 1
     assert queued[0].payload["project"] == "test"
     assert queued[0].payload["repo"] == str(tmp_path)
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_sync_alert_without_project_targets_only_the_exact_line_ending_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = replace(
+        make_config(tmp_path),
+        automatic_handling_enabled=True,
+        allowed_auto_projects=("ratio",),
+        project_dirs={"ratio": str(tmp_path)},
+        line_ending_auto_discard_repos=(str(tmp_path),),
+    )
+    app = create_app(cfg)
+
+    async def fake_drive(controller: object, controller_id: str, policy: object) -> object:
+        del policy
+        return controller.get(controller_id)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(app_module, "drive_policy", fake_drive)
+    payload = {
+        "alerts": [
+            {
+                "status": "firing",
+                "fingerprint": "ratio-line-ending-noise",
+                "labels": {"alertname": "ControlPlaneSynchronizationDegraded"},
+                "annotations": {"summary": "ratio worktree drift"},
+            }
+        ]
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/alerts/alertmanager",
+            json=payload,
+            headers={"X-Control-Plane-Key": "test-key"},
+        )
+
+    assert response.status_code == 200
+    queued = [
+        event
+        for event in app.state.kernel_runtime.store.list_events()
+        if event.type == ALERT_QUEUED_EVENT
+    ]
+    assert len(queued) == 1
+    assert queued[0].payload["project"] == "ratio"
+    assert queued[0].payload["repo"] == str(tmp_path)
+    assert queued[0].payload["maintenance_capability"] == "git.discard_line_ending_changes"
+    assert queued[0].payload["maintenance_parameters"] == {
+        "repo": str(tmp_path),
+        "project": "ratio",
+    }
     await asyncio.sleep(0.05)
 
 

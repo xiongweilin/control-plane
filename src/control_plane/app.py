@@ -82,6 +82,8 @@ ALERT_QUEUED_EVENT = "ControlPlaneAlertQueued"
 ALERT_FINISHED_EVENT = "ControlPlaneAlertFinished"
 ALERT_RESOLVED_EVENT = "ControlPlaneAlertResolved"
 ALERT_ESCALATED_EVENT = "ControlPlaneAlertEscalated"
+_SYNC_ALERT_NAME = "ControlPlaneSynchronizationDegraded"
+_LINE_ENDING_DISCARD_CAPABILITY = "git.discard_line_ending_changes"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,7 @@ class AlertRepair:
     project: str | None
     verification_labels: dict[str, str]
     maintenance_capability: str | None
+    maintenance_parameters: dict[str, str]
 
 
 def _register_profile_effect_rules(runtime: Any) -> None:
@@ -151,6 +154,15 @@ def _register_profile_effect_rules(runtime: Any) -> None:
             version_required=True,
             blast_radius=2,
             exposure=2,
+        ),
+        CapabilityEffectRule(
+            capability="git.discard_line_ending_changes",
+            impact_class="write-local",
+            authorization_required=False,
+            resource_required=True,
+            version_required=False,
+            blast_radius=1,
+            exposure=1,
         ),
         CapabilityEffectRule(
             capability="chezmoi.apply",
@@ -504,6 +516,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         project: str | None,
         verification_labels: dict[str, str],
         maintenance_capability: str | None = None,
+        maintenance_parameters: dict[str, str] | None = None,
     ) -> AlertRepair:
         state, _assessment_ref = bridge.begin(
             title=title,
@@ -522,6 +535,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             project=project,
             verification_labels=verification_labels,
             maintenance_capability=maintenance_capability,
+            maintenance_parameters=dict(maintenance_parameters or {}),
         )
 
     def alert_policy(spec: AlertRepair) -> AutonomousRepairPolicy:
@@ -537,6 +551,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             diagnosis_timeout_seconds=cfg.diagnosis_timeout_seconds,
             execution_timeout_seconds=cfg.execution_timeout_seconds,
             maintenance_capability=spec.maintenance_capability,
+            maintenance_parameters=spec.maintenance_parameters,
         )
 
     def alert_event_payload(spec: AlertRepair) -> dict[str, Any]:
@@ -549,6 +564,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "project": spec.project,
             "verification_labels": dict(spec.verification_labels),
             "maintenance_capability": spec.maintenance_capability,
+            "maintenance_parameters": dict(spec.maintenance_parameters),
         }
 
     def append_alert_event(event_type: str, spec: AlertRepair, **extra: Any) -> None:
@@ -714,6 +730,13 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         str(event.payload["maintenance_capability"])
                         if event.payload.get("maintenance_capability")
                         else None
+                    ),
+                    maintenance_parameters=(
+                        {str(k): str(v) for k, v in parameters.items()}
+                        if isinstance(
+                            parameters := event.payload.get("maintenance_parameters"), dict
+                        )
+                        else {}
                     ),
                 )
         active: dict[str, str] = {}
@@ -1140,7 +1163,28 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 and alertname in cfg.auto_maintenance_alertnames
             )
             project = project_label if project_label in cfg.allowed_auto_projects else None
+            line_ending_target: tuple[str, str] | None = None
+            if (
+                cfg.automatic_handling_enabled
+                and alertname == _SYNC_ALERT_NAME
+                and project_label in (None, "ratio")
+            ):
+                candidates = [
+                    (str(raw_repo), candidate_project)
+                    for raw_repo in cfg.line_ending_auto_discard_repos
+                    if (candidate_project := cfg.auto_project_for_repo(raw_repo))
+                    and candidate_project in cfg.allowed_auto_projects
+                    and (project_label is None or candidate_project == project_label)
+                ]
+                if len(candidates) == 1:
+                    line_ending_target = candidates[0]
+                    project = line_ending_target[1]
             automatic_repair = cfg.automatic_handling_enabled and project is not None
+            target_repo = (
+                line_ending_target[0]
+                if line_ending_target is not None
+                else (cfg.project_dirs.get(project) if automatic_repair and project else None)
+            )
             safety_hint = (
                 "Historical safety hint only: this alert class normally requires extra safety "
                 "review. Do not use the hint as the current safety decision; Codex must judge "
@@ -1152,13 +1196,22 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 fingerprint=fingerprint,
                 title=f"Alert: {alertname}",
                 description=safety_hint + description,
-                repo=(cfg.project_dirs.get(project) if automatic_repair and project else None),
+                repo=target_repo if automatic_repair else None,
                 project=project if automatic_repair else None,
                 verification_labels=verification_labels,
                 maintenance_capability=(
-                    "maintenance.cleanup_known_garbage"
-                    if automatic_maintenance
-                    else None
+                    _LINE_ENDING_DISCARD_CAPABILITY
+                    if line_ending_target is not None
+                    else (
+                        "maintenance.cleanup_known_garbage"
+                        if automatic_maintenance
+                        else None
+                    )
+                ),
+                maintenance_parameters=(
+                    {"repo": line_ending_target[0], "project": line_ending_target[1]}
+                    if line_ending_target is not None
+                    else {}
                 ),
             )
 

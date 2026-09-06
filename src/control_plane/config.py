@@ -80,7 +80,12 @@ class ControlPlaneConfig:
     environment_cache_seconds: int = 60
     environment_probe_timeout_seconds: int = 30
     docker_build_cache_max_bytes: int = 5 * 1024**3
-    docker_expected_exited_containers: tuple[str, ...] = ("dify-init_permissions-1",)
+    docker_expected_exited_containers: tuple[str, ...] = (
+        "dify-init_permissions-1",
+        "commerce-db-bootstrap",
+        "commerce-migrate",
+    )
+    line_ending_auto_discard_repos: tuple[str, ...] = (r"D:\agent\ratio",)
     recovery_paths: tuple[str, ...] = (
         r"D:\agent\ratio",
         r"D:\agent\docker备份",
@@ -294,6 +299,12 @@ class ControlPlaneConfig:
                 str(v)
                 for v in environment.get(
                     "docker_expected_exited_containers", base.docker_expected_exited_containers
+                )
+            ),
+            line_ending_auto_discard_repos=tuple(
+                str(v)
+                for v in environment.get(
+                    "line_ending_auto_discard_repos", base.line_ending_auto_discard_repos
                 )
             ),
             recovery_paths=tuple(
