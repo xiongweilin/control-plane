@@ -42,6 +42,7 @@ class PersonalOperationsProvider:
                 "git.rollback",
                 "git.fast_forward",
                 "git.push_exact_ref",
+                "git.discard_line_ending_changes",
                 "chezmoi.apply",
                 "docker.restart",
                 "docker.compose.up",
@@ -226,6 +227,36 @@ class PersonalOperationsProvider:
             raise RuntimeError(f"command failed ({proc.returncode}): {(err or out)[:800]}")
         return out
 
+    async def _run_bytes(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: float = 120,
+    ) -> bytes:
+        executable = shutil.which(argv[0]) or argv[0]
+        proc = await asyncio.create_subprocess_exec(
+            executable,
+            *argv[1:],
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise TimeoutError(
+                f"command outcome is ambiguous after timeout: {argv[0]}"
+            ) from None
+        output = stdout or b""
+        if proc.returncode != 0:
+            err = (stderr or b"").decode("utf-8", errors="replace").strip()
+            out = output.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"command failed ({proc.returncode}): {(err or out)[:800]}")
+        return output
+
     def _repo(self, request: CapabilityRequest) -> str:
         repo = str(request.parameters.get("repo") or request.resource_ref or "").strip()
         if not repo:
@@ -285,6 +316,98 @@ class PersonalOperationsProvider:
         )
         if status:
             raise ValueError("repository worktree is not clean")
+
+    def _line_ending_repo(self, request: CapabilityRequest) -> str:
+        if not self.config.automatic_handling_enabled:
+            raise ValueError("automatic handling is disabled")
+        if request.actor_ref != self.config.owner_principal:
+            raise ValueError("line-ending cleanup actor does not match the configured owner")
+        repo = str(request.parameters.get("repo") or request.resource_ref or "").strip()
+        if not repo:
+            raise ValueError("line-ending cleanup requires parameters.repo")
+        if not self.config.repo_allowed(repo):
+            raise ValueError(f"repo is outside personal allowlist: {repo}")
+        resolved_repo = Path(repo).resolve(strict=False)
+        configured_repos = {
+            Path(raw_path).resolve(strict=False)
+            for raw_path in self.config.line_ending_auto_discard_repos
+        }
+        if resolved_repo not in configured_repos:
+            raise ValueError("repo is outside the exact line-ending cleanup allowlist")
+        if not resolved_repo.is_dir() or not (resolved_repo / ".git").exists():
+            raise ValueError("line-ending cleanup target is not a Git repository")
+        project = str(request.parameters.get("project", "")).strip()
+        if project and self.config.auto_project_for_repo(repo) != project:
+            raise ValueError("line-ending cleanup project does not match the configured repo")
+        return str(resolved_repo)
+
+    @staticmethod
+    def _normalize_line_endings(value: bytes) -> bytes:
+        return value.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+    async def _git_discard_line_ending_changes(self, request: CapabilityRequest) -> str:
+        repo = self._line_ending_repo(request)
+        status = await self._run_bytes(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=repo,
+        )
+        entries = [entry for entry in status.split(b"\0") if entry]
+        if not entries:
+            return "no line-ending-only changes found"
+
+        repo_path = Path(repo).resolve(strict=True)
+        relative_paths: list[str] = []
+        for entry in entries:
+            if len(entry) < 4 or entry[:2] != b" M" or entry[2:3] != b" ":
+                raise ValueError(
+                    "refusing automatic line-ending cleanup: staged, untracked, "
+                    "renamed, deleted, or other non-worktree changes are present"
+                )
+            try:
+                relative = entry[3:].decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    "refusing automatic line-ending cleanup: path is not UTF-8"
+                ) from exc
+            unresolved_candidate = repo_path / relative
+            if unresolved_candidate.is_symlink() or getattr(
+                os.path, "isjunction", lambda _: False
+            )(unresolved_candidate):
+                raise ValueError("refusing automatic line-ending cleanup: symlink path")
+            candidate = unresolved_candidate.resolve(strict=False)
+            if repo_path not in candidate.parents or not candidate.is_file():
+                raise ValueError(
+                    "refusing automatic line-ending cleanup: path leaves the repository"
+                )
+            relative_paths.append(relative)
+
+            current = candidate.read_bytes()
+            git_path = relative.replace("\\", "/")
+            head = await self._run_bytes(["git", "show", f"HEAD:{git_path}"], cwd=repo)
+            if b"\0" in current or b"\0" in head:
+                raise ValueError("refusing automatic line-ending cleanup: binary file")
+            try:
+                current.decode("utf-8", errors="strict")
+                head.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ValueError("refusing automatic line-ending cleanup: non-text file") from exc
+            if self._normalize_line_endings(current) != self._normalize_line_endings(head):
+                raise ValueError(
+                    "refusing automatic line-ending cleanup: semantic content difference detected"
+                )
+
+        await self._run(
+            ["git", "restore", "--worktree", "--source=HEAD", "--", *relative_paths],
+            cwd=repo,
+        )
+        remaining = await self._run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=repo
+        )
+        if remaining:
+            raise RuntimeError(
+                "line-ending cleanup postcondition failed: repository is still not clean"
+            )
+        return f"discarded line-ending-only changes in {len(relative_paths)} tracked file(s)"
 
     async def _git_head(self, repo: str) -> str:
         value = (await self._run(["git", "rev-parse", "HEAD"], cwd=repo)).strip().lower()
@@ -429,6 +552,8 @@ class PersonalOperationsProvider:
             return await self._git_fast_forward(request)
         if request.capability == "git.push_exact_ref":
             return await self._git_push_exact_ref(request)
+        if request.capability == "git.discard_line_ending_changes":
+            return await self._git_discard_line_ending_changes(request)
         repo = self._repo(request)
         if request.capability == "git.push":
             remote = str(request.parameters.get("remote", "origin"))

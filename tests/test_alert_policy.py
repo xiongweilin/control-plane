@@ -726,6 +726,39 @@ async def test_alert_policy_can_declare_bounded_automatic_maintenance() -> None:
     ]
 
 
+async def test_line_ending_cleanup_is_a_provider_only_reversible_effect() -> None:
+    _runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
+    policy = AutonomousRepairPolicy(
+        controller=controller,
+        bridge=bridge,
+        prompt="ratio contains line-ending-only worktree noise",
+        diagnosis_model=DIAGNOSIS_MODEL,
+        execution_model=EXECUTION_MODEL,
+        repo="D:/agent/ratio",
+        project="ratio",
+        verification_labels={"alertname": "ControlPlaneSynchronizationDegraded"},
+        maintenance_capability="git.discard_line_ending_changes",
+        maintenance_parameters={"repo": "D:/agent/ratio", "project": "ratio"},
+    )
+
+    diagnosis = await policy.select(state)
+    _record_cognitive_result(
+        controller,
+        state.id,
+        diagnosis,
+        message="SAFETY_CLASS=REVERSIBLE\nline endings only",
+    )
+    closure = await policy.select(state)
+
+    assert closure.closure is not None
+    assert closure.closure.requested_capabilities == [
+        "reason.generate",
+        "git.discard_line_ending_changes",
+        "monitor.alert.active",
+    ]
+    assert closure.closure.effect_class is EffectClass.INTERNAL_REVERSIBLE
+
+
 def test_safety_class_requires_the_current_codex_marker() -> None:
     assert (
         classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=REVERSIBLE\nplan"})

@@ -27,6 +27,7 @@ from .kernel_bridge import PersonalKernelBridge
 _RESULT_EVENT = "ControllerCapabilityResultObserved"
 _DECISION_EVENT = "ControllerDecisionSelected"
 _SYNC_ALERT_NAME = "ControlPlaneSynchronizationDegraded"
+_LINE_ENDING_DISCARD_CAPABILITY = "git.discard_line_ending_changes"
 _SYNC_CAPABILITIES = frozenset(
     {"git.fast_forward", "git.push_exact_ref", "chezmoi.apply"}
 )
@@ -253,7 +254,13 @@ class AutonomousRepairPolicy:
         )
 
     def _is_sync_alert(self) -> bool:
-        return self.verification_labels.get("alertname") == _SYNC_ALERT_NAME
+        return (
+            self.verification_labels.get("alertname") == _SYNC_ALERT_NAME
+            and not self._is_line_ending_cleanup()
+        )
+
+    def _is_line_ending_cleanup(self) -> bool:
+        return self.maintenance_capability == _LINE_ENDING_DISCARD_CAPABILITY
 
     def _sync_plan(self, diagnosis_result: dict[str, Any] | None) -> SynchronizationPlan | None:
         if not self._is_sync_alert():
@@ -291,9 +298,12 @@ class AutonomousRepairPolicy:
         if safety == "irreversible":
             return "irreversible"
         message = _message(diagnosis_result).upper()
-        if re.search(r"(?:EXECUTION|REPAIR)_BLOCKER\s*=\s*DIRTY_REPO", message):
+        if (
+            not self._is_line_ending_cleanup()
+            and re.search(r"(?:EXECUTION|REPAIR)_BLOCKER\s*=\s*DIRTY_REPO", message)
+        ):
             return "dirty-repository"
-        if self._repo_is_dirty() is True:
+        if not self._is_line_ending_cleanup() and self._repo_is_dirty() is True:
             return "dirty-repository"
         return None
 
@@ -320,7 +330,15 @@ class AutonomousRepairPolicy:
             )
         if retry_context:
             instruction += f"\n\nPrevious attempt evidence:\n{retry_context}"
-        if self._is_sync_alert():
+        if self._is_line_ending_cleanup():
+            instruction += (
+                "\n\nThis is an exact allowlisted line-ending-noise cleanup. The provider may act "
+                "only on the configured repository, only on unstaged tracked worktree files, "
+                "and only when each file is byte-for-byte equal to HEAD after CRLF/CR-to-LF "
+                "normalization. Do not use shell commands, do not edit semantic content, and "
+                "do not broaden the path or file scope."
+            )
+        elif self._is_sync_alert():
             instruction += (
                 "\n\nFor this synchronization alert, choose exactly one Kernel-qualified action. "
                 "After the safety line, emit one SYNC_CAPABILITY line with exactly one of "
@@ -378,6 +396,12 @@ class AutonomousRepairPolicy:
     ) -> list[str]:
         if not self._effects_allowed(diagnosis_result):
             return ["reason.generate", "monitor.alert.active"]
+        if self._is_line_ending_cleanup():
+            return [
+                "reason.generate",
+                _LINE_ENDING_DISCARD_CAPABILITY,
+                "monitor.alert.active",
+            ]
         sync_plan = self._sync_plan(diagnosis_result)
         if sync_plan is not None:
             return ["reason.generate", sync_plan.capability, "monitor.alert.active"]
@@ -392,6 +416,8 @@ class AutonomousRepairPolicy:
     def _effect_class(self, diagnosis_result: dict[str, Any] | None = None) -> EffectClass:
         if not self._effects_allowed(diagnosis_result):
             return EffectClass.READ_ONLY
+        if self._is_line_ending_cleanup():
+            return EffectClass.INTERNAL_REVERSIBLE
         sync_plan = self._sync_plan(diagnosis_result)
         if sync_plan is not None:
             return (
@@ -699,6 +725,13 @@ class AutonomousRepairPolicy:
                 "pass, identify the missing evidence, and do not modify files, call effect "
                 "capabilities, access credentials, or claim recovery.\n\n"
             )
+        elif self._is_line_ending_cleanup():
+            execution_prefix = (
+                "Prepare the exact line-ending-noise cleanup for the Kernel provider. Re-read "
+                "the diagnosis evidence, do not run Git or shell commands, do not edit files "
+                "directly, and let the provider enforce the configured repository and semantic "
+                "equality guard. Finish with a concise execution summary.\n\n"
+            )
         elif sync_plan is not None:
             execution_prefix = (
                 "Prepare the selected synchronization operation for the Kernel provider. Re-read "
@@ -725,11 +758,21 @@ class AutonomousRepairPolicy:
             "attempt_index": execution_attempt,
             "timeout_seconds": self.execution_timeout_seconds,
         }
-        if effects_allowed and self.repo and sync_plan is None:
+        if (
+            effects_allowed
+            and self.repo
+            and sync_plan is None
+            and not self._is_line_ending_cleanup()
+        ):
             parameters["repo"] = self.repo
         capability = (
             "shell.exec"
-            if effects_allowed and self.repo and sync_plan is None
+            if (
+                effects_allowed
+                and self.repo
+                and sync_plan is None
+                and not self._is_line_ending_cleanup()
+            )
             else "reason.generate"
         )
         result = await invoke(
@@ -775,6 +818,8 @@ class AutonomousRepairPolicy:
                 **self.maintenance_parameters,
                 "phase": "apply",
             }
+            if self._is_line_ending_cleanup() and self.repo:
+                maintenance_parameters["resource_ref"] = self.repo
             applied = await invoke(
                 self.maintenance_capability,
                 instruction="Apply the already approved bounded maintenance operation.",

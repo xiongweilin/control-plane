@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,45 @@ def sync_config(tmp_path: Path) -> ControlPlaneConfig:
         allowed_auto_projects=("test",),
         project_dirs={"test": str(tmp_path)},
         allowed_repo_roots=(str(tmp_path),),
+        line_ending_auto_discard_repos=(str(tmp_path),),
+    )
+
+
+def init_git_repo(repo: Path) -> None:
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.autocrlf", "false"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "note.md").write_bytes(b"line one\nline two\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "add",
+            "--",
+            "note.md",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        capture_output=True,
     )
 
 
@@ -92,6 +132,63 @@ async def test_unsupported_git_sync_alias_is_not_routed_as_an_effect(
     assert "unsupported git capability" in (result.message or "")
 
 
+@pytest.mark.asyncio
+async def test_line_ending_cleanup_discards_only_semantically_equal_worktree_changes(
+    tmp_path: Path,
+) -> None:
+    init_git_repo(tmp_path)
+    note = tmp_path / "note.md"
+    note.write_bytes(b"line one\r\nline two\r\n")
+    provider = PersonalOperationsProvider(sync_config(tmp_path))
+
+    result = await provider.invoke(
+        CapabilityRequest(
+            id="request:line-ending-cleanup",
+            capability="git.discard_line_ending_changes",
+            actor_ref="principal:test",
+            resource_ref=str(tmp_path),
+            effect_class="write-local",
+            parameters={"repo": str(tmp_path), "project": "test"},
+        ),
+        InvocationContext(runtime_id="test"),
+    )
+
+    assert result.status == "succeeded"
+    assert "line-ending-only" in (result.message or "")
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path), "status", "--porcelain=v1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_line_ending_cleanup_refuses_semantic_content_changes(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    note = tmp_path / "note.md"
+    note.write_bytes(b"line one\r\nchanged\r\n")
+    before = note.read_bytes()
+    provider = PersonalOperationsProvider(sync_config(tmp_path))
+
+    result = await provider.invoke(
+        CapabilityRequest(
+            id="request:line-ending-semantic-change",
+            capability="git.discard_line_ending_changes",
+            actor_ref="principal:test",
+            resource_ref=str(tmp_path),
+            effect_class="write-local",
+            parameters={"repo": str(tmp_path), "project": "test"},
+        ),
+        InvocationContext(runtime_id="test"),
+    )
+
+    assert result.status == "failed"
+    assert "semantic content difference" in (result.message or "")
+    assert note.read_bytes() == before
+
+
 def test_provider_advertises_only_the_exact_synchronization_capability_names(
     tmp_path: Path,
 ) -> None:
@@ -101,6 +198,7 @@ def test_provider_advertises_only_the_exact_synchronization_capability_names(
         "git.fast_forward",
         "git.push_exact_ref",
         "chezmoi.apply",
+        "git.discard_line_ending_changes",
     } <= set(provider.descriptor.capabilities)
     assert "git.sync" not in provider.descriptor.capabilities
 
