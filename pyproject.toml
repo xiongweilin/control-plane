@@ -7,7 +7,7 @@ readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
     "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@599845269bb682732820e6c343db96d558bd5102",
-    "meta-controller @ git+https://github.com/xiongweilin/meta-controller.git@171bcc0fc477e7d7857e935c80eff8ed29cee974",
+    "meta-controller @ git+https://github.com/xiongweilin/meta-controller.git@e6d4f50096d0bf6bc8ecf48d1ab90884f3dd74da",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",
