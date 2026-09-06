@@ -24,7 +24,7 @@ jobs:
         run: |
           uv lock
           rm -f scripts/apply_meta_controller_refactor.py
-      - name: Run full checks on typed plugin integration
+      - name: Run full checks against typed meta-controller
         run: |
           uv sync --extra dev
           uv run ruff check .
