@@ -55,7 +55,7 @@ because one diagnosis may contain multiple model turns.
 - `automatic_handling`：Agent Kernel 注册的 personal-operations provider 可用且自动处理开关开启；
 - `codex_primary`：`codex-primary` provider 健康、CLI 路径存在且不是旧 OpenCodex 路径；
 - `windows_defender`、`third_party_protection`：WinDefend 状态和第三方防护责任可证明性；
-- `ditto_listener`、`smb_rpc_listeners`：Ditto `0.0.0.0:23443` 以及 SMB/RPC 监听；
+- `ditto_listener`、`smb_rpc_listeners`：Ditto `0.0.0.0:23443` 以及 SMB/RPC 监听；若现有入站 Block 规则明确覆盖监听，则记录防火墙证据并不将监听本身判为暴露；
 - `windows_recursive_scan`：递归扫描 access errors，错误不会被当作扫描成功；
 - `docker_exited_containers`、`docker_build_cache`：退出容器和 build cache 大小；
   只有现有游戏会话 owner 提供新鲜状态、明确的游戏进程名或 PID，实时进程探针命中，

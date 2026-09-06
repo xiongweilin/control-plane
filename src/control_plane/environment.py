@@ -364,6 +364,81 @@ def _ports(payload: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     return [item for item in raw if isinstance(item, dict)]
 
 
+def _text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _is_enabled_inbound_block(rule: Mapping[str, Any]) -> bool:
+    enabled = rule.get("enabled")
+    return (
+        enabled is True or str(enabled).strip().lower() in {"true", "1", "yes"}
+    ) and str(rule.get("direction", "")).strip().lower() == "inbound" and str(
+        rule.get("action", "")
+    ).strip().lower() == "block"
+
+
+def _rule_covers_port(rule: Mapping[str, Any], port: int) -> bool:
+    ports = {item.lower() for item in _text_list(rule.get("local_ports"))}
+    return "any" in ports or str(port) in ports
+
+
+def _ditto_firewall_rules(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rules = payload.get("firewall_rules")
+    if not isinstance(rules, list):
+        return []
+    matches: list[dict[str, Any]] = []
+    for raw in rules:
+        if not isinstance(raw, Mapping) or not _is_enabled_inbound_block(raw):
+            continue
+        name = str(raw.get("name", "")).lower()
+        display_name = str(raw.get("display_name", "")).strip().lower()
+        programs = _text_list(raw.get("programs"))
+        if display_name != "ditto" and "ditto" not in name:
+            continue
+        if not any(
+            program.lower().replace("/", "\\").endswith("\\ditto.exe")
+            for program in programs
+        ):
+            continue
+        if _rule_covers_port(raw, 23443):
+            matches.append(dict(raw))
+    return matches
+
+
+def _smb_firewall_rules(
+    payload: Mapping[str, Any], listeners: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rules = payload.get("firewall_rules")
+    if not isinstance(rules, list):
+        return []
+    expected_names = {
+        "Codex-Personal-Block-SMB-RPC-NonLoopback-v4",
+        "Codex-Personal-Block-SMB-RPC-NonLoopback-v6",
+    }
+    by_name = {
+        str(raw.get("name", "")): raw
+        for raw in rules
+        if isinstance(raw, Mapping)
+        and str(raw.get("name", "")) in expected_names
+        and _is_enabled_inbound_block(raw)
+        and _text_list(raw.get("local_addresses"))
+    }
+    selected: list[dict[str, Any]] = []
+    for listener in listeners:
+        port = int(listener.get("port", 0) or 0)
+        address = str(listener.get("address", ""))
+        suffix = "v6" if ":" in address else "v4"
+        rule = by_name.get(f"Codex-Personal-Block-SMB-RPC-NonLoopback-{suffix}")
+        if rule is None or not _rule_covers_port(rule, port):
+            return []
+        if rule not in selected:
+            selected.append(dict(rule))
+    return selected
+
+
 def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool | None, str]:
     actual = str(payload.get("v2rayn_path", "")).strip()
     running = payload.get("v2rayn_running")
@@ -499,7 +574,8 @@ def evaluate_environment(
             for item in listeners
             if int(item.get("port", 0) or 0) in {135, 139, 445, 593}
         ]
-        if ditto:
+        ditto_firewall_rules = _ditto_firewall_rules(payload)
+        if ditto and not ditto_firewall_rules:
             observations.append(
                 _problem(
                     "ditto_listener",
@@ -509,9 +585,24 @@ def evaluate_environment(
                     metadata={"listeners": ditto},
                 )
             )
+        elif ditto:
+            observations.append(
+                _ok(
+                    "ditto_listener",
+                    "wildcard Ditto listener is covered by an enabled inbound block rule",
+                    metadata={
+                        "listeners": ditto,
+                        "firewall_enforced": True,
+                        "firewall_rules": [
+                            str(rule.get("name", "")) for rule in ditto_firewall_rules
+                        ],
+                    },
+                )
+            )
         else:
             observations.append(_ok("ditto_listener", "no wildcard Ditto listener at port 23443"))
-        if smb_rpc:
+        smb_firewall_rules = _smb_firewall_rules(payload, smb_rpc)
+        if smb_rpc and not smb_firewall_rules:
             observations.append(
                 _problem(
                     "smb_rpc_listeners",
@@ -519,6 +610,20 @@ def evaluate_environment(
                     "人工确认暴露面、网络分区和业务依赖；不要自动关闭端口或修改防火墙。",
                     severity="critical",
                     metadata={"listeners": smb_rpc},
+                )
+            )
+        elif smb_rpc:
+            observations.append(
+                _ok(
+                    "smb_rpc_listeners",
+                    "SMB/RPC listeners are covered by enabled inbound block rules",
+                    metadata={
+                        "listeners": smb_rpc,
+                        "firewall_enforced": True,
+                        "firewall_rules": [
+                            str(rule.get("name", "")) for rule in smb_firewall_rules
+                        ],
+                    },
                 )
             )
         else:
@@ -555,12 +660,12 @@ def evaluate_environment(
             [
                 _ok(
                     "docker_exited_containers",
-                    "Docker containers are intentionally stopped by active CS2 game mode",
+                    "Docker containers are intentionally stopped by an active game session",
                     metadata={"expected_down": True, "suppressed_by_game_mode": True},
                 ),
                 _ok(
                     "docker_build_cache",
-                    "Docker Desktop is intentionally stopped by active CS2 game mode",
+                    "Docker Desktop is intentionally stopped by an active game session",
                     metadata={"expected_down": True, "suppressed_by_game_mode": True},
                 ),
             ]
@@ -1017,6 +1122,35 @@ $ErrorActionPreference = 'SilentlyContinue'
 $service = Get-CimInstance Win32_Service -Filter \"Name='WinDefend'\"
 $thirdParty = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object {{ $_.displayName -and $_.displayName -notmatch 'Microsoft Defender|Windows Defender' }} | Select-Object displayName,productState)
 $listeners = @(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess)
+$firewallRules = @()
+$firewallRuleNames = @('Codex-Personal-Block-SMB-RPC-NonLoopback-v4', 'Codex-Personal-Block-SMB-RPC-NonLoopback-v6')
+$firewallCandidates = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {{ $_.DisplayName -eq 'Ditto' -or $_.Name -in $firewallRuleNames }})
+foreach ($rule in $firewallCandidates) {{
+  $portFilter = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule)
+  $addressFilter = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule)
+  $applicationFilter = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule)
+  $localPorts = @()
+  $localAddresses = @()
+  $remoteAddresses = @()
+  $programs = @()
+  if ($portFilter) {{ $localPorts = @($portFilter[0].LocalPort | ForEach-Object {{ [string]$_ }}) }}
+  if ($addressFilter) {{
+    $localAddresses = @($addressFilter[0].LocalAddress | ForEach-Object {{ [string]$_ }})
+    $remoteAddresses = @($addressFilter[0].RemoteAddress | ForEach-Object {{ [string]$_ }})
+  }}
+  if ($applicationFilter) {{ $programs = @($applicationFilter[0].Program | ForEach-Object {{ [string]$_ }}) }}
+  $firewallRules += [pscustomobject]@{{
+    name = [string]$rule.Name
+    display_name = [string]$rule.DisplayName
+    enabled = ([string]$rule.Enabled -eq 'True')
+    direction = [string]$rule.Direction
+    action = [string]$rule.Action
+    local_ports = $localPorts
+    local_addresses = $localAddresses
+    remote_addresses = $remoteAddresses
+    programs = $programs
+  }}
+}}
 $v2 = @(Get-CimInstance Win32_Process -Filter \"Name='v2rayN.exe'\" | ForEach-Object {{
   $path = [string]$_.ExecutablePath
   if (-not $path) {{ try {{ $path = [string](Get-Process -Id $_.ProcessId -ErrorAction Stop).Path }} catch {{ }} }}
@@ -1049,10 +1183,11 @@ if ($dockerAvailable) {{
   win_defend_status = if ($service) {{ [string]$service.State }} else {{ '' }}
   third_party_products = $thirdParty | ForEach-Object {{ @{{ display_name = [string]$_.displayName; product_state = [int]$_.productState }} }}
   listeners = $listeners | ForEach-Object {{ @{{ address = [string]$_.LocalAddress; port = [int]$_.LocalPort }} }}
+  firewall_rules = @($firewallRules | ForEach-Object {{ $_ }})
   recursive_scan_access_errors = $scanErrors
   docker_available = $dockerAvailable
   docker_exited_count = $exited
-  docker_exited_container_names = $exitedItems | ForEach-Object {{ [string]$_.Names }}
+  docker_exited_container_names = @($exitedItems | ForEach-Object {{ [string]$_.Names }})
   docker_build_cache_size = if ($cache) {{ [string]$cache }} else {{ '' }}
   v2rayn_running = ($v2.Count -gt 0)
   v2rayn_path = if ($v2.Count -gt 0) {{ [string]$v2[0].ExecutablePath }} else {{ '' }}

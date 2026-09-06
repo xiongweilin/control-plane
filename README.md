@@ -76,7 +76,7 @@ Autonomous incident repair remains deliberately bounded to the configured attemp
 - the thin mapping from personal task context into Agent Kernel standing responsibility/admission objects;
 - Feishu task/command ingress compatibility and notification providers;
 - personal Git/Docker effect provider with local project/repository allowlists;
-- CS2 game-mode alert suppression;
+- Steam game-session alert suppression while Docker is intentionally stopped;
 - personal API authentication and thin administrative HTTP ingress.
 
 Everything else is Agent Kernel.
