@@ -144,9 +144,9 @@ def _unknown(
         name=name,
         status="unknown",
         severity="warning",
-        automation="fail-safe",
+        automation="codex-judgment",
         detail=detail,
-        manual_action="确认探针权限/配置后，由人工执行只读复核；不要据此自动修复。",
+        manual_action="保留当前证据；告警路径必须先调用 Codex 判断可逆性，未明确可逆前不要自动修复。",
         metadata={"configured": configured, **dict(metadata or {})},
     )
 
@@ -174,7 +174,7 @@ def _problem(
     manual_action: str,
     *,
     severity: str = "warning",
-    automation: str = "fail-safe",
+    automation: str = "codex-judgment",
     metadata: Mapping[str, Any] | None = None,
 ) -> CheckObservation:
     return CheckObservation(
@@ -196,8 +196,10 @@ def _lifecycle_observations(
 ) -> list[CheckObservation]:
     """Evaluate the four standing responsibilities of this profile.
 
-    Recovery and synchronization are evidence gates and therefore fail-safe.
-    Only the exact configured known-garbage set is eligible for the reversible
+    Recovery and synchronization are evidence-producing checks, not current
+    fail-safe decisions. Problem/unknown observations enter the alert path,
+    which must obtain a current Codex safety judgment before any effect. Only
+    the exact configured known-garbage set is eligible for the reversible
     automatic handler; the inspector never performs that handler itself.
     """
 
@@ -310,7 +312,7 @@ def _lifecycle_observations(
             _problem(
                 "automatic_handling",
                 "automatic handling is disabled by configuration",
-                "恢复 control-plane 自动处理开关并验证 allowlist；在自动处理不可用期间，所有异常必须进入 fail-safe 等待人工指令。",
+                "恢复 control-plane 自动处理开关并验证 allowlist；告警仍须先经 Codex 当前安全性判断，自动处理不可用时不得产生 effect，等待明确指令。",
                 severity="critical",
             )
         )

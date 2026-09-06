@@ -57,7 +57,7 @@ def test_profile_metrics_expose_environment_state() -> None:
                     name="docker_build_cache",
                     status="problem",
                     severity="warning",
-                    automation="fail-safe",
+                    automation="codex-judgment",
                     detail="too large",
                     manual_action="manual",
                     metadata={"configured": True, "bytes": 2048},
@@ -77,7 +77,7 @@ def test_profile_metrics_expose_environment_state() -> None:
     text = generate_latest(registry).decode("utf-8")
 
     assert (
-        'control_plane_environment_check{automation="fail-safe",check="docker_build_cache",'
+        'control_plane_environment_check{automation="codex-judgment",check="docker_build_cache",'
         'configured="true",severity="warning",status="problem"} 1.0'
         in text
     )
