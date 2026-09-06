@@ -633,33 +633,33 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 if current is not None:
                     with suppress(Exception):
                         current = await settle_personal_state(current)
-                result = _task_response(bridge, current) if current is not None else None
+                failed_result = _task_response(bridge, current) if current is not None else None
                 diagnosis_attempts = policy._diagnosis_count(current) if current is not None else 0
                 execution_attempts = policy._execution_count(current) if current is not None else 0
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
                     status="failed",
-                    work_id=result.work_id if result else "",
+                    work_id=failed_result.work_id if failed_result else "",
                     diagnosis_attempts=diagnosis_attempts,
                     execution_attempts=execution_attempts,
                     error=redact_value(f"{type(exc).__name__}: {str(exc)[:500]}"),
                     finished_at=time.time(),
                 )
                 if (
-                    result is not None
+                    failed_result is not None
                     and max(diagnosis_attempts, execution_attempts) >= policy.attempt_limit
                     and not escalation_already_sent(spec.fingerprint)
                 ):
                     sent = await notify(
-                        result.work_id,
+                        failed_result.work_id,
                         "告警自动处理流程异常且已达到两轮边界, 已停止重试并发送人工告警。\n"
-                        f"alert={spec.title}\nwork={result.work_id}\ncontroller={spec.controller_id}",
+                        f"alert={spec.title}\nwork={failed_result.work_id}\ncontroller={spec.controller_id}",
                     )
                     append_alert_event(
                         ALERT_ESCALATED_EVENT,
                         spec,
-                        work_id=result.work_id,
+                        work_id=failed_result.work_id,
                         reason="policy-exception",
                         diagnosis_attempts=diagnosis_attempts,
                         execution_attempts=execution_attempts,

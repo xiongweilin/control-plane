@@ -155,7 +155,7 @@ def _steam_game_roots() -> tuple[Path, ...]:
             app_id = re.search(r'"appid"\s+"([^"]+)"', text)
             install_dir = re.search(r'"installdir"\s+"([^"]+)"', text)
             game_name = re.search(r'"name"\s+"([^"]+)"', text)
-            if not install_dir or app_id and app_id.group(1) == "228980":
+            if not install_dir or (app_id and app_id.group(1) == "228980"):
                 continue
             if game_name and game_name.group(1).strip().lower() == "steamworks shared":
                 continue
