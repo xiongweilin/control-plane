@@ -58,6 +58,21 @@ Effectful epistemic experiments cannot execute during the diagnosis pass. They
 must be described as candidates and re-enter the normal path through
 `CognitiveClosure -> WorkProposal -> Agent Kernel`.
 
+## Meta-control hard gates
+
+The pinned meta-controller fails closed across the policy/runtime seam:
+
+- candidates and epistemic issues cannot cross controller scope;
+- a candidate cannot downgrade a capability's known effect class;
+- effectful experiments cannot compile into direct read-class capability calls;
+- compiler hooks must return decisions bound to the current controller/version;
+- selected intents are kept compiler-reachable rather than emitting incomplete
+  read intents with no concrete capability;
+- repeated experience validation requires distinct supporting evidence; and
+- policy promotion requires non-empty replay/shadow evaluation.
+
+These are policy-integrity constraints, not new execution authority.
+
 ## Dependency coherence
 
 This profile intentionally pins the same chronology-safe Agent Kernel revision
