@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ import control_plane.app as app_module
 from control_plane.app import (
     ALERT_ESCALATED_EVENT,
     ALERT_QUEUED_EVENT,
+    ALERT_RESOLVED_EVENT,
     _split_controller_reply,
     create_app,
 )
@@ -246,6 +248,93 @@ async def test_metrics_refreshes_read_only_environment_provider(tmp_path: Path) 
     assert "control_plane_environment_last_check_timestamp_seconds" in text
     assert 'check="docker_exited_containers"' in text
     assert 'status="unknown"' in text
+
+
+@pytest.mark.asyncio
+async def test_recovery_appends_resolution_event_off_the_asyncio_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = replace(make_config(tmp_path), alertmanager_url="http://alertmanager.test")
+    app = create_app(cfg)
+    runtime = app.state.kernel_runtime
+    original_append_event = runtime.store.append_event
+    original_append_event(
+        Event(
+            id="event_recovery_pending",
+            type=ALERT_QUEUED_EVENT,
+            subject_ref="recovery-fingerprint",
+            payload={
+                "fingerprint": "recovery-fingerprint",
+                "controller_id": "controller-recovery-test",
+                "title": "Recovered alert",
+                "description": "Recovered alert description",
+                "repo": None,
+                "project": None,
+                "verification_labels": {},
+                "maintenance_capability": None,
+                "maintenance_parameters": {},
+            },
+        )
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[object]:
+            return []
+
+    class FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def get(self, url: str) -> FakeResponse:
+            del url
+            return FakeResponse()
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    loop = asyncio.get_running_loop()
+    loop_thread_id = threading.get_ident()
+    append_started = asyncio.Event()
+    append_finished = threading.Event()
+    release_append = threading.Event()
+    append_thread_ids: list[int] = []
+    appended_events: list[Event] = []
+
+    def blocking_append(event: Event) -> None:
+        append_thread_ids.append(threading.get_ident())
+        appended_events.append(event)
+        loop.call_soon_threadsafe(append_started.set)
+        release_append.wait(timeout=1)
+        append_finished.set()
+
+    monkeypatch.setattr(runtime.store, "append_event", blocking_append)
+
+    try:
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(append_started.wait(), timeout=1)
+
+            assert not append_finished.is_set()
+            assert append_thread_ids == [append_thread_ids[0]]
+            assert append_thread_ids[0] != loop_thread_id
+
+            release_append.set()
+            for _ in range(100):
+                if append_finished.is_set():
+                    break
+                await asyncio.sleep(0.01)
+        assert append_finished.is_set()
+        assert [event.type for event in appended_events] == [ALERT_RESOLVED_EVENT]
+    finally:
+        release_append.set()
+        await loop.shutdown_default_executor()
 
 
 @pytest.mark.asyncio
