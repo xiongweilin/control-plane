@@ -353,7 +353,7 @@ def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool
         return None, "v2rayN 进程路径/状态未能核验"
     if expected:
         expected_path = os.path.normcase(os.path.abspath(expected))
-        actual_path = os.path.normcase(os.path.abspath(actual)) if actual else ""
+        actual_path = os.path.normcase(os.path.abspath(actual))
         return actual_path == expected_path, f"actual={actual or '<missing>'} expected={expected}"
     return None, f"actual={actual or '<missing>'}; expected path 未配置"
 
