@@ -26,7 +26,20 @@ jobs:
       - name: Ruff
         run: uv run ruff check .
       - name: Mypy
-        run: uv run mypy src
+        shell: bash
+        run: |
+          set +e
+          output="$(uv run mypy src --no-incremental --show-error-codes 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            while IFS= read -r line; do
+              case "$line" in
+                *"error:"*) echo "::error::$line" ;;
+              esac
+            done <<< "$output"
+          fi
+          exit "$status"
       - name: Pytest
         run: uv run pytest -q
       - name: Prove no embedded kernel remains
