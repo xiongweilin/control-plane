@@ -91,7 +91,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "meta-controller", git = "https://github.com/xiongweilin/meta-controller.git?rev=f53fb2c9a95c298836d02c5a9c6a1302f6ffed54" },
+    { name = "meta-controller", git = "https://github.com/xiongweilin/meta-controller.git?rev=ba704b438a6e9ada9c35c56900c6af8db49d474d" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "portable-runtime", git = "https://github.com/xiongweilin/agent-kernel.git?rev=e9f6ae53417df945f5f60b88b3ac2acf41c2340c" },
     { name = "prometheus-client", specifier = ">=0.21,<1" },
@@ -414,7 +414,7 @@ wheels = [
 [[package]]
 name = "meta-controller"
 version = "0.2.0"
-source = { git = "https://github.com/xiongweilin/meta-controller.git?rev=f53fb2c9a95c298836d02c5a9c6a1302f6ffed54#f53fb2c9a95c298836d02c5a9c6a1302f6ffed54" }
+source = { git = "https://github.com/xiongweilin/meta-controller.git?rev=ba704b438a6e9ada9c35c56900c6af8db49d474d#ba704b438a6e9ada9c35c56900c6af8db49d474d" }
 dependencies = [
     { name = "portable-runtime" },
 ]
