@@ -92,15 +92,16 @@ def _steam_roots_from_registry() -> tuple[Path, ...]:
     try:
         import winreg
 
+        winreg_api: Any = winreg
         roots: list[Path] = []
         for hive, key_path in (
-            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+            (winreg_api.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+            (winreg_api.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+            (winreg_api.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
         ):
             try:
-                with winreg.OpenKey(hive, key_path) as key:
-                    value, _ = winreg.QueryValueEx(key, "SteamPath")
+                with winreg_api.OpenKey(hive, key_path) as key:
+                    value, _ = winreg_api.QueryValueEx(key, "SteamPath")
             except OSError:
                 continue
             if isinstance(value, str) and value.strip():
@@ -177,8 +178,10 @@ def _foreground_process() -> tuple[int, Path] | None:
         import ctypes
         from ctypes import wintypes
 
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ctypes_api: Any = ctypes
+        win_dll = ctypes_api.WinDLL
+        user32 = win_dll("user32", use_last_error=True)
+        kernel32 = win_dll("kernel32", use_last_error=True)
         user32.GetForegroundWindow.restype = wintypes.HWND
         user32.IsWindowVisible.argtypes = [wintypes.HWND]
         user32.IsWindowVisible.restype = wintypes.BOOL
