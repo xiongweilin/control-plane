@@ -806,7 +806,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         if fingerprint in current_fingerprints:
                             active_alerts[fingerprint] = controller_id
                             continue
-                        runtime.store.append_event(
+                        await asyncio.to_thread(
+                            runtime.store.append_event,
                             Event(
                                 id=new_id("event"),
                                 type=ALERT_RESOLVED_EVENT,
@@ -816,7 +817,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                                     "resolved_at": time.time(),
                                     "reconciled_from_alertmanager": True,
                                 },
-                            )
+                            ),
                         )
                 for spec in pending:
                     if (
