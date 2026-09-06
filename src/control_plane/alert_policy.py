@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from meta_controller import StagedMetaPolicy
 from portable_runtime.controller import (
     CognitiveClosure,
     CognitiveController,
@@ -191,8 +192,33 @@ def _latest_run(runtime: Any, work_id: str) -> Any | None:
     return max(runs, key=lambda run: (run.started_at or run.created_at, run.created_at))
 
 
+def _recent_reality_context(bridge: PersonalKernelBridge, controller_id: str) -> str:
+    """Project prior Work reality into a renewed diagnosis without claiming truth."""
+
+    events = bridge.result_events(controller_id)
+    if not events:
+        return ""
+    parts: list[str] = []
+    for event in events[-6:]:
+        stage = str(event.payload.get("stage", "observation"))
+        result = _event_result(event)
+        status = str(result.get("status", "unknown"))
+        message = str(result.get("message", ""))[-1500:]
+        parts.append(f"[{stage}] status={status}\n{message}")
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            bounded = {
+                key: value
+                for key, value in metadata.items()
+                if key in {"active", "blocker", "attempt_index", "capability"}
+            }
+            if bounded:
+                parts.append(f"[{stage}] metadata={bounded}")
+    return "\n\n".join(parts)[-6000:]
+
+
 @dataclass(frozen=True, slots=True)
-class AutonomousRepairPolicy:
+class AutonomousRepairPolicy(StagedMetaPolicy):
     """Personal incident policy executed through the Agent Kernel v2 loop.
 
     Diagnosis is read-class cognition. A successful diagnosis must form a
@@ -225,6 +251,11 @@ class AutonomousRepairPolicy:
         """Hard ceiling for alert repair: at most two diagnosis/execution rounds."""
 
         return _AUTONOMOUS_ATTEMPT_LIMIT
+
+    def _accept_failed_diagnosis_as_unknown(self) -> bool:
+        # Preserve the profile's fail-closed behavior: a malformed/failed diagnosis
+        # may close only as UNKNOWN/read-only and can never open effect authority.
+        return True
 
     def _session_cutoff(self, controller_id: str) -> datetime | None:
         if not self.human_instruction:
@@ -309,6 +340,8 @@ class AutonomousRepairPolicy:
 
     def _diagnosis(self, state: ControllerState, *, retry_context: str = "") -> ControllerDecision:
         attempt = self._diagnosis_count(state) + 1
+        if not retry_context and attempt > 1:
+            retry_context = _recent_reality_context(self.bridge, state.id)
         instruction = (
             f"Diagnose this incident for autonomous repair attempt {attempt}/"
             f"{self.attempt_limit}.\n"
@@ -351,6 +384,14 @@ class AutonomousRepairPolicy:
                 "owner/project binding is unclear, or the operation is not safely bounded. "
                 "Do not put shell commands in place of these markers."
             )
+        tags = ["failure-localization", "proxy-observation"]
+        if attempt > 1:
+            tags.append("retry")
+        if self._is_line_ending_cleanup():
+            tags.append("representation-mismatch")
+        hints = self.experience_hints(state, *tags)
+        if hints:
+            instruction += f"\n\n{hints}"
         parameters: dict[str, Any] = {
             "model": self.diagnosis_model,
             "phase": "diagnosis",
@@ -870,54 +911,9 @@ class AutonomousRepairPolicy:
             result=verified,
         )
 
-    async def select(self, state: ControllerState) -> ControllerDecision:
-        if state.status is ControllerStatus.CLOSED:
-            raise ValueError("closed repair controller must not restart implicitly")
-        if state.status is ControllerStatus.REOPEN_REQUIRED:
-            return ControllerDecision(
-                controller_ref=state.id,
-                state_version=state.version,
-                kind=ControllerDecisionKind.REOPEN,
-                reason="RevisionAssessment explicitly requires renewed cognition",
-            )
-        if state.status is ControllerStatus.WAITING:
-            if state.work_proposal_ref:
-                if self._current_revision(state) is None:
-                    return self._revision(state)
-                if self.human_instruction:
-                    return self._human_reopen_revision(state)
-                raise ValueError("waiting repair controller requires an explicit owner command")
-            return ControllerDecision(
-                controller_ref=state.id,
-                state_version=state.version,
-                kind=ControllerDecisionKind.REOPEN,
-                reason="explicitly resume a cognitive wait without handed-off Work",
-            )
-
-        if state.active_closure_ref:
-            return self._propose_work(state)
-
-        ordered = _ordered_decisions(self.controller, state.id)
-        last = ordered[-1][1] if ordered else None
-        if last is None or last.kind is ControllerDecisionKind.REOPEN:
-            return self._diagnosis(state)
-        if (
-            last.kind is ControllerDecisionKind.INVOKE_CAPABILITY
-            and last.capability == "reason.generate"
-            and last.parameters.get("phase") == "diagnosis"
-        ):
-            result = _result_by_decision(self.controller, state.id).get(last.id)
-            if not _succeeded(result):
-                result = result or {
-                    "status": "failed",
-                    "message": "diagnosis returned no result; treat safety as UNKNOWN",
-                }
-            return self._form_closure(state, result)
-        raise ValueError(f"unexpected open repair controller stage after {last.kind.value}")
-
 
 @dataclass(frozen=True, slots=True)
-class ManualTaskPolicy:
+class ManualTaskPolicy(StagedMetaPolicy):
     """Explicit personal command routed through closure, Work and revision."""
 
     controller: CognitiveController = field(repr=False, compare=False)
@@ -940,6 +936,9 @@ class ManualTaskPolicy:
         )
         if self.human_instruction:
             instruction += "\n\nExplicit owner follow-up:\n" + self.human_instruction
+        hints = self.experience_hints(state, "failure-localization")
+        if hints:
+            instruction += f"\n\n{hints}"
         parameters: dict[str, Any] = {"model": self.diagnosis_model, "phase": "diagnosis"}
         if self.repo:
             parameters["repo"] = self.repo
@@ -1143,52 +1142,6 @@ class ManualTaskPolicy:
             capability=capability,
             result=observed,
         )
-
-    async def select(self, state: ControllerState) -> ControllerDecision:
-        if state.status is ControllerStatus.CLOSED:
-            raise ValueError("closed manual task must not restart implicitly")
-        if state.status is ControllerStatus.REOPEN_REQUIRED:
-            return ControllerDecision(
-                controller_ref=state.id,
-                state_version=state.version,
-                kind=ControllerDecisionKind.REOPEN,
-                reason="RevisionAssessment explicitly reopens the personal task",
-            )
-        if state.status is ControllerStatus.WAITING:
-            if state.work_proposal_ref:
-                if self._current_revision(state) is None:
-                    return self._revision(state)
-                if self.human_instruction:
-                    return self._human_reopen_revision(state)
-                raise ValueError("waiting manual task requires explicit owner direction")
-            return ControllerDecision(
-                controller_ref=state.id,
-                state_version=state.version,
-                kind=ControllerDecisionKind.REOPEN,
-                reason="explicitly resume a cognitive wait without handed-off Work",
-            )
-        if state.active_closure_ref:
-            return self._propose_work(state)
-
-        ordered = _ordered_decisions(self.controller, state.id)
-        last = ordered[-1][1] if ordered else None
-        if last is None or last.kind is ControllerDecisionKind.REOPEN:
-            return self._diagnosis(state)
-        if (
-            last.kind is ControllerDecisionKind.INVOKE_CAPABILITY
-            and last.capability == "reason.generate"
-            and last.parameters.get("phase") == "diagnosis"
-        ):
-            result = _result_by_decision(self.controller, state.id).get(last.id)
-            if not _succeeded(result):
-                return ControllerDecision(
-                    controller_ref=state.id,
-                    state_version=state.version,
-                    kind=ControllerDecisionKind.WAIT,
-                    reason="manual task diagnosis failed and requires owner attention",
-                )
-            return self._form_closure(state, result)
-        raise ValueError(f"unexpected open manual task stage after {last.kind.value}")
 
 
 async def drive_policy(
