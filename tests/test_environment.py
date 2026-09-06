@@ -16,7 +16,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
         cloud_protected_root="/srv/protected",
         cloud_tailscale_profile="/var/lib/tailscale/tailscaled.state",
         docker_build_cache_max_bytes=1024,
-        docker_expected_exited_containers=("commerce-migrate", "dify-init_permissions-1"),
+        docker_expected_exited_containers=("dify-init_permissions-1",),
         automatic_handling_enabled=True,
         game_mode_enabled=False,
     )
@@ -121,14 +121,65 @@ def test_expected_one_shot_containers_do_not_become_unexpected_exited_alerts(
         make_config(tmp_path),
         {
             "docker_available": True,
-            "docker_exited_count": 2,
-            "docker_exited_container_names": ["commerce-migrate", "dify-init_permissions-1"],
+            "docker_exited_count": 1,
+            "docker_exited_container_names": ["dify-init_permissions-1"],
             "docker_build_cache_bytes": 0,
         },
     )
     observation = {item.name: item for item in snapshot.observations}["docker_exited_containers"]
     assert observation.status == "ok"
     assert observation.metadata["expected_down"] is True
+
+
+def test_listeners_covered_by_existing_inbound_blocks_are_mitigated(tmp_path: Path) -> None:
+    snapshot = evaluate_environment(
+        make_config(tmp_path),
+        {
+            "listeners": [
+                {"address": "0.0.0.0", "port": 23443},
+                {"address": "0.0.0.0", "port": 135},
+                {"address": "192.168.0.100", "port": 139},
+                {"address": "::", "port": 445},
+            ],
+            "firewall_rules": [
+                {
+                    "name": r"TCP Query User{ditto}C:\Program Files\Ditto\Ditto.exe",
+                    "display_name": "Ditto",
+                    "enabled": True,
+                    "direction": "Inbound",
+                    "action": "Block",
+                    "local_ports": ["Any"],
+                    "programs": [r"C:\Program Files\Ditto\Ditto.exe"],
+                },
+                {
+                    "name": "Codex-Personal-Block-SMB-RPC-NonLoopback-v4",
+                    "display_name": "Codex Personal Block SMB RPC NonLoopback v4",
+                    "enabled": True,
+                    "direction": "Inbound",
+                    "action": "Block",
+                    "local_ports": ["135", "139", "445"],
+                    "local_addresses": ["192.168.0.100"],
+                    "remote_addresses": ["Any"],
+                },
+                {
+                    "name": "Codex-Personal-Block-SMB-RPC-NonLoopback-v6",
+                    "display_name": "Codex Personal Block SMB RPC NonLoopback v6",
+                    "enabled": True,
+                    "direction": "Inbound",
+                    "action": "Block",
+                    "local_ports": ["135", "139", "445"],
+                    "local_addresses": ["fe80::/10"],
+                    "remote_addresses": ["Any"],
+                },
+            ],
+        },
+    )
+    observations = {item.name: item for item in snapshot.observations}
+
+    assert observations["ditto_listener"].status == "ok"
+    assert observations["ditto_listener"].metadata["firewall_enforced"] is True
+    assert observations["smb_rpc_listeners"].status == "ok"
+    assert observations["smb_rpc_listeners"].metadata["firewall_enforced"] is True
 
 
 def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: Path) -> None:

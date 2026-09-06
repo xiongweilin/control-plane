@@ -89,10 +89,7 @@ class ControlPlaneConfig:
     cloud_probe_timeout_seconds: int = 30
     windows_scan_roots: tuple[str, ...] = (r"D:\agent",)
     docker_build_cache_max_bytes: int = 5 * 1024**3
-    docker_expected_exited_containers: tuple[str, ...] = (
-        "commerce-migrate",
-        "dify-init_permissions-1",
-    )
+    docker_expected_exited_containers: tuple[str, ...] = ("dify-init_permissions-1",)
     recovery_paths: tuple[str, ...] = (
         r"D:\agent\ratio",
         r"D:\agent\docker备份",

@@ -21,7 +21,7 @@
 - 端点：/healthz、/live、/ready、/metrics、/status、/v1/tasks、/v1/alerts/alertmanager、/v1/controllers/{controller_id}/command、/v1/game-mode、/v1/sessions/inspect
 - Feishu transport 由 feishu-dify-gateway 负责。
 - Git/Docker effect provider 只允许个人项目和仓库 allowlist 中的目标。
-- CS2 游戏模式负责游戏期间暂停并在退出后恢复 Docker 容器。
+- Steam 游戏会话在明确 Docker 预期退出时负责抑制相应 readiness 告警；未知游戏状态不触发抑制。
 
 ## 安装和验证
 
