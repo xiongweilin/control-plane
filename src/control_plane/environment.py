@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -841,17 +842,12 @@ class EnvironmentInspectionProvider:
         try:
             stdout, stderr = process.communicate(timeout=max(0.1, timeout))
         except subprocess.TimeoutExpired as exc:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                )
-            else:
+            # Stop only the probe process itself.  A recursive tree kill could
+            # terminate an unrelated or still-useful child process.
+            with suppress(OSError):
                 process.kill()
-            stdout, stderr = process.communicate()
-            del stdout, stderr
+            with suppress(subprocess.TimeoutExpired):
+                process.communicate(timeout=5)
             raise TimeoutError(f"probe command timed out after {timeout:.1f}s") from exc
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 

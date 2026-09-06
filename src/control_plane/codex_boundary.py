@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -11,6 +12,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from portable_runtime.core.capabilities import (
+    CapabilityRequest,
+    CapabilityResult,
+    InvocationContext,
+    ProviderDescriptor,
+    ProviderHealth,
+)
+from portable_runtime.providers.codex.provider import CodexProvider
 
 from .audit import redact_text, truncate_bytes
 from .config import ControlPlaneConfig
@@ -49,6 +59,44 @@ class _PreparedBoundary:
                 )
         if self.support_dir is not None:
             shutil.rmtree(self.support_dir, ignore_errors=True)
+
+
+class ThreadIsolatedCodexProvider:
+    """Keep synchronous deployment-boundary work off the HTTP event loop.
+
+    ``portable_runtime`` invokes ``ExecutionBoundary.prepare`` and its cleanup
+    synchronously from ``CodexProvider.invoke``.  On Windows those methods can
+    run Git subprocesses, so one Codex request could otherwise pause Uvicorn's
+    accept loop long enough for ``/live`` to time out.  The provider remains the
+    upstream Codex provider; this is only a profile adapter for its execution
+    context, not a second runtime or entrypoint.
+    """
+
+    def __init__(self, provider: CodexProvider) -> None:
+        self._provider = provider
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._provider.descriptor
+
+    async def health(self) -> ProviderHealth:
+        return await self._provider.health()
+
+    async def invoke(
+        self,
+        request: CapabilityRequest,
+        context: InvocationContext,
+    ) -> CapabilityResult:
+        def run_provider() -> CapabilityResult:
+            return asyncio.run(self._provider.invoke(request, context))
+
+        return await asyncio.to_thread(run_provider)
+
+    async def cancel(self, request_id: str) -> None:
+        await self._provider.cancel(request_id)
+
+    async def reconcile(self, request_id: str) -> CapabilityResult | None:
+        return await self._provider.reconcile(request_id)
 
 
 class CodexExecutionBoundary:
