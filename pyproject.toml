@@ -6,7 +6,8 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@49c9fd10ec8cbf378510229bf1b1711a050addaa",
+    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@599845269bb682732820e6c343db96d558bd5102",
+    "meta-controller @ git+https://github.com/xiongweilin/meta-controller.git@171bcc0fc477e7d7857e935c80eff8ed29cee974",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",
@@ -50,5 +51,5 @@ strict = true
 packages = ["control_plane"]
 
 [[tool.mypy.overrides]]
-module = ["portable_runtime.*"]
+module = ["portable_runtime.*", "meta_controller.*"]
 ignore_missing_imports = true
