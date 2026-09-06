@@ -87,6 +87,20 @@ class ThreadIsolatedCodexProvider:
         request: CapabilityRequest,
         context: InvocationContext,
     ) -> CapabilityResult:
+        # The installed Agent Kernel compatibility path currently carries
+        # Runtime.run_capability keyword arguments inside ``parameters`` and
+        # CognitiveController builds CapabilityRequest directly. Promote the
+        # explicit profile timeout here so every diagnosis/execution request
+        # reaches CodexProvider as a real request-level deadline.
+        if request.timeout_seconds is None:
+            raw_timeout = request.parameters.get("timeout_seconds")
+            try:
+                timeout = float(raw_timeout)
+            except (TypeError, ValueError):
+                timeout = 0.0
+            if timeout > 0:
+                request = request.model_copy(update={"timeout_seconds": timeout})
+
         def run_provider() -> CapabilityResult:
             return asyncio.run(self._provider.invoke(request, context))
 

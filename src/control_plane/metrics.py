@@ -351,6 +351,38 @@ class ControlPlaneMetricsCollector:
         yield environment_timestamp
         yield environment_errors
 
+        synchronization_repository_metric = GaugeMetricFamily(
+            "control_plane_synchronization_repository_status",
+            "Per configured synchronization subject state: 1=ok, 0=problem, -1=unknown",
+            labels=["path", "project"],
+        )
+        synchronization_observation = next(
+            (
+                entry
+                for entry in (snapshot.observations if snapshot else ())
+                if entry.name == "synchronization"
+            ),
+            None,
+        )
+        subjects = (
+            synchronization_observation.metadata.get("subjects", [])
+            if synchronization_observation is not None
+            else []
+        )
+        if isinstance(subjects, list):
+            subject_values = {"ok": 1, "problem": 0, "unknown": -1}
+            for subject in subjects:
+                if not isinstance(subject, dict):
+                    continue
+                path = str(subject.get("path", ""))
+                if not path:
+                    continue
+                synchronization_repository_metric.add_metric(
+                    [path, str(subject.get("project", ""))],
+                    subject_values.get(str(subject.get("status", "unknown")), -1),
+                )
+        yield synchronization_repository_metric
+
         lifecycle_metrics = (
             ("control_plane_recoverability_status", "recoverability"),
             ("control_plane_synchronization_status", "synchronization"),
@@ -399,11 +431,6 @@ class ControlPlaneMetricsCollector:
                     "control_plane_docker_exited_containers",
                     "docker_exited_containers",
                     "exited_count",
-                ),
-                (
-                    "control_plane_windows_recursive_scan_access_errors",
-                    "windows_recursive_scan",
-                    "access_errors",
                 ),
             ):
                 metric = GaugeMetricFamily(metric_name, f"Current value from {check_name}")

@@ -1,9 +1,10 @@
-"""Read-only environment inspection for the personal control-plane profile.
+"""Read-only operational inspection for the personal Windows profile.
 
 The inspector deliberately reports facts and escalation guidance only.  It has
-no repair capabilities: process/service enablement, firewall changes, Docker
-garbage collection, cloud writes, and security remediation stay outside this
-provider and require an explicit human-owned workflow.
+no repair capabilities: process/service enablement, Docker garbage collection,
+and unrelated security baselines stay outside this provider. The probe focuses
+on local operational reliability, repository synchronization, recovery facts,
+and the configured v2rayN/Docker facts.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import time
@@ -41,20 +41,10 @@ CHECK_NAMES = (
     "known_garbage",
     "automatic_handling",
     "codex_primary",
-    "windows_defender",
-    "third_party_protection",
-    "ditto_listener",
-    "smb_rpc_listeners",
-    "windows_recursive_scan",
     "docker_exited_containers",
     "docker_build_cache",
     "v2rayn_path",
     "v2rayn_status",
-    "cloud_protected_root",
-    "cloud_tailscale_profile",
-    "cloud_swap",
-    "cloud_selinux",
-    "cloud_cve",
 )
 
 HISTORICAL_SAFETY_HINT_ALERT_NAMES = frozenset(
@@ -66,20 +56,10 @@ HISTORICAL_SAFETY_HINT_ALERT_NAMES = frozenset(
         "ControlPlaneRecoverabilityDegraded",
         "ControlPlaneSynchronizationDegraded",
         "ControlPlaneAutomaticHandlingUnavailable",
-        "WinDefendStopped",
-        "ThirdPartyProtectionUnknown",
-        "DittoExposed",
-        "SMBOrRPCListenerDetected",
-        "ProtectedDirectoryRootVerificationMissing",
-        "WindowsRecursiveScanAccessErrors",
         "DockerExitedContainers",
         "DockerBuildCacheAccumulating",
         "V2rayNPathDrift",
         "V2rayNStatusDrift",
-        "CloudTailscaleProfileMissing",
-        "CloudSwapMissing",
-        "CloudSELinuxPermissive",
-        "CloudCVEDetected",
     }
 )
 
@@ -196,11 +176,11 @@ def _lifecycle_observations(
 ) -> list[CheckObservation]:
     """Evaluate the four standing responsibilities of this profile.
 
-    Recovery and synchronization are evidence-producing checks, not current
-    fail-safe decisions. Problem/unknown observations enter the alert path,
-    which must obtain a current Codex safety judgment before any effect. Only
-    the exact configured known-garbage set is eligible for the reversible
-    automatic handler; the inspector never performs that handler itself.
+    Recovery and synchronization are evidence-producing checks, not automatic
+    safety decisions. Problem/unknown observations enter the alert path, which
+    must obtain a current Codex judgment before any effect. Only the exact
+    configured known-garbage set is eligible for the reversible automatic
+    handler; the inspector never performs that handler itself.
     """
 
     observations: list[CheckObservation] = []
@@ -242,7 +222,8 @@ def _lifecycle_observations(
                 "synchronization",
                 "configured repositories and chezmoi source are synchronized",
                 metadata={
-                    "checked_count": int(payload.get("synchronization_checked", 0) or 0)
+                    "checked_count": int(payload.get("synchronization_checked", 0) or 0),
+                    "subjects": payload.get("synchronization_subjects", []),
                 },
             )
         )
@@ -257,13 +238,14 @@ def _lifecycle_observations(
             _problem(
                 "synchronization",
                 f"synchronization drift detected: {len(failures)}",
-                "保留本地与远端证据，按 ratio 清单逐仓库复核；只允许在确认无未提交变更后执行 fast-forward，同步失败不得自动 push 或覆盖本地内容。",
+                "每个 subject 先由 diagnosis Codex 判断；若可逆、owner/project 明确且工作树干净，交给精确 capability 做 fast-forward 或 exact push，并在 effect 后重新核验；首轮发现不可逆或仓库不干净立即通知飞书。",
                 severity="critical",
                 metadata={
                     "failure_count": len(failures),
                     "failures": failures,
                     "failure_reasons": payload.get("synchronization_failure_reasons", []),
                     "checked_count": int(payload.get("synchronization_checked", 0) or 0),
+                    "subjects": payload.get("synchronization_subjects", []),
                 },
             )
         )
@@ -273,6 +255,7 @@ def _lifecycle_observations(
                 "synchronization",
                 "仓库/chezmoi 同步状态未能核验",
                 configured=bool(config.synchronization_paths),
+                metadata={"subjects": payload.get("synchronization_subjects", [])},
             )
         )
 
@@ -359,88 +342,6 @@ def _parse_size(value: Any) -> int:
         return 0
 
 
-def _ports(payload: Mapping[str, Any]) -> list[dict[str, Any]] | None:
-    raw = payload.get("listeners")
-    if not isinstance(raw, list):
-        return None
-    return [item for item in raw if isinstance(item, dict)]
-
-
-def _text_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    text = str(value or "").strip()
-    return [text] if text else []
-
-
-def _is_enabled_inbound_block(rule: Mapping[str, Any]) -> bool:
-    enabled = rule.get("enabled")
-    return (
-        enabled is True or str(enabled).strip().lower() in {"true", "1", "yes"}
-    ) and str(rule.get("direction", "")).strip().lower() == "inbound" and str(
-        rule.get("action", "")
-    ).strip().lower() == "block"
-
-
-def _rule_covers_port(rule: Mapping[str, Any], port: int) -> bool:
-    ports = {item.lower() for item in _text_list(rule.get("local_ports"))}
-    return "any" in ports or str(port) in ports
-
-
-def _ditto_firewall_rules(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rules = payload.get("firewall_rules")
-    if not isinstance(rules, list):
-        return []
-    matches: list[dict[str, Any]] = []
-    for raw in rules:
-        if not isinstance(raw, Mapping) or not _is_enabled_inbound_block(raw):
-            continue
-        name = str(raw.get("name", "")).lower()
-        display_name = str(raw.get("display_name", "")).strip().lower()
-        programs = _text_list(raw.get("programs"))
-        if display_name != "ditto" and "ditto" not in name:
-            continue
-        if not any(
-            program.lower().replace("/", "\\").endswith("\\ditto.exe")
-            for program in programs
-        ):
-            continue
-        if _rule_covers_port(raw, 23443):
-            matches.append(dict(raw))
-    return matches
-
-
-def _smb_firewall_rules(
-    payload: Mapping[str, Any], listeners: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    rules = payload.get("firewall_rules")
-    if not isinstance(rules, list):
-        return []
-    expected_names = {
-        "Codex-Personal-Block-SMB-RPC-NonLoopback-v4",
-        "Codex-Personal-Block-SMB-RPC-NonLoopback-v6",
-    }
-    by_name = {
-        str(raw.get("name", "")): raw
-        for raw in rules
-        if isinstance(raw, Mapping)
-        and str(raw.get("name", "")) in expected_names
-        and _is_enabled_inbound_block(raw)
-        and _text_list(raw.get("local_addresses"))
-    }
-    selected: list[dict[str, Any]] = []
-    for listener in listeners:
-        port = int(listener.get("port", 0) or 0)
-        address = str(listener.get("address", ""))
-        suffix = "v6" if ":" in address else "v4"
-        rule = by_name.get(f"Codex-Personal-Block-SMB-RPC-NonLoopback-{suffix}")
-        if rule is None or not _rule_covers_port(rule, port):
-            return []
-        if rule not in selected:
-            selected.append(dict(rule))
-    return selected
-
-
 def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool | None, str]:
     actual = str(payload.get("v2rayn_path", "")).strip()
     running = payload.get("v2rayn_running")
@@ -503,155 +404,6 @@ def evaluate_environment(
                 metadata={"cli": cli_text, "provider_available": provider_available},
             )
         ]
-
-    defender = str(payload.get("win_defend_status", "")).strip().lower()
-    third_party_raw = payload.get("third_party_products")
-    third_party_products = (
-        [
-            item
-            for item in third_party_raw
-            if isinstance(item, Mapping) and str(item.get("display_name", "")).strip()
-        ]
-        if isinstance(third_party_raw, list)
-        else []
-    )
-    third_party_names = [str(item["display_name"]) for item in third_party_products]
-    if defender in {"stopped", "stop", "disabled"}:
-        observations.append(
-            _problem(
-                "windows_defender",
-                f"WinDefend status={defender}",
-                "人工确认设备安全责任和维护窗口；不要由 control-plane 自动启用杀毒或修改防火墙。",
-                severity="critical",
-            )
-        )
-        observations.append(
-            _unknown(
-                "third_party_protection",
-                (
-                    "WinDefend 未运行；Security Center 已登记第三方产品，"
-                    "但当前只读探针未证明其运行状态。"
-                    if third_party_names
-                    else "WinDefend 未运行，且 Security Center 未登记可证明的第三方防护 owner。"
-                ),
-                metadata={"registered_products": third_party_names},
-            )
-        )
-    elif defender in {"running", "start", "started"}:
-        observations.extend(
-            [
-                _ok("windows_defender", "WinDefend is running"),
-                _ok(
-                    "third_party_protection",
-                    (
-                        "Windows Defender is the active protection owner"
-                        if not third_party_names
-                        else "Windows Defender is running; third-party products are also registered"
-                    ),
-                    metadata={"registered_products": third_party_names},
-                ),
-            ]
-        )
-    else:
-        observations.extend(
-            [
-                _unknown("windows_defender", "WinDefend 状态未能核验", configured=os.name == "nt"),
-                _unknown("third_party_protection", "防护责任未能核验", configured=os.name == "nt"),
-            ]
-        )
-
-    listeners = _ports(payload)
-    if listeners is None:
-        observations.append(_unknown("ditto_listener", "监听端口未能核验"))
-        observations.append(_unknown("smb_rpc_listeners", "SMB/RPC 监听未能核验"))
-    else:
-        ditto = [
-            item
-            for item in listeners
-            if int(item.get("port", 0) or 0) == 23443
-            and str(item.get("address", "")) in {"0.0.0.0", "::", "*"}
-        ]
-        smb_rpc = [
-            item
-            for item in listeners
-            if int(item.get("port", 0) or 0) in {135, 139, 445, 593}
-        ]
-        ditto_firewall_rules = _ditto_firewall_rules(payload)
-        if ditto and not ditto_firewall_rules:
-            observations.append(
-                _problem(
-                    "ditto_listener",
-                    "Ditto is listening on a wildcard address at port 23443",
-                    "人工确认 Ditto 是否需要远程监听、绑定范围和 Windows 防火墙策略；不要自动改防火墙或停服务。",
-                    severity="critical",
-                    metadata={"listeners": ditto},
-                )
-            )
-        elif ditto:
-            observations.append(
-                _ok(
-                    "ditto_listener",
-                    "wildcard Ditto listener is covered by an enabled inbound block rule",
-                    metadata={
-                        "listeners": ditto,
-                        "firewall_enforced": True,
-                        "firewall_rules": [
-                            str(rule.get("name", "")) for rule in ditto_firewall_rules
-                        ],
-                    },
-                )
-            )
-        else:
-            observations.append(_ok("ditto_listener", "no wildcard Ditto listener at port 23443"))
-        smb_firewall_rules = _smb_firewall_rules(payload, smb_rpc)
-        if smb_rpc and not smb_firewall_rules:
-            observations.append(
-                _problem(
-                    "smb_rpc_listeners",
-                    f"SMB/RPC listeners detected: {len(smb_rpc)}",
-                    "人工确认暴露面、网络分区和业务依赖；不要自动关闭端口或修改防火墙。",
-                    severity="critical",
-                    metadata={"listeners": smb_rpc},
-                )
-            )
-        elif smb_rpc:
-            observations.append(
-                _ok(
-                    "smb_rpc_listeners",
-                    "SMB/RPC listeners are covered by enabled inbound block rules",
-                    metadata={
-                        "listeners": smb_rpc,
-                        "firewall_enforced": True,
-                        "firewall_rules": [
-                            str(rule.get("name", "")) for rule in smb_firewall_rules
-                        ],
-                    },
-                )
-            )
-        else:
-            observations.append(_ok("smb_rpc_listeners", "no SMB/RPC listener in the inspected port set"))
-
-    scan_errors = payload.get("recursive_scan_access_errors")
-    if isinstance(scan_errors, (int, float)):
-        if scan_errors > 0:
-            observations.append(
-                _problem(
-                    "windows_recursive_scan",
-                    f"recursive scan access errors={int(scan_errors)}",
-                    "人工核对 ACL、受保护目录和扫描范围；保留 access errors 证据，不要静默当作全量扫描成功。",
-                    metadata={"access_errors": int(scan_errors)},
-                )
-            )
-        else:
-            observations.append(_ok("windows_recursive_scan", "recursive scan completed without access errors"))
-    else:
-        observations.append(
-            _unknown(
-                "windows_recursive_scan",
-                "递归扫描未配置或未能核验",
-                configured=bool(config.windows_scan_roots),
-            )
-        )
 
     docker_available = payload.get("docker_available")
     exited = payload.get("docker_exited_count")
@@ -774,95 +526,6 @@ def evaluate_environment(
     else:
         observations.append(_unknown("v2rayn_status", "v2rayN 运行状态未配置或未能核验", configured=bool(config.v2rayn_expected_path)))
 
-    cloud = payload.get("cloud")
-    cloud_data = dict(cloud) if isinstance(cloud, dict) else {}
-    cloud_configured = bool(config.cloud_ssh_target)
-    if not cloud_configured:
-        observations.extend(
-            [
-                _unknown("cloud_protected_root", "云端 SSH target 未配置", configured=False),
-                _unknown("cloud_tailscale_profile", "云端 SSH target/profile 未配置", configured=False),
-                _unknown("cloud_swap", "云端 SSH target 未配置", configured=False),
-                _unknown("cloud_selinux", "云端 SSH target 未配置", configured=False),
-                _unknown("cloud_cve", "云端 SSH target 未配置", configured=False),
-            ]
-        )
-    else:
-        root_checked = cloud_data.get("root_checked") is True
-        root_readable = cloud_data.get("root_readable") is True
-        if root_checked and root_readable:
-            observations.append(_ok("cloud_protected_root", "cloud protected-directory probe includes the root itself"))
-        else:
-            observations.append(
-                _problem(
-                    "cloud_protected_root",
-                    "cloud protected-directory root-level verification is missing or failed",
-                    "人工在云端以最小权限复核保护目录根节点及权限覆盖范围；不要由本机自动修改云端目录/权限。",
-                    severity="critical",
-                )
-            )
-        if not config.cloud_tailscale_profile:
-            observations.append(
-                _unknown(
-                    "cloud_tailscale_profile",
-                    "云端 Tailscale profile 路径未配置",
-                    configured=False,
-                )
-            )
-        elif cloud_data.get("tailscale_profile_present") is True:
-            observations.append(_ok("cloud_tailscale_profile", "configured Tailscale profile is present"))
-        else:
-            observations.append(
-                _problem(
-                    "cloud_tailscale_profile",
-                    "configured cloud Tailscale profile is missing",
-                    "人工确认 profile 文件归属、权限和 Tailscale 登录状态；不要自动生成、复制或删除云端凭据。",
-                    severity="critical",
-                )
-            )
-        swap = cloud_data.get("swap_present")
-        if swap is True:
-            observations.append(_ok("cloud_swap", "cloud swap is present"))
-        elif swap is False:
-            observations.append(
-                _problem(
-                    "cloud_swap",
-                    "cloud host has no swap",
-                    "人工评估内存余量和业务风险后配置 swap；不要自动改云主机磁盘或系统配置。",
-                )
-            )
-        else:
-            observations.append(_unknown("cloud_swap", "swap state未能核验"))
-        selinux = str(cloud_data.get("selinux_mode", "unknown")).lower()
-        if selinux == "enforcing":
-            observations.append(_ok("cloud_selinux", "SELinux is enforcing"))
-        elif selinux == "permissive":
-            observations.append(
-                _problem(
-                    "cloud_selinux",
-                    "SELinux is permissive",
-                    "人工评估策略兼容性并恢复 enforcing；不要自动切换 SELinux 模式。",
-                    severity="critical",
-                )
-            )
-        else:
-            observations.append(_unknown("cloud_selinux", f"SELinux mode={selinux}"))
-        cves = cloud_data.get("cve_findings")
-        if isinstance(cves, (int, float)) and cves > 0:
-            observations.append(
-                _problem(
-                    "cloud_cve",
-                    f"cloud CVE findings={int(cves)}",
-                    "人工确认 CVE 影响、补丁来源、维护窗口和回滚方案；control-plane 只告警，不自动修复 CVE。",
-                    severity="critical",
-                    metadata={"findings": int(cves)},
-                )
-            )
-        elif isinstance(cves, (int, float)) and cves == 0:
-            observations.append(_ok("cloud_cve", "cloud CVE probe reported no findings"))
-        else:
-            observations.append(_unknown("cloud_cve", "CVE 状态未能核验"))
-
     observations = _lifecycle_observations(
         config,
         payload,
@@ -872,7 +535,7 @@ def evaluate_environment(
 
 
 class EnvironmentInspectionProvider:
-    """Read-only provider that turns local/cloud probe facts into metrics."""
+    """Read-only provider that turns local operational facts into metrics."""
 
     def __init__(
         self,
@@ -1028,16 +691,15 @@ class EnvironmentInspectionProvider:
         payload: dict[str, Any] = {}
         if os.name == "nt":
             payload.update(self._run_windows_probe())
-        if self.config.cloud_ssh_target:
-            payload["cloud"] = self._run_cloud_probe()
         payload.update(self._run_lifecycle_probe())
         return payload
 
     def _run_lifecycle_probe(self) -> Mapping[str, Any]:
         """Probe only the configured recovery, sync, and garbage boundaries.
 
-        Git and chezmoi output is intentionally discarded.  The probe records
-        booleans and bounded subject names, never command output or credentials.
+        Git and chezmoi output is reduced to bounded subject evidence: exact
+        repository path/project, clean state, branch, and commit SHAs.  No
+        command output, diff, or credential is persisted.
         """
 
         missing_recovery: list[str] = []
@@ -1048,15 +710,49 @@ class EnvironmentInspectionProvider:
 
         sync_failures: list[str] = []
         sync_failure_reasons: list[dict[str, str]] = []
+        sync_subjects: list[dict[str, str]] = []
         checked = 0
         git = shutil.which("git.exe") or shutil.which("git")
+
+        def project_for_path(raw_path: str) -> str:
+            candidate = Path(raw_path).resolve(strict=False)
+            for project, configured in self.config.project_dirs.items():
+                if candidate == Path(configured).resolve(strict=False):
+                    return project
+            if candidate == Path(self.config.chezmoi_source_dir).resolve(strict=False):
+                return "chezmoi"
+            return ""
+
+        def subject_for_path(raw_path: str) -> dict[str, str]:
+            subject = next(
+                (item for item in sync_subjects if item["path"] == raw_path),
+                None,
+            )
+            if subject is None:
+                subject = {
+                    "path": raw_path,
+                    "project": project_for_path(raw_path),
+                    "remote": "origin",
+                    "branch": "main",
+                    "head_sha": "",
+                    "remote_sha": "",
+                    "worktree": "unknown",
+                    "status": "unknown",
+                    "reason": "",
+                }
+                sync_subjects.append(subject)
+            return subject
 
         def record_sync_failure(path: str, reason: str) -> None:
             sync_failures.append(path)
             sync_failure_reasons.append({"path": path, "reason": reason})
+            subject = subject_for_path(path)
+            subject["status"] = "problem"
+            subject["reason"] = reason
 
         for raw_path in self.config.synchronization_paths:
             path = Path(raw_path)
+            subject = subject_for_path(raw_path)
             if not path.is_dir() or not (path / ".git").exists() or not git:
                 record_sync_failure(raw_path, "not_git_repository_or_git_unavailable")
                 continue
@@ -1066,11 +762,13 @@ class EnvironmentInspectionProvider:
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
             )
             if status.returncode != 0 or status.stdout.strip():
+                subject["worktree"] = "dirty" if status.stdout.strip() else "unknown"
                 record_sync_failure(
                     raw_path,
                     "worktree_status_failed" if status.returncode != 0 else "uncommitted_worktree",
                 )
                 continue
+            subject["worktree"] = "clean"
             head = self._run_bounded_command(
                 [git, "-C", str(path), "rev-parse", "HEAD"],
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
@@ -1082,6 +780,8 @@ class EnvironmentInspectionProvider:
             head_text = head.stdout.decode("utf-8", errors="replace").strip()
             remote_text = remote.stdout.decode("utf-8", errors="replace").strip()
             remote_sha = remote_text.split()[0] if remote_text else ""
+            subject["head_sha"] = head_text[:40]
+            subject["remote_sha"] = remote_sha[:40]
             if (
                 head.returncode != 0
                 or remote.returncode != 0
@@ -1090,17 +790,26 @@ class EnvironmentInspectionProvider:
                 or head_text != remote_sha
             ):
                 record_sync_failure(raw_path, "local_head_or_origin_main_mismatch")
+            else:
+                subject["status"] = "ok"
+                subject["reason"] = ""
 
         chezmoi = shutil.which("chezmoi.exe") or shutil.which("chezmoi")
+        chezmoi_path = self.config.chezmoi_source_dir
+        chezmoi_subject = subject_for_path(chezmoi_path)
         if chezmoi:
             verify = self._run_bounded_command(
-                [chezmoi, "verify", "--skip-secrets", "--no-tty"],
+                [chezmoi, "verify", "--skip-secrets", "--no-tty", "--source", chezmoi_path],
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
             )
             if verify.returncode != 0:
-                record_sync_failure("chezmoi-runtime", "chezmoi_verify_failed")
+                chezmoi_subject["chezmoi_verify"] = "failed"
+                record_sync_failure(chezmoi_path, "chezmoi_verify_failed")
+            else:
+                chezmoi_subject["chezmoi_verify"] = "ok"
         else:
-            record_sync_failure("chezmoi-runtime", "chezmoi_unavailable")
+            chezmoi_subject["chezmoi_verify"] = "unavailable"
+            record_sync_failure(chezmoi_path, "chezmoi_unavailable")
 
         known_garbage = [
             raw_path for raw_path in self.config.known_garbage_paths if Path(raw_path).exists()
@@ -1113,128 +822,46 @@ class EnvironmentInspectionProvider:
             "synchronization_failures": sync_failures,
             "synchronization_failure_reasons": sync_failure_reasons,
             "synchronization_checked": checked,
+            "synchronization_subjects": sync_subjects,
             "known_garbage_count": len(known_garbage),
             "known_garbage_paths": known_garbage,
         }
 
     def _run_windows_probe(self) -> Mapping[str, Any]:
-        roots = json.dumps(list(self.config.windows_scan_roots), ensure_ascii=True)
-        script = f"""
+        script = """
 $ErrorActionPreference = 'SilentlyContinue'
-$service = Get-CimInstance Win32_Service -Filter \"Name='WinDefend'\"
-$thirdParty = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object {{ $_.displayName -and $_.displayName -notmatch 'Microsoft Defender|Windows Defender' }} | Select-Object displayName,productState)
-$listeners = @(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess)
-$firewallRules = @()
-$firewallRuleNames = @('Codex-Personal-Block-SMB-RPC-NonLoopback-v4', 'Codex-Personal-Block-SMB-RPC-NonLoopback-v6')
-$firewallCandidates = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {{ $_.DisplayName -eq 'Ditto' -or $_.Name -in $firewallRuleNames }})
-foreach ($rule in $firewallCandidates) {{
-  $portFilter = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule)
-  $addressFilter = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule)
-  $applicationFilter = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule)
-  $localPorts = @()
-  $localAddresses = @()
-  $remoteAddresses = @()
-  $programs = @()
-  if ($portFilter) {{ $localPorts = @($portFilter[0].LocalPort | ForEach-Object {{ [string]$_ }}) }}
-  if ($addressFilter) {{
-    $localAddresses = @($addressFilter[0].LocalAddress | ForEach-Object {{ [string]$_ }})
-    $remoteAddresses = @($addressFilter[0].RemoteAddress | ForEach-Object {{ [string]$_ }})
-  }}
-  if ($applicationFilter) {{ $programs = @($applicationFilter[0].Program | ForEach-Object {{ [string]$_ }}) }}
-  $firewallRules += [pscustomobject]@{{
-    name = [string]$rule.Name
-    display_name = [string]$rule.DisplayName
-    enabled = ([string]$rule.Enabled -eq 'True')
-    direction = [string]$rule.Direction
-    action = [string]$rule.Action
-    local_ports = $localPorts
-    local_addresses = $localAddresses
-    remote_addresses = $remoteAddresses
-    programs = $programs
-  }}
-}}
-$v2 = @(Get-CimInstance Win32_Process -Filter \"Name='v2rayN.exe'\" | ForEach-Object {{
+$v2 = @(Get-CimInstance Win32_Process -Filter \"Name='v2rayN.exe'\" | ForEach-Object {
   $path = [string]$_.ExecutablePath
-  if (-not $path) {{ try {{ $path = [string](Get-Process -Id $_.ProcessId -ErrorAction Stop).Path }} catch {{ }} }}
-  [pscustomobject]@{{ ProcessId = $_.ProcessId; ExecutablePath = $path }}
-}})
-$scanErrors = 0
-$roots = '{roots}' | ConvertFrom-Json
-foreach ($root in @($roots)) {{
-  if (Test-Path -LiteralPath $root) {{
-    $errors = @()
-    Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +errors | Out-Null
-    $scanErrors += @($errors).Count
-  }}
-}}
+  if (-not $path) { try { $path = [string](Get-Process -Id $_.ProcessId -ErrorAction Stop).Path } catch { } }
+  [pscustomobject]@{ ProcessId = $_.ProcessId; ExecutablePath = $path }
+})
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 $dockerAvailable = $false
 $exited = $null
 $exitedItems = @()
 $cache = $null
-if ($docker) {{
-  docker info --format '{{{{.ServerVersion}}}}' 2>$null | Out-Null
+if ($docker) {
+  docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
   $dockerAvailable = $LASTEXITCODE -eq 0
-}}
-if ($dockerAvailable) {{
-  $exitedItems = @(docker ps -a --filter status=exited --format '{{{{json .}}}}' | ConvertFrom-Json)
+}
+if ($dockerAvailable) {
+  $exitedItems = @(docker ps -a --filter status=exited --format '{{json .}}' | ConvertFrom-Json)
   $exited = $exitedItems.Count
-  $cache = @(docker system df --format '{{{{json .}}}}' 2>$null | ConvertFrom-Json | Where-Object {{ $_.Type -match 'Build Cache' }} | Select-Object -ExpandProperty Size -First 1)
-}}
-[pscustomobject]@{{
-  win_defend_status = if ($service) {{ [string]$service.State }} else {{ '' }}
-  third_party_products = $thirdParty | ForEach-Object {{ @{{ display_name = [string]$_.displayName; product_state = [int]$_.productState }} }}
-  listeners = $listeners | ForEach-Object {{ @{{ address = [string]$_.LocalAddress; port = [int]$_.LocalPort }} }}
-  firewall_rules = @($firewallRules | ForEach-Object {{ $_ }})
-  recursive_scan_access_errors = $scanErrors
+  $cache = @(docker system df --format '{{json .}}' 2>$null | ConvertFrom-Json | Where-Object { $_.Type -match 'Build Cache' } | Select-Object -ExpandProperty Size -First 1)
+}
+[pscustomobject]@{
   docker_available = $dockerAvailable
   docker_exited_count = $exited
-  docker_exited_container_names = @($exitedItems | ForEach-Object {{ [string]$_.Names }})
-  docker_build_cache_size = if ($cache) {{ [string]$cache }} else {{ '' }}
+  docker_exited_container_names = @($exitedItems | ForEach-Object { [string]$_.Names })
+  docker_build_cache_size = if ($cache) { [string]$cache } else { '' }
   v2rayn_running = ($v2.Count -gt 0)
-  v2rayn_path = if ($v2.Count -gt 0) {{ [string]$v2[0].ExecutablePath }} else {{ '' }}
-}} | ConvertTo-Json -Depth 5 -Compress
+  v2rayn_path = if ($v2.Count -gt 0) { [string]$v2[0].ExecutablePath } else { '' }
+} | ConvertTo-Json -Depth 5 -Compress
 """
         executable = shutil.which("powershell.exe") or shutil.which("pwsh") or "powershell.exe"
         result = self._run_bounded_command(
             [executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
             timeout=self.config.environment_probe_timeout_seconds,
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout).decode("utf-8", errors="replace")[:500])
-        raw = result.stdout.decode("utf-8", errors="replace").strip()
-        parsed = json.loads(raw) if raw else {}
-        return parsed if isinstance(parsed, dict) else {}
-
-    def _run_cloud_probe(self) -> Mapping[str, Any]:
-        root = shlex.quote(self.config.cloud_protected_root or "/")
-        profile = shlex.quote(self.config.cloud_tailscale_profile or "")
-        remote = (
-            "root_checked=0; root_readable=0; [ -n "
-            + shlex.quote(self.config.cloud_protected_root)
-            + " ] && root_checked=1; [ -d "
-            + root
-            + " ] && [ -r "
-            + root
-            + " ] && root_readable=1; "
-            "tailscale_profile_present=0; [ -n "
-            + profile
-            + " ] && [ -f "
-            + profile
-            + " ] && tailscale_profile_present=1; "
-            "swap_present=0; command -v swapon >/dev/null 2>&1 && [ -n \"$(swapon --show --noheadings 2>/dev/null)\" ] && swap_present=1; "
-            "selinux_mode=unknown; command -v getenforce >/dev/null 2>&1 && selinux_mode=$(getenforce 2>/dev/null); "
-            "cve_findings=-1; if command -v dnf >/dev/null 2>&1; then cve_findings=$(dnf -q updateinfo list cves --installed 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | wc -l); fi; "
-            "printf '{\"root_checked\":%s,\"root_readable\":%s,\"tailscale_profile_present\":%s,\"swap_present\":%s,\"selinux_mode\":\"%s\",\"cve_findings\":%s}\n' \"$root_checked\" \"$root_readable\" \"$tailscale_profile_present\" \"$swap_present\" \"$selinux_mode\" \"$cve_findings\""
-        )
-        args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
-        if self.config.cloud_ssh_identity_file:
-            args.extend(["-i", self.config.cloud_ssh_identity_file])
-        args.extend([self.config.cloud_ssh_target, remote])
-        executable = shutil.which("ssh.exe") or shutil.which("ssh") or "ssh"
-        result = self._run_bounded_command(
-            [executable, *args],
-            timeout=self.config.cloud_probe_timeout_seconds,
         )
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).decode("utf-8", errors="replace")[:500])

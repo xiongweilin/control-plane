@@ -20,27 +20,23 @@ max_output_bytes = 200000
 
 [agent]
 gateway_timeout_seconds = 900
-max_agent_calls_per_repair = 8
+diagnosis_timeout_seconds = 900
+execution_timeout_seconds = 900
 
 [policy]
 cooldown_seconds = 600
-max_attempts = 2
-per_repair_timeout_seconds = 1800
 max_concurrent = 2
 
 [monitoring]
 prometheus_url = "http://127.0.0.1:19090"
 alertmanager_url = ""
 notification_enabled = true
-auto_repair_alertnames = ["ContainerRestartStorm", "PrometheusScrapeFailed", "ControlPlaneStaleReady"]
 
 [environment]
-# 全部为只读巡检。未配置 cloud_ssh_target 时，云端项目标记为未配置，不会发起 SSH。
+# 仅保留个人 Windows 的运维可靠性巡检；不执行 Defender、端口/防火墙、递归目录、云端基线或 CVE 巡检。
 enabled = true
 cache_seconds = 60
 probe_timeout_seconds = 30
-cloud_probe_timeout_seconds = 30
-windows_scan_roots = ["D:\\agent"]
 docker_build_cache_max_bytes = 5368709120
 recovery_paths = ["D:\\agent\\ratio", "D:\\agent\\docker备份"]
 synchronization_paths = ["D:\\agent\\ratio", "D:\\agent\\control-plane", "D:\\infrastructure\\compose\\dify", "D:\\infrastructure\\compose\\observability", "D:\\infrastructure\\compose\\commerce-orchestrator", "D:\\infrastructure\\compose\\feishu-dify-gateway", "C:\\Users\\metra\\.local\\share\\chezmoi"]
@@ -49,10 +45,6 @@ garbage_quarantine_dir = "D:\\agent\\_recovery-quarantine"
 automatic_handling_enabled = true
 auto_maintenance_alertnames = ["ControlPlaneGarbageDetected"]
 v2rayn_expected_path = "D:\\agent\\v2rayN-windows-64\\v2rayN.exe"
-cloud_ssh_target = ""
-cloud_ssh_identity_file = ""
-cloud_protected_root = ""
-cloud_tailscale_profile = ""
 
 [game_mode]
 enabled = true
@@ -63,7 +55,7 @@ restore_grace_seconds = 600
 [projects]
 # Exact project directories in this list are the standing local auto-repair scope.
 # Codex may edit a clean repo in place, but Docker and remote Git stay denied to Codex.
-allowed_auto = ["dify", "docker", "observability", "feishu-dify-gateway"]
+allowed_auto = ["dify", "docker", "observability", "feishu-dify-gateway", "commerce-orchestrator", "control-plane", "ratio", "chezmoi"]
 allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\agent"]
 
 [projects.project_dirs]
@@ -71,3 +63,7 @@ docker = "D:\\infrastructure\\compose\\dify"
 dify = "D:\\infrastructure\\compose\\dify"
 observability = "D:\\infrastructure\\compose\\observability"
 feishu-dify-gateway = "D:\\infrastructure\\compose\\feishu-dify-gateway"
+commerce-orchestrator = "D:\\infrastructure\\compose\\commerce-orchestrator"
+control-plane = "D:\\agent\\control-plane"
+ratio = "D:\\agent\\ratio"
+chezmoi = "C:\\Users\\metra\\.local\\share\\chezmoi"

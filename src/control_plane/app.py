@@ -81,6 +81,7 @@ class AlertIngestResponse(BaseModel):
 ALERT_QUEUED_EVENT = "ControlPlaneAlertQueued"
 ALERT_FINISHED_EVENT = "ControlPlaneAlertFinished"
 ALERT_RESOLVED_EVENT = "ControlPlaneAlertResolved"
+ALERT_ESCALATED_EVENT = "ControlPlaneAlertEscalated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +94,19 @@ class AlertRepair:
     project: str | None
     verification_labels: dict[str, str]
     maintenance_capability: str | None
-    fail_safe: bool
-    deadline_at: float
 
 
 def _register_profile_effect_rules(runtime: Any) -> None:
     rules = [
+        CapabilityEffectRule(
+            capability="shell.exec",
+            impact_class="write-local",
+            authorization_required=False,
+            resource_required=True,
+            version_required=False,
+            blast_radius=1,
+            exposure=1,
+        ),
         CapabilityEffectRule(
             capability="notify.send",
             impact_class="write-remote",
@@ -125,6 +133,33 @@ def _register_profile_effect_rules(runtime: Any) -> None:
             version_required=True,
             blast_radius=2,
             exposure=2,
+        ),
+        CapabilityEffectRule(
+            capability="git.fast_forward",
+            impact_class="write-local",
+            authorization_required=False,
+            resource_required=True,
+            version_required=True,
+            blast_radius=1,
+            exposure=1,
+        ),
+        CapabilityEffectRule(
+            capability="git.push_exact_ref",
+            impact_class="write-remote",
+            authorization_required=False,
+            resource_required=True,
+            version_required=True,
+            blast_radius=2,
+            exposure=2,
+        ),
+        CapabilityEffectRule(
+            capability="chezmoi.apply",
+            impact_class="write-local",
+            authorization_required=False,
+            resource_required=True,
+            version_required=True,
+            blast_radius=1,
+            exposure=1,
         ),
         CapabilityEffectRule(
             capability="git.rollback",
@@ -197,7 +232,7 @@ def _safe_alert_payload(raw: dict[str, Any]) -> dict[str, Any]:
     annotations = raw.get("annotations")
     safe_labels = {
         key: str(labels[key])
-        for key in ("alertname", "job", "project", "instance", "severity")
+        for key in ("alertname", "job", "project", "path", "instance", "severity")
         if isinstance(labels, dict) and key in labels
     }
     safe_annotations = {
@@ -239,7 +274,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     cfg.agent_session_dir.mkdir(parents=True, exist_ok=True)
 
     runtime = create_personal_platform_runtime(cfg.state_db, cfg.artifact_root)
-    reconcile_repair_state(runtime, stale_after_seconds=max(1, cfg.per_repair_timeout_seconds))
+    reconcile_repair_state(runtime, stale_after_seconds=900)
     runtime.registry.register(
         ThreadIsolatedCodexProvider(
             CodexProvider(
@@ -315,19 +350,19 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="repo is outside personal allowlist")
         return resolved_repo or None, resolved_project or None
 
-    async def notify(work_id: str, text: str) -> None:
+    async def notify(work_id: str, text: str) -> bool:
         if not cfg.notification_enabled or not work_id:
-            return
+            return False
         try:
-            await runtime.run_capability(
+            result = await runtime.run_capability(
                 work_id,
                 "notify.send",
                 instruction=text[:4000],
                 actor_ref=cfg.owner_principal,
             )
         except Exception:
-            # Notification delivery never changes Work truth or repair closure.
-            return
+            return False
+        return getattr(result, "status", "") == "succeeded"
 
     async def settle_personal_state(state: Any) -> Any:
         settled = await preserve_blocked_wait(controller, bridge, state)
@@ -460,34 +495,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         final_state = await settle_personal_state(final_state)
         return _task_response(bridge, final_state)
 
-    def repair_deadline_for_fingerprint(fingerprint: str) -> float | None:
-        """Keep one bounded repair deadline across webhook retries and restarts."""
-
-        events = runtime.store.list_events(fingerprint)
-        resolved = [event for event in events if event.type == ALERT_RESOLVED_EVENT]
-        last_resolved = max(resolved, key=lambda event: event.created_at) if resolved else None
-        queued = [
-            event
-            for event in events
-            if event.type == ALERT_QUEUED_EVENT
-            and (last_resolved is None or event.created_at > last_resolved.created_at)
-        ]
-        if not queued:
-            return None
-        first = min(queued, key=lambda event: event.created_at)
-        raw_deadline = first.payload.get("repair_deadline_at")
-        try:
-            if raw_deadline is not None:
-                return float(raw_deadline)
-        except (TypeError, ValueError):
-            pass
-        raw_queued_at = first.payload.get("queued_at")
-        try:
-            queued_at = float(raw_queued_at)
-        except (TypeError, ValueError):
-            queued_at = first.created_at.timestamp()
-        return queued_at + max(1, cfg.per_repair_timeout_seconds)
-
     def begin_alert_repair(
         *,
         fingerprint: str,
@@ -497,13 +504,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         project: str | None,
         verification_labels: dict[str, str],
         maintenance_capability: str | None = None,
-        fail_safe: bool = False,
-        deadline_at: float | None = None,
     ) -> AlertRepair:
-        if deadline_at is None:
-            deadline_at = repair_deadline_for_fingerprint(fingerprint)
-        if deadline_at is None:
-            deadline_at = time.time() + max(1, cfg.per_repair_timeout_seconds)
         state, _assessment_ref = bridge.begin(
             title=title,
             description=description,
@@ -521,8 +522,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             project=project,
             verification_labels=verification_labels,
             maintenance_capability=maintenance_capability,
-            fail_safe=fail_safe,
-            deadline_at=deadline_at,
         )
 
     def alert_policy(spec: AlertRepair) -> AutonomousRepairPolicy:
@@ -535,9 +534,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             repo=spec.repo,
             project=spec.project if spec.project in cfg.allowed_auto_projects else None,
             verification_labels=spec.verification_labels,
-            max_attempts=max(1, cfg.max_attempts),
+            diagnosis_timeout_seconds=cfg.diagnosis_timeout_seconds,
+            execution_timeout_seconds=cfg.execution_timeout_seconds,
             maintenance_capability=spec.maintenance_capability,
-            fail_safe=spec.fail_safe,
         )
 
     def alert_event_payload(spec: AlertRepair) -> dict[str, Any]:
@@ -550,8 +549,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "project": spec.project,
             "verification_labels": dict(spec.verification_labels),
             "maintenance_capability": spec.maintenance_capability,
-            "fail_safe": spec.fail_safe,
-            "repair_deadline_at": spec.deadline_at,
         }
 
     def append_alert_event(event_type: str, spec: AlertRepair, **extra: Any) -> None:
@@ -565,112 +562,112 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             )
         )
 
-    def requires_safety_recheck(fingerprint: str) -> bool:
-        """Migrate a still-active alert created by the pre-Codex safety policy."""
-
-        queued = [
-            event
-            for event in runtime.store.list_events(fingerprint)
-            if event.type == ALERT_QUEUED_EVENT
-        ]
-        if not queued:
-            return False
-        latest = max(queued, key=lambda event: event.created_at)
-        return bool(latest.payload.get("fail_safe", False))
+    def escalation_already_sent(fingerprint: str) -> bool:
+        events = runtime.store.list_events(fingerprint)
+        resolved = [event for event in events if event.type == ALERT_RESOLVED_EVENT]
+        last_resolved = max(resolved, key=lambda event: event.created_at) if resolved else None
+        return any(
+            event.type == ALERT_ESCALATED_EVENT
+            and (last_resolved is None or event.created_at > last_resolved.created_at)
+            and event.payload.get("notification_sent") is True
+            for event in events
+        )
 
     async def process_alert_repair(spec: AlertRepair) -> None:
         async with repair_slots:
+            policy = alert_policy(spec)
             try:
-                remaining = spec.deadline_at - time.time()
-                if remaining <= 0:
-                    append_alert_event(
-                        ALERT_FINISHED_EVENT,
-                        spec,
-                        status="timeout",
-                        repair_deadline_exceeded=True,
-                        finished_at=time.time(),
-                    )
-                    await notify(
-                        spec.controller_id,
-                        "同一 Alertmanager fingerprint 的累计 repair deadline 已到达; "
-                        "不再创建新的 Codex 调用, 未执行 effect, 等待明确命令。\n"
-                        f"alert={spec.title}\nwork={spec.controller_id}\n"
-                        f"controller={spec.controller_id}",
-                    )
-                    return
-                policy = alert_policy(spec)
-                final_state = await asyncio.wait_for(
-                    drive_policy(controller, spec.controller_id, policy),
-                    timeout=remaining,
-                )
+                final_state = await drive_policy(controller, spec.controller_id, policy)
                 final_state = await settle_personal_state(final_state)
                 result = _task_response(bridge, final_state)
                 safety_class = policy.safety_class(final_state)
+                diagnosis_attempts = policy._diagnosis_count(final_state)
+                execution_attempts = policy._execution_count(final_state)
+                blocker = policy.diagnosis_blocker(final_state)
+                should_escalate = result.status == ControllerStatus.WAITING.value and (
+                    blocker is not None
+                    or max(diagnosis_attempts, execution_attempts)
+                    >= policy.attempt_limit
+                )
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
                     status=result.status,
                     work_id=result.work_id,
                     safety_class=safety_class,
+                    diagnosis_attempts=diagnosis_attempts,
+                    execution_attempts=execution_attempts,
+                    blocker=blocker,
                     finished_at=time.time(),
                 )
-                if result.status == ControllerStatus.WAITING.value:
-                    if spec.fail_safe or safety_class == "irreversible":
-                        message = (
-                            "Codex 判定当前告警不可逆, 已转为 fail-safe; 未执行修复 effect, "
-                            "等待人工升级。\n"
-                        )
-                    elif safety_class == "unknown":
-                        message = (
-                            "Codex 无法证明当前修复可逆, 未执行任何 effect, "
-                            "等待补充证据或明确命令。\n"
-                        )
+                if should_escalate and not escalation_already_sent(spec.fingerprint):
+                    if blocker == "irreversible":
+                        message = "首轮 Codex 判断该告警对应操作不可逆, 已停止自动 effect。\n"
+                    elif blocker == "dirty-repository":
+                        message = "首轮 Codex/现场核验发现目标仓库不干净, 已停止自动 effect。\n"
                     else:
-                        message = "自动修复达到边界后仍未解决, 已停止并等待明确命令。\n"
-                    await notify(
+                        message = "告警经过两轮 Codex 判断与执行后仍未解除, 已停止自动重试。\n"
+                    sent = await notify(
                         result.work_id,
                         message
                         + f"alert={spec.title}\nwork={result.work_id}\n"
                         f"controller={result.controller_id}\n"
-                        f"回复: /task {result.controller_id} <明确命令>",
+                        f"diagnosis_attempts={diagnosis_attempts}\n"
+                        f"execution_attempts={execution_attempts}\n"
+                        f"继续命令: /task {result.controller_id} <明确命令>",
+                    )
+                    append_alert_event(
+                        ALERT_ESCALATED_EVENT,
+                        spec,
+                        work_id=result.work_id,
+                        reason=blocker or "attempt-budget-exhausted",
+                        diagnosis_attempts=diagnosis_attempts,
+                        execution_attempts=execution_attempts,
+                        notification_sent=sent,
+                        escalated_at=time.time(),
                     )
             except asyncio.CancelledError:
                 raise
-            except TimeoutError:
-                current = controller.get(spec.controller_id)
-                if current is not None:
-                    with suppress(Exception):
-                        await settle_personal_state(current)
-                append_alert_event(
-                    ALERT_FINISHED_EVENT,
-                    spec,
-                    status="timeout",
-                    repair_deadline_exceeded=True,
-                    finished_at=time.time(),
-                )
-                await notify(
-                    spec.controller_id,
-                    "同一 Alertmanager fingerprint 的累计 repair deadline 已到达; "
-                    "未执行 effect, 不再重试, 等待明确命令。\n"
-                    f"alert={spec.title}\nwork={spec.controller_id}\n"
-                    f"controller={spec.controller_id}",
-                )
             except Exception as exc:
                 current = controller.get(spec.controller_id)
                 if current is not None:
                     with suppress(Exception):
-                        await settle_personal_state(current)
+                        current = await settle_personal_state(current)
+                result = _task_response(bridge, current) if current is not None else None
+                diagnosis_attempts = policy._diagnosis_count(current) if current is not None else 0
+                execution_attempts = policy._execution_count(current) if current is not None else 0
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
                     spec,
                     status="failed",
+                    work_id=result.work_id if result else "",
+                    diagnosis_attempts=diagnosis_attempts,
+                    execution_attempts=execution_attempts,
                     error=redact_value(f"{type(exc).__name__}: {str(exc)[:500]}"),
                     finished_at=time.time(),
                 )
+                if (
+                    result is not None
+                    and max(diagnosis_attempts, execution_attempts) >= policy.attempt_limit
+                    and not escalation_already_sent(spec.fingerprint)
+                ):
+                    sent = await notify(
+                        result.work_id,
+                        "告警自动处理流程异常且已达到两轮边界, 已停止重试并发送人工告警。\n"
+                        f"alert={spec.title}\nwork={result.work_id}\ncontroller={spec.controller_id}",
+                    )
+                    append_alert_event(
+                        ALERT_ESCALATED_EVENT,
+                        spec,
+                        work_id=result.work_id,
+                        reason="policy-exception",
+                        diagnosis_attempts=diagnosis_attempts,
+                        execution_attempts=execution_attempts,
+                        notification_sent=sent,
+                        escalated_at=time.time(),
+                    )
 
-    def recoverable_alert_specs() -> tuple[
-        dict[str, str], list[AlertRepair], list[AlertRepair]
-    ]:
+    def recoverable_alert_specs() -> tuple[dict[str, str], list[AlertRepair]]:
         latest: dict[str, Event] = {}
         queued: dict[str, AlertRepair] = {}
         journal_types = {ALERT_QUEUED_EVENT, ALERT_FINISHED_EVENT, ALERT_RESOLVED_EVENT}
@@ -718,16 +715,9 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         if event.payload.get("maintenance_capability")
                         else None
                     ),
-                    fail_safe=bool(event.payload.get("fail_safe", False)),
-                    deadline_at=(
-                        repair_deadline_for_fingerprint(fingerprint)
-                        or event.created_at.timestamp()
-                        + max(1, cfg.per_repair_timeout_seconds)
-                    ),
                 )
         active: dict[str, str] = {}
         pending: list[AlertRepair] = []
-        legacy_recheck: list[AlertRepair] = []
         for fingerprint, event in latest.items():
             if event.type == ALERT_RESOLVED_EVENT:
                 continue
@@ -737,24 +727,15 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             if event.type == ALERT_QUEUED_EVENT:
                 spec = queued.get(fingerprint)
                 if spec is not None and controller_id and controller.get(controller_id) is not None:
-                    if spec.fail_safe:
-                        legacy_recheck.append(spec)
-                    else:
-                        pending.append(spec)
+                    pending.append(spec)
             elif event.type == ALERT_FINISHED_EVENT and event.payload.get("status") in {
                 "failed",
                 "timeout",
             }:
                 spec = queued.get(fingerprint)
                 if spec is not None and controller.get(spec.controller_id) is not None:
-                    if spec.fail_safe:
-                        legacy_recheck.append(spec)
-                    else:
-                        pending.append(spec)
-            spec = queued.get(fingerprint)
-            if spec is not None and spec.fail_safe and spec not in legacy_recheck:
-                legacy_recheck.append(spec)
-        return active, pending, legacy_recheck
+                    pending.append(spec)
+        return active, pending
 
     async def schedule_alert(spec: AlertRepair) -> None:
         task = asyncio.create_task(process_alert_repair(spec))
@@ -792,9 +773,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     async def recover_alert_dispatcher_background() -> None:
         try:
-            recovered, pending, legacy_recheck = await asyncio.to_thread(
-                recoverable_alert_specs
-            )
+            recovered, pending = await asyncio.to_thread(recoverable_alert_specs)
             current_fingerprints = await current_alertmanager_fingerprints()
             async with alert_lock:
                 if current_fingerprints is None:
@@ -823,30 +802,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         and spec.fingerprint not in alert_tasks
                     ):
                         await schedule_alert(spec)
-                for spec in legacy_recheck:
-                    if (
-                        current_fingerprints is None
-                        or spec.fingerprint not in current_fingerprints
-                    ):
-                        continue
-                    migrated = begin_alert_repair(
-                        fingerprint=spec.fingerprint,
-                        title=spec.title,
-                        description=spec.description,
-                        repo=spec.repo,
-                        project=spec.project,
-                        verification_labels=spec.verification_labels,
-                        maintenance_capability=spec.maintenance_capability,
-                        fail_safe=False,
-                    )
-                    active_alerts[spec.fingerprint] = migrated.controller_id
-                    append_alert_event(
-                        ALERT_QUEUED_EVENT,
-                        migrated,
-                        migrated_from_legacy_fail_safe=True,
-                    )
-                    if migrated.fingerprint not in alert_tasks:
-                        await schedule_alert(migrated)
         finally:
             recovery_complete.set()
 
@@ -909,7 +864,8 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 ),
                 verification_labels=context.verification_labels,
                 human_instruction=command,
-                max_attempts=max(1, cfg.max_attempts),
+                diagnosis_timeout_seconds=cfg.diagnosis_timeout_seconds,
+                execution_timeout_seconds=cfg.execution_timeout_seconds,
             )
         else:
             policy = ManualTaskPolicy(
@@ -1164,7 +1120,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             project_label = str(labels.get("project", "")) or None
             verification_labels = {
                 key: str(labels.get(key, ""))
-                for key in ("alertname", "job", "project", "instance")
+                for key in ("alertname", "job", "project", "path", "instance")
                 if str(labels.get(key, ""))
             }
             description = json.dumps(
@@ -1175,25 +1131,16 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             async with alert_lock:
                 existing_controller = active_alerts.get(fingerprint)
                 if existing_controller:
-                    safety_recheck = requires_safety_recheck(fingerprint)
-                    if not safety_recheck:
-                        deduplicated += 1
-                        waiting += 1
-                        controllers.append(existing_controller)
-                        continue
-                    # The only allowed replacement is migration of a legacy
-                    # name-based fail-safe record. A live fingerprint never
-                    # creates a second controller/Work after a Codex outcome;
-                    # retries remain inside the original Work.
-                    active_alerts.pop(fingerprint, None)
+                    deduplicated += 1
+                    waiting += 1
+                    controllers.append(existing_controller)
+                    continue
             automatic_maintenance = (
                 cfg.automatic_handling_enabled
                 and alertname in cfg.auto_maintenance_alertnames
             )
-            automatic_repair = (
-                cfg.automatic_handling_enabled and alertname in cfg.auto_repair_alertnames
-            )
             project = project_label if project_label in cfg.allowed_auto_projects else None
+            automatic_repair = cfg.automatic_handling_enabled and project is not None
             safety_hint = (
                 "Historical safety hint only: this alert class normally requires extra safety "
                 "review. Do not use the hint as the current safety decision; Codex must judge "
@@ -1213,7 +1160,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     if automatic_maintenance
                     else None
                 ),
-                fail_safe=False,
             )
 
             async with alert_lock:

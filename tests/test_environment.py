@@ -10,11 +10,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
     return ControlPlaneConfig(
         api_key="test-key",
         codex_cli=tmp_path / "codex.cmd",
-        windows_scan_roots=(),
         v2rayn_expected_path=r"D:\agent\v2rayN-windows-64\v2rayN.exe",
-        cloud_ssh_target="cloud.example",
-        cloud_protected_root="/srv/protected",
-        cloud_tailscale_profile="/var/lib/tailscale/tailscaled.state",
         docker_build_cache_max_bytes=1024,
         docker_expected_exited_containers=("dify-init_permissions-1",),
         automatic_handling_enabled=True,
@@ -26,25 +22,11 @@ def test_environment_evaluation_covers_codex_judgment_findings(tmp_path: Path) -
     snapshot = evaluate_environment(
         make_config(tmp_path),
         {
-            "win_defend_status": "Stopped",
-            "listeners": [
-                {"address": "0.0.0.0", "port": 23443},
-                {"address": "0.0.0.0", "port": 445},
-            ],
-            "recursive_scan_access_errors": 3,
             "docker_available": True,
             "docker_exited_count": 2,
             "docker_build_cache_bytes": 2048,
             "v2rayn_running": True,
             "v2rayn_path": r"C:\stale\v2rayN.exe",
-            "cloud": {
-                "root_checked": False,
-                "root_readable": False,
-                "tailscale_profile_present": False,
-                "swap_present": False,
-                "selinux_mode": "permissive",
-                "cve_findings": 1,
-            },
         },
         provider_health={"codex-primary": {"available": False}},
     )
@@ -52,25 +34,23 @@ def test_environment_evaluation_covers_codex_judgment_findings(tmp_path: Path) -
     findings = {item.name: item for item in snapshot.observations if item.status == "problem"}
     assert {
         "codex_primary",
-        "windows_defender",
-        "ditto_listener",
-        "smb_rpc_listeners",
-        "windows_recursive_scan",
         "docker_exited_containers",
         "docker_build_cache",
         "v2rayn_path",
+    } <= findings.keys()
+    assert findings["docker_build_cache"].metadata["bytes"] == 2048
+    assert not {item.name for item in snapshot.observations} & {
+        "windows_defender",
+        "third_party_protection",
+        "ditto_listener",
+        "smb_rpc_listeners",
+        "windows_recursive_scan",
         "cloud_protected_root",
         "cloud_tailscale_profile",
         "cloud_swap",
         "cloud_selinux",
         "cloud_cve",
-    } <= findings.keys()
-    assert findings["windows_defender"].automation == "codex-judgment"
-    assert findings["docker_build_cache"].metadata["bytes"] == 2048
-    assert any(
-        item.name == "third_party_protection" and item.status == "unknown"
-        for item in snapshot.observations
-    )
+    }
 
 
 def test_environment_evaluation_covers_standing_control_plane_responsibilities(
@@ -131,57 +111,6 @@ def test_expected_one_shot_containers_do_not_become_unexpected_exited_alerts(
     assert observation.metadata["expected_down"] is True
 
 
-def test_listeners_covered_by_existing_inbound_blocks_are_mitigated(tmp_path: Path) -> None:
-    snapshot = evaluate_environment(
-        make_config(tmp_path),
-        {
-            "listeners": [
-                {"address": "0.0.0.0", "port": 23443},
-                {"address": "0.0.0.0", "port": 135},
-                {"address": "192.168.0.100", "port": 139},
-                {"address": "::", "port": 445},
-            ],
-            "firewall_rules": [
-                {
-                    "name": r"TCP Query User{ditto}C:\Program Files\Ditto\Ditto.exe",
-                    "display_name": "Ditto",
-                    "enabled": True,
-                    "direction": "Inbound",
-                    "action": "Block",
-                    "local_ports": ["Any"],
-                    "programs": [r"C:\Program Files\Ditto\Ditto.exe"],
-                },
-                {
-                    "name": "Codex-Personal-Block-SMB-RPC-NonLoopback-v4",
-                    "display_name": "Codex Personal Block SMB RPC NonLoopback v4",
-                    "enabled": True,
-                    "direction": "Inbound",
-                    "action": "Block",
-                    "local_ports": ["135", "139", "445"],
-                    "local_addresses": ["192.168.0.100"],
-                    "remote_addresses": ["Any"],
-                },
-                {
-                    "name": "Codex-Personal-Block-SMB-RPC-NonLoopback-v6",
-                    "display_name": "Codex Personal Block SMB RPC NonLoopback v6",
-                    "enabled": True,
-                    "direction": "Inbound",
-                    "action": "Block",
-                    "local_ports": ["135", "139", "445"],
-                    "local_addresses": ["fe80::/10"],
-                    "remote_addresses": ["Any"],
-                },
-            ],
-        },
-    )
-    observations = {item.name: item for item in snapshot.observations}
-
-    assert observations["ditto_listener"].status == "ok"
-    assert observations["ditto_listener"].metadata["firewall_enforced"] is True
-    assert observations["smb_rpc_listeners"].status == "ok"
-    assert observations["smb_rpc_listeners"].metadata["firewall_enforced"] is True
-
-
 def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     expected = Path(config.v2rayn_expected_path or "")
@@ -191,18 +120,6 @@ def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: P
     observations = {item.name: item for item in snapshot.observations}
     assert observations["v2rayn_path"].status == "ok"
     assert observations["v2rayn_status"].status == "problem"
-
-
-def test_stopped_defender_without_security_center_owner_stays_explicit_unknown(
-    tmp_path: Path,
-) -> None:
-    snapshot = evaluate_environment(
-        make_config(tmp_path),
-        {"win_defend_status": "Stopped", "third_party_products": []},
-    )
-    observations = {item.name: item for item in snapshot.observations}
-    assert observations["windows_defender"].status == "problem"
-    assert observations["third_party_protection"].status == "unknown"
 
 
 @pytest.mark.asyncio
@@ -221,10 +138,18 @@ async def test_environment_provider_is_read_only_and_cacheable(tmp_path: Path) -
 
     assert first is second
     assert calls == 1
-    assert {item.name for item in first.unknowns} >= {
+    assert {item.name for item in first.unknowns} >= {"docker_exited_containers"}
+    assert not {item.name for item in first.unknowns} & {
         "windows_defender",
-        "docker_exited_containers",
+        "third_party_protection",
+        "ditto_listener",
+        "smb_rpc_listeners",
+        "windows_recursive_scan",
+        "cloud_protected_root",
+        "cloud_tailscale_profile",
         "cloud_swap",
+        "cloud_selinux",
+        "cloud_cve",
     }
     health = await provider.health()
     assert health.available is True
