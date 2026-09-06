@@ -6,8 +6,8 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@599845269bb682732820e6c343db96d558bd5102",
-    "meta-controller @ git+https://github.com/xiongweilin/meta-controller.git@68cb503e2850b06632c3d2cb2c1bdd56def3aa6b",
+    "portable-runtime @ git+https://github.com/xiongweilin/agent-kernel.git@e9f6ae53417df945f5f60b88b3ac2acf41c2340c",
+    "meta-controller @ git+https://github.com/xiongweilin/meta-controller.git@f53fb2c9a95c298836d02c5a9c6a1302f6ffed54",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "pydantic>=2.9,<3",
