@@ -32,7 +32,7 @@ from .alert_policy import (
     drive_policy,
 )
 from .audit import inspect_session_fields, redact_value
-from .codex_boundary import CodexExecutionBoundary
+from .codex_boundary import CodexExecutionBoundary, ThreadIsolatedCodexProvider
 from .config import ControlPlaneConfig
 from .environment import (
     HISTORICAL_SAFETY_HINT_ALERT_NAMES,
@@ -241,12 +241,14 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     runtime = create_personal_platform_runtime(cfg.state_db, cfg.artifact_root)
     reconcile_repair_state(runtime, stale_after_seconds=max(1, cfg.per_repair_timeout_seconds))
     runtime.registry.register(
-        CodexProvider(
-            model=cfg.diagnosis_model,
-            cli=cfg.codex_cli,
-            gateway_base_url=cfg.gateway_base_url,
-            timeout_seconds=cfg.gateway_timeout_seconds,
-            execution_boundary=CodexExecutionBoundary(cfg),
+        ThreadIsolatedCodexProvider(
+            CodexProvider(
+                model=cfg.diagnosis_model,
+                cli=cfg.codex_cli,
+                gateway_base_url=cfg.gateway_base_url,
+                timeout_seconds=cfg.gateway_timeout_seconds,
+                execution_boundary=CodexExecutionBoundary(cfg),
+            )
         )
     )
     runtime.registry.register(FeishuHumanProvider())

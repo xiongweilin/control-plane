@@ -109,6 +109,43 @@ function Test-ActiveCodexDescendant {
     }
 }
 
+function Stop-ManagedRuntime {
+    param([Parameter(Mandatory)][int]$RootProcessId)
+
+    try {
+        $descendants = @(Get-DescendantProcess -RootProcessId $RootProcessId)
+        if (@($descendants | Where-Object {
+                $_.CommandLine -match '(?i)\bcodex(?:\.cmd)?\s+exec\b'
+            }).Count -gt 0) {
+            Write-LauncherEvent 'runtime_stop_deferred action=active_codex'
+            return $false
+        }
+
+        $descendantIds = @($descendants | ForEach-Object { [int]$_.ProcessId })
+        $targetIds = [System.Collections.Generic.HashSet[int]]::new()
+        $null = $targetIds.Add($RootProcessId)
+        foreach ($connection in @(Get-NetTCPConnection -LocalPort 18083 -State Listen -ErrorAction SilentlyContinue)) {
+            $listenerId = [int]$connection.OwningProcess
+            if ($listenerId -eq $RootProcessId -or $descendantIds -contains $listenerId) {
+                $null = $targetIds.Add($listenerId)
+            }
+        }
+
+        foreach ($processId in $targetIds) {
+            $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($null -ne $process) {
+                Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+                Write-LauncherEvent "runtime_stopped pid=$processId"
+            }
+        }
+        return $true
+    }
+    catch {
+        Write-LauncherEvent 'runtime_stop_failed action=defer'
+        return $false
+    }
+}
+
 Protect-LogDirectory
 Rotate-ExactLog -Path $stdoutLog
 Rotate-ExactLog -Path $stderrLog
@@ -151,16 +188,14 @@ try {
         }
 
         if ($consecutiveFailures -ge $LivenessFailureThreshold) {
-            if (Test-ActiveCodexDescendant -RootProcessId $child.Id) {
-                Write-LauncherEvent 'liveness_threshold_reached action=defer_due_to_active_codex'
+            if (-not (Stop-ManagedRuntime -RootProcessId $child.Id)) {
+                Write-LauncherEvent 'liveness_threshold_reached action=defer'
                 $consecutiveFailures = 0
                 continue
             }
 
-            Write-LauncherEvent 'liveness_threshold_reached action=terminate_child_no_active_codex'
-            $taskkill = Join-Path $env:WINDIR 'System32\taskkill.exe'
-            & $taskkill /PID $child.Id /T /F *> $null
-            $child.WaitForExit()
+            Write-LauncherEvent 'liveness_threshold_reached action=stop_direct_targets'
+            $null = $child.WaitForExit(10000)
             $launcherExitCode = 1
             break
         }
@@ -178,8 +213,7 @@ catch {
     $errorType = $_.Exception.GetType().Name
     Write-LauncherEvent "launcher_failed error_type=$errorType"
     if ($null -ne $child -and -not $child.HasExited) {
-        $taskkill = Join-Path $env:WINDIR 'System32\taskkill.exe'
-        & $taskkill /PID $child.Id /T /F *> $null
+        $null = Stop-ManagedRuntime -RootProcessId $child.Id
     }
     $launcherExitCode = 1
 }
