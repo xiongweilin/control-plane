@@ -8,7 +8,7 @@ from portable_runtime.core.models import Event, new_id
 from portable_runtime.core.runtime import Runtime
 
 from control_plane.alert_policy import ManualTaskPolicy
-from control_plane.escalation_policy import create_fail_safe_alert_work, preserve_blocked_wait
+from control_plane.escalation_policy import preserve_blocked_wait
 from control_plane.kernel_bridge import PersonalKernelBridge
 
 
@@ -82,26 +82,3 @@ async def test_failed_diagnosis_still_produces_durable_waiting_work_without_effe
     assert revisions[-1].work_ref == work.id
     assert revisions[-1].failure_class == "diagnosis-failure"
     assert revisions[-1].recommended_disposition.value == "wait"
-
-
-async def test_fail_safe_alert_materializes_no_effect_work() -> None:
-    runtime = Runtime(runtime_id="personal-platform")
-    controller = CognitiveController(runtime)
-    bridge = PersonalKernelBridge(runtime, controller, owner_principal="principal:test")
-
-    state = await create_fail_safe_alert_work(
-        controller,
-        bridge,
-        title="Alert (fail-safe): WinDefendStopped",
-        description="WinDefend stopped; third-party protection is unknown",
-        verification_labels={"alertname": "WinDefendStopped"},
-    )
-    work = bridge.work_for_state(state)
-
-    assert state.status is ControllerStatus.WAITING
-    assert work is not None
-    assert work.requested_capabilities == []
-    assert work.kind == "personal-incident-repair-blocked"
-    assert work.status == "waiting"
-    run = runtime.store.list_runs(work.id)[-1]
-    assert run.status == "interrupted"

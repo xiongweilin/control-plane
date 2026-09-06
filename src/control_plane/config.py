@@ -67,27 +67,18 @@ class ControlPlaneConfig:
     # round-trip. Keep enough time for multi-turn reasoning before treating
     # the provider as unavailable.
     gateway_timeout_seconds: float = 900.0
-    max_agent_calls_per_repair: int = 8
+    diagnosis_timeout_seconds: float = 900.0
+    execution_timeout_seconds: float = 900.0
 
     prometheus_url: str = "http://127.0.0.1:19090"
     alertmanager_url: str = ""
     notification_enabled: bool = True
-    auto_repair_alertnames: tuple[str, ...] = (
-        "ContainerRestartStorm",
-        "PrometheusScrapeFailed",
-        "ControlPlaneStaleReady",
-    )
     cooldown_seconds: int = 600
-    max_attempts: int = 2
-    # Two bounded Codex diagnosis attempts may each use the provider budget.
-    per_repair_timeout_seconds: int = 1800
     max_concurrent: int = 2
 
     environment_enabled: bool = True
     environment_cache_seconds: int = 60
     environment_probe_timeout_seconds: int = 30
-    cloud_probe_timeout_seconds: int = 30
-    windows_scan_roots: tuple[str, ...] = (r"D:\agent",)
     docker_build_cache_max_bytes: int = 5 * 1024**3
     docker_expected_exited_containers: tuple[str, ...] = ("dify-init_permissions-1",)
     recovery_paths: tuple[str, ...] = (
@@ -103,6 +94,7 @@ class ControlPlaneConfig:
         r"D:\infrastructure\compose\feishu-dify-gateway",
         r"C:\Users\metra\.local\share\chezmoi",
     )
+    chezmoi_source_dir: str = r"C:\Users\metra\.local\share\chezmoi"
     known_garbage_paths: tuple[str, ...] = (
         r"D:\agent\portable-runtime-worktrees",
     )
@@ -112,10 +104,6 @@ class ControlPlaneConfig:
         "ControlPlaneGarbageDetected",
     )
     v2rayn_expected_path: str | None = r"D:\agent\v2rayN-windows-64\v2rayN.exe"
-    cloud_ssh_target: str = ""
-    cloud_ssh_identity_file: str = ""
-    cloud_protected_root: str = ""
-    cloud_tailscale_profile: str = ""
 
     game_mode_enabled: bool = True
     game_mode_state_path: Path | None = None
@@ -144,6 +132,10 @@ class ControlPlaneConfig:
         "docker",
         "observability",
         "feishu-dify-gateway",
+        "commerce-orchestrator",
+        "control-plane",
+        "ratio",
+        "chezmoi",
     )
     project_dirs: dict[str, str] = field(
         default_factory=lambda: {
@@ -151,11 +143,16 @@ class ControlPlaneConfig:
             "dify": r"D:\infrastructure\compose\dify",
             "observability": r"D:\infrastructure\compose\observability",
             "feishu-dify-gateway": r"D:\infrastructure\compose\feishu-dify-gateway",
+            "commerce-orchestrator": r"D:\infrastructure\compose\commerce-orchestrator",
+            "control-plane": r"D:\agent\control-plane",
+            "ratio": r"D:\agent\ratio",
+            "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
         }
     )
     allowed_repo_roots: tuple[str, ...] = (
         r"D:\infrastructure\compose",
         r"D:\agent",
+        r"C:\Users\metra\.local\share\chezmoi",
     )
 
     @property
@@ -214,6 +211,16 @@ class ControlPlaneConfig:
         )
         legacy_model = str(model.get("name", "")).strip()
 
+        gateway_timeout_seconds = float(
+            agent.get("gateway_timeout_seconds", base.gateway_timeout_seconds)
+        )
+        diagnosis_timeout_seconds = float(
+            agent.get("diagnosis_timeout_seconds", gateway_timeout_seconds)
+        )
+        execution_timeout_seconds = float(
+            agent.get("execution_timeout_seconds", gateway_timeout_seconds)
+        )
+
         return cls(
             host=str(server.get("host", base.host)),
             port=int(server.get("port", base.port)),
@@ -242,12 +249,9 @@ class ControlPlaneConfig:
             ),
             codex_worktree_root=Path(str(model.get("worktree_root", base.codex_worktree_root))),
             max_agent_output_bytes=int(model.get("max_output_bytes", base.max_agent_output_bytes)),
-            gateway_timeout_seconds=float(
-                agent.get("gateway_timeout_seconds", base.gateway_timeout_seconds)
-            ),
-            max_agent_calls_per_repair=int(
-                agent.get("max_agent_calls_per_repair", base.max_agent_calls_per_repair)
-            ),
+            gateway_timeout_seconds=gateway_timeout_seconds,
+            diagnosis_timeout_seconds=diagnosis_timeout_seconds,
+            execution_timeout_seconds=execution_timeout_seconds,
             prometheus_url=str(
                 monitoring.get("prometheus_url", policy.get("prometheus_url", base.prometheus_url))
             ),
@@ -267,15 +271,7 @@ class ControlPlaneConfig:
                     )
                 ),
             ),
-            auto_repair_alertnames=tuple(
-                str(v)
-                for v in monitoring.get("auto_repair_alertnames", base.auto_repair_alertnames)
-            ),
             cooldown_seconds=int(policy.get("cooldown_seconds", base.cooldown_seconds)),
-            max_attempts=int(policy.get("max_attempts", base.max_attempts)),
-            per_repair_timeout_seconds=int(
-                policy.get("per_repair_timeout_seconds", base.per_repair_timeout_seconds)
-            ),
             max_concurrent=max(1, int(policy.get("max_concurrent", base.max_concurrent))),
             environment_enabled=_env_bool(
                 "CONTROL_PLANE_ENVIRONMENT_CHECKS",
@@ -288,12 +284,6 @@ class ControlPlaneConfig:
                 environment.get(
                     "probe_timeout_seconds", base.environment_probe_timeout_seconds
                 )
-            ),
-            cloud_probe_timeout_seconds=int(
-                environment.get("cloud_probe_timeout_seconds", base.cloud_probe_timeout_seconds)
-            ),
-            windows_scan_roots=tuple(
-                str(v) for v in environment.get("windows_scan_roots", base.windows_scan_roots)
             ),
             docker_build_cache_max_bytes=int(
                 environment.get(
@@ -314,6 +304,9 @@ class ControlPlaneConfig:
                 for v in environment.get(
                     "synchronization_paths", base.synchronization_paths
                 )
+            ),
+            chezmoi_source_dir=str(
+                environment.get("chezmoi_source_dir", base.chezmoi_source_dir)
             ),
             known_garbage_paths=tuple(
                 str(v)
@@ -340,16 +333,6 @@ class ControlPlaneConfig:
                 str(environment["v2rayn_expected_path"])
                 if environment.get("v2rayn_expected_path")
                 else base.v2rayn_expected_path
-            ),
-            cloud_ssh_target=str(environment.get("cloud_ssh_target", base.cloud_ssh_target)),
-            cloud_ssh_identity_file=str(
-                environment.get("cloud_ssh_identity_file", base.cloud_ssh_identity_file)
-            ),
-            cloud_protected_root=str(
-                environment.get("cloud_protected_root", base.cloud_protected_root)
-            ),
-            cloud_tailscale_profile=str(
-                environment.get("cloud_tailscale_profile", base.cloud_tailscale_profile)
             ),
             game_mode_enabled=_env_bool(
                 "CONTROL_PLANE_GAME_MODE",

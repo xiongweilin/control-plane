@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -16,13 +18,100 @@ from portable_runtime.controller import (
     RevisionDisposition,
     RevisionScope,
 )
-from portable_runtime.core.models import Event
+from portable_runtime.core.capabilities import CapabilityResult
+from portable_runtime.core.models import Event, new_id
 from portable_runtime.responsibility import EffectClass
 
 from .kernel_bridge import PersonalKernelBridge
 
 _RESULT_EVENT = "ControllerCapabilityResultObserved"
 _DECISION_EVENT = "ControllerDecisionSelected"
+_SYNC_ALERT_NAME = "ControlPlaneSynchronizationDegraded"
+_SYNC_CAPABILITIES = frozenset(
+    {"git.fast_forward", "git.push_exact_ref", "chezmoi.apply"}
+)
+_SYNC_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_SYNC_FIELD_PATTERN = re.compile(r"(?im)^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
+_AUTONOMOUS_ATTEMPT_LIMIT = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SynchronizationPlan:
+    """Structured sync intent selected by diagnosis and guarded by a provider."""
+
+    capability: str
+    parameters: dict[str, Any]
+    subject_version_refs: tuple[str, ...]
+
+
+def _sync_plan_from_result(
+    result: dict[str, Any] | None,
+    *,
+    repo: str | None,
+    project: str | None,
+) -> SynchronizationPlan | None:
+    if not result or str(result.get("status", "")) != "succeeded" or not repo or not project:
+        return None
+    fields = {
+        match.group(1).upper(): match.group(2).strip()
+        for match in _SYNC_FIELD_PATTERN.finditer(_message(result))
+    }
+    capability = fields.get("SYNC_CAPABILITY", "").lower()
+    if capability not in _SYNC_CAPABILITIES:
+        return None
+
+    if capability == "chezmoi.apply":
+        source_dir = fields.get("SYNC_SOURCE_DIR", "")
+        expected_source_sha = fields.get("SYNC_EXPECTED_SOURCE_SHA", "").lower()
+        if not source_dir or not _SYNC_SHA_PATTERN.fullmatch(expected_source_sha):
+            return None
+        return SynchronizationPlan(
+            capability=capability,
+            parameters={
+                "repo": repo,
+                "source_dir": source_dir,
+                "project": project,
+                "expected_source_sha": expected_source_sha,
+            },
+            subject_version_refs=(f"chezmoi:{source_dir}:{expected_source_sha}",),
+        )
+
+    remote = fields.get("SYNC_REMOTE", "")
+    branch = fields.get("SYNC_BRANCH", "")
+    expected_old_sha = fields.get("SYNC_EXPECTED_OLD_SHA", "").lower()
+    if (
+        not remote
+        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", remote)
+        or not branch
+        or any(value in branch for value in ("..", " ", "\t"))
+        or not _SYNC_SHA_PATTERN.fullmatch(expected_old_sha)
+    ):
+        return None
+
+    parameters: dict[str, Any] = {
+        "repo": repo,
+        "project": project,
+        "remote": remote,
+        "branch": branch,
+        "expected_old_sha": expected_old_sha,
+    }
+    if capability == "git.fast_forward":
+        expected_remote_sha = fields.get("SYNC_EXPECTED_REMOTE_SHA", "").lower()
+        if not _SYNC_SHA_PATTERN.fullmatch(expected_remote_sha):
+            return None
+        parameters["expected_remote_sha"] = expected_remote_sha
+        version_ref = expected_remote_sha
+    else:
+        expected_new_sha = fields.get("SYNC_EXPECTED_NEW_SHA", "").lower()
+        if not _SYNC_SHA_PATTERN.fullmatch(expected_new_sha):
+            return None
+        parameters["expected_new_sha"] = expected_new_sha
+        version_ref = expected_new_sha
+    return SynchronizationPlan(
+        capability=capability,
+        parameters=parameters,
+        subject_version_refs=(f"git:{repo}:{branch}:{version_ref}",),
+    )
 
 
 def _ordered_decisions(
@@ -72,9 +161,9 @@ _SAFETY_CLASS_PATTERN = re.compile(
 def classify_safety(result: dict[str, Any] | None) -> str:
     """Read the current Codex safety judgment from the diagnosis result.
 
-    A missing or malformed judgment is ``unknown``. Unknown is deliberately
-    not called fail-safe, but it is still denied all effect capabilities until
-    a later diagnosis explicitly proves reversibility.
+    A missing or malformed judgment is ``unknown``. Unknown is denied all
+    effect capabilities, but still receives the bounded read-only execution
+    and verification pass before the next round or Feishu escalation.
     """
 
     match = _SAFETY_CLASS_PATTERN.search(_message(result))
@@ -121,14 +210,20 @@ class AutonomousRepairPolicy:
     project: str | None = None
     verification_labels: dict[str, str] = field(default_factory=dict)
     human_instruction: str | None = None
-    max_attempts: int = 2
+    diagnosis_timeout_seconds: float = 900.0
+    execution_timeout_seconds: float = 900.0
     maintenance_capability: str | None = None
     maintenance_parameters: dict[str, Any] = field(default_factory=dict)
-    fail_safe: bool = False
 
     @property
     def policy_ref(self) -> str:
         return "control-plane/autonomous-repair-v2"
+
+    @property
+    def attempt_limit(self) -> int:
+        """Hard ceiling for alert repair: at most two diagnosis/execution rounds."""
+
+        return _AUTONOMOUS_ATTEMPT_LIMIT
 
     def _session_cutoff(self, controller_id: str) -> datetime | None:
         if not self.human_instruction:
@@ -150,11 +245,63 @@ class AutonomousRepairPolicy:
                 count += 1
         return count
 
+    def _execution_count(self, state: ControllerState) -> int:
+        return sum(
+            1
+            for event in self.bridge.result_events(state.id)
+            if event.payload.get("stage") == "execution"
+        )
+
+    def _is_sync_alert(self) -> bool:
+        return self.verification_labels.get("alertname") == _SYNC_ALERT_NAME
+
+    def _sync_plan(self, diagnosis_result: dict[str, Any] | None) -> SynchronizationPlan | None:
+        if not self._is_sync_alert():
+            return None
+        return _sync_plan_from_result(
+            diagnosis_result,
+            repo=self.repo,
+            project=self.project,
+        )
+
+    def _repo_is_dirty(self) -> bool | None:
+        if not self.repo:
+            return False
+        git = shutil.which("git.exe") or shutil.which("git")
+        if not git:
+            return None
+        try:
+            completed = subprocess.run(
+                [git, "-C", self.repo, "status", "--porcelain=v1", "--untracked-files=all"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        return bool((completed.stdout or b"").strip())
+
+    def diagnosis_blocker(self, state: ControllerState) -> str | None:
+        """Return a first-diagnosis blocker that must escalate immediately."""
+
+        diagnosis_result = self._latest_diagnosis_result(state)
+        safety = classify_safety(diagnosis_result)
+        if safety == "irreversible":
+            return "irreversible"
+        message = _message(diagnosis_result).upper()
+        if re.search(r"(?:EXECUTION|REPAIR)_BLOCKER\s*=\s*DIRTY_REPO", message):
+            return "dirty-repository"
+        if self._repo_is_dirty() is True:
+            return "dirty-repository"
+        return None
+
     def _diagnosis(self, state: ControllerState, *, retry_context: str = "") -> ControllerDecision:
         attempt = self._diagnosis_count(state) + 1
         instruction = (
             f"Diagnose this incident for autonomous repair attempt {attempt}/"
-            f"{self.max_attempts}.\n"
+            f"{self.attempt_limit}.\n"
             "This diagnosis must first judge whether the proposed bounded repair is reversible "
             "in the current reality. On the first line, emit exactly one of: "
             "SAFETY_CLASS=REVERSIBLE, SAFETY_CLASS=IRREVERSIBLE, or SAFETY_CLASS=UNKNOWN. "
@@ -173,7 +320,25 @@ class AutonomousRepairPolicy:
             )
         if retry_context:
             instruction += f"\n\nPrevious attempt evidence:\n{retry_context}"
-        parameters: dict[str, Any] = {"model": self.diagnosis_model, "phase": "diagnosis"}
+        if self._is_sync_alert():
+            instruction += (
+                "\n\nFor this synchronization alert, choose exactly one Kernel-qualified action. "
+                "After the safety line, emit one SYNC_CAPABILITY line with exactly one of "
+                "git.fast_forward, git.push_exact_ref, chezmoi.apply, or NONE. For a Git "
+                "action also emit SYNC_REMOTE, SYNC_BRANCH, SYNC_EXPECTED_OLD_SHA and the "
+                "required target SHA: use SYNC_EXPECTED_REMOTE_SHA for git.fast_forward or "
+                "SYNC_EXPECTED_NEW_SHA for git.push_exact_ref. For chezmoi.apply emit "
+                "SYNC_SOURCE_DIR and SYNC_EXPECTED_SOURCE_SHA. SHA values must be full "
+                "40-character hex values. Select NONE if the current evidence is not clean, "
+                "owner/project binding is unclear, or the operation is not safely bounded. "
+                "Do not put shell commands in place of these markers."
+            )
+        parameters: dict[str, Any] = {
+            "model": self.diagnosis_model,
+            "phase": "diagnosis",
+            "attempt_index": attempt,
+            "timeout_seconds": self.diagnosis_timeout_seconds,
+        }
         if self.repo:
             parameters["repo"] = self.repo
         return ControllerDecision(
@@ -204,13 +369,18 @@ class AutonomousRepairPolicy:
         return classify_safety(self._latest_diagnosis_result(state))
 
     def _effects_allowed(self, diagnosis_result: dict[str, Any] | None) -> bool:
-        return not self.fail_safe and classify_safety(diagnosis_result) == "reversible"
+        return classify_safety(diagnosis_result) == "reversible" and (
+            not self._is_sync_alert() or self._sync_plan(diagnosis_result) is not None
+        )
 
     def _requested_capabilities(
         self, diagnosis_result: dict[str, Any] | None = None
     ) -> list[str]:
         if not self._effects_allowed(diagnosis_result):
             return ["reason.generate", "monitor.alert.active"]
+        sync_plan = self._sync_plan(diagnosis_result)
+        if sync_plan is not None:
+            return ["reason.generate", sync_plan.capability, "monitor.alert.active"]
         values = ["shell.exec" if self.repo else "reason.generate"]
         if self.project:
             values.append("docker.compose.up")
@@ -222,6 +392,13 @@ class AutonomousRepairPolicy:
     def _effect_class(self, diagnosis_result: dict[str, Any] | None = None) -> EffectClass:
         if not self._effects_allowed(diagnosis_result):
             return EffectClass.READ_ONLY
+        sync_plan = self._sync_plan(diagnosis_result)
+        if sync_plan is not None:
+            return (
+                EffectClass.EXTERNAL_EFFECT
+                if sync_plan.capability == "git.push_exact_ref"
+                else EffectClass.INTERNAL_REVERSIBLE
+            )
         if self.project:
             return EffectClass.EXTERNAL_EFFECT
         if self.repo:
@@ -315,36 +492,51 @@ class AutonomousRepairPolicy:
         if not events:
             raise ValueError("repair revision requires durable Work result observations")
 
-        execution = next(
-            (event for event in events if event.payload.get("stage") == "execution"),
-            None,
-        )
-        apply_event = next(
-            (event for event in events if event.payload.get("stage") == "apply"),
-            None,
-        )
-        verification = next(
-            (event for event in events if event.payload.get("stage") == "verification"),
-            None,
-        )
-        attempts = self._diagnosis_count(state)
+        execution_events = [
+            event for event in events if event.payload.get("stage") == "execution"
+        ]
+        apply_events = [event for event in events if event.payload.get("stage") == "apply"]
+        verification_events = [
+            event for event in events if event.payload.get("stage") == "verification"
+        ]
+        execution = execution_events[-1] if execution_events else None
+        verification = verification_events[-1] if verification_events else None
+        attempts = max(self._diagnosis_count(state), self._execution_count(state))
+        blocker = self.diagnosis_blocker(state)
         failed_event = next(
             (
                 event
-                for event in (execution, apply_event)
+                for event in [execution, *apply_events]
                 if event is not None and not _succeeded(_event_result(event))
             ),
             None,
         )
 
-        outcome_refs = [event.id for event in (execution, apply_event) if event is not None]
+        outcome_refs = [event.id for event in [execution, *apply_events] if event is not None]
         verification_refs = [verification.id] if verification is not None else []
         reason_refs = [event.id for event in events]
 
-        if failed_event is not None:
+        if blocker is not None:
+            disposition = RevisionDisposition.WAIT
+            scope = RevisionScope.EXECUTION
+            reason = (
+                "the first diagnosis found an autonomous execution blocker: "
+                f"{blocker}; escalate immediately"
+            )
+            failure_class = "execution-blocked"
+        elif execution is None:
             disposition = (
                 RevisionDisposition.REOPEN_COGNITION
-                if attempts < self.max_attempts
+                if attempts < self.attempt_limit
+                else RevisionDisposition.WAIT
+            )
+            scope = RevisionScope.EXECUTION
+            reason = "the repair round produced no durable execution result"
+            failure_class = "execution-missing"
+        elif failed_event is not None:
+            disposition = (
+                RevisionDisposition.REOPEN_COGNITION
+                if attempts < self.attempt_limit
                 else RevisionDisposition.WAIT
             )
             scope = RevisionScope.EXECUTION
@@ -353,7 +545,7 @@ class AutonomousRepairPolicy:
         elif verification is None:
             disposition = (
                 RevisionDisposition.REOPEN_COGNITION
-                if attempts < self.max_attempts
+                if attempts < self.attempt_limit
                 else RevisionDisposition.WAIT
             )
             scope = RevisionScope.VERIFICATION
@@ -371,7 +563,7 @@ class AutonomousRepairPolicy:
             else:
                 disposition = (
                     RevisionDisposition.REOPEN_COGNITION
-                    if attempts < self.max_attempts
+                    if attempts < self.attempt_limit
                     else RevisionDisposition.WAIT
                 )
                 scope = RevisionScope.PROBLEM_DEFINITION
@@ -447,6 +639,24 @@ class AutonomousRepairPolicy:
         if run is None:
             run = runtime.start_run(work.id, workflow_id="personal-incident-repair")
 
+        async def invoke(capability: str, **kwargs: Any) -> CapabilityResult:
+            try:
+                return await runtime.run_capability(
+                    work.id,
+                    capability,
+                    run_id=run.id,
+                    actor_ref=self.bridge.owner_principal,
+                    **kwargs,
+                )
+            except Exception as exc:
+                return CapabilityResult(
+                    request_id=new_id("request"),
+                    provider_id="control-plane",
+                    status="failed",
+                    message=f"{type(exc).__name__}: {str(exc)[:500]}",
+                    metadata={"exception": type(exc).__name__, "capability": capability},
+                )
+
         diagnosis_decisions = [
             decision
             for _event, decision in _ordered_decisions(self.controller, state.id)
@@ -459,17 +669,42 @@ class AutonomousRepairPolicy:
         diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
         safety = classify_safety(diagnosis_result)
         effects_allowed = self._effects_allowed(diagnosis_result)
-        if self.fail_safe or safety == "irreversible":
-            execution_prefix = (
-                "The current Codex safety judgment is IRREVERSIBLE. Re-evaluate this alert "
-                "and provide a bounded human action plan only. Do not modify files, call "
-                "effect capabilities, access credentials, or claim recovery.\n\n"
+        blocker = self.diagnosis_blocker(state)
+        if blocker is not None:
+            blocked = CapabilityResult(
+                request_id=new_id("request"),
+                provider_id="control-plane",
+                status="failed",
+                message=f"execution blocked by first diagnosis: {blocker}",
+                metadata={"blocker": blocker, "attempt_index": self._execution_count(state) + 1},
             )
-        elif safety == "unknown":
+            self.bridge.record_capability_result(
+                controller_id=state.id,
+                work_id=work.id,
+                run_id=run.id,
+                stage="execution",
+                capability="execution.blocked",
+                result=blocked,
+            )
+            return
+
+        execution_attempt = self._execution_count(state) + 1
+        if execution_attempt > self.attempt_limit:
+            raise RuntimeError("autonomous execution attempt budget is exhausted")
+
+        sync_plan = self._sync_plan(diagnosis_result)
+        if safety == "unknown":
             execution_prefix = (
-                "Codex could not prove that this repair is reversible. Provide a read-only "
-                "diagnostic and explicitly state what evidence is missing. Do not modify "
-                "files, call effect capabilities, access credentials, or claim recovery.\n\n"
+                "The current Codex safety judgment is UNKNOWN. Perform a read-only execution "
+                "pass, identify the missing evidence, and do not modify files, call effect "
+                "capabilities, access credentials, or claim recovery.\n\n"
+            )
+        elif sync_plan is not None:
+            execution_prefix = (
+                "Prepare the selected synchronization operation for the Kernel provider. Re-read "
+                "the diagnosis evidence, do not run git or chezmoi commands, do not modify files, "
+                "and do not access remote credentials. The provider will perform the exact bounded "
+                "operation and postcondition checks. Finish with a concise execution summary.\n\n"
             )
         else:
             execution_prefix = (
@@ -484,16 +719,23 @@ class AutonomousRepairPolicy:
             + "Diagnosis and plan:\n"
             + _message(diagnosis_result)
         )
-        parameters: dict[str, Any] = {"model": self.execution_model, "phase": "execution"}
-        if effects_allowed and self.repo:
+        parameters: dict[str, Any] = {
+            "model": self.execution_model,
+            "phase": "execution",
+            "attempt_index": execution_attempt,
+            "timeout_seconds": self.execution_timeout_seconds,
+        }
+        if effects_allowed and self.repo and sync_plan is None:
             parameters["repo"] = self.repo
-        capability = "shell.exec" if effects_allowed and self.repo else "reason.generate"
-        result = await runtime.run_capability(
-            work.id,
+        capability = (
+            "shell.exec"
+            if effects_allowed and self.repo and sync_plan is None
+            else "reason.generate"
+        )
+        result = await invoke(
             capability,
             instruction=instruction,
-            run_id=run.id,
-            actor_ref=self.bridge.owner_principal,
+            resource_ref=self.repo if parameters.get("repo") else None,
             **parameters,
         )
         self.bridge.record_capability_result(
@@ -504,20 +746,38 @@ class AutonomousRepairPolicy:
             capability=capability,
             result=result,
         )
-        if result.status != "succeeded":
-            return
 
-        if effects_allowed and self.maintenance_capability:
+        if result.status == "succeeded" and sync_plan is not None:
+            applied = await invoke(
+                sync_plan.capability,
+                instruction="Apply the diagnosis-selected exact synchronization plan.",
+                resource_ref=self.repo,
+                subject_version_refs=list(sync_plan.subject_version_refs),
+                **sync_plan.parameters,
+                phase="apply",
+            )
+            self.bridge.record_capability_result(
+                controller_id=state.id,
+                work_id=work.id,
+                run_id=run.id,
+                stage="apply",
+                capability=sync_plan.capability,
+                result=applied,
+            )
+
+        if (
+            result.status == "succeeded"
+            and sync_plan is None
+            and effects_allowed
+            and self.maintenance_capability
+        ):
             maintenance_parameters = {
                 **self.maintenance_parameters,
                 "phase": "apply",
             }
-            applied = await runtime.run_capability(
-                work.id,
+            applied = await invoke(
                 self.maintenance_capability,
                 instruction="Apply the already approved bounded maintenance operation.",
-                run_id=run.id,
-                actor_ref=self.bridge.owner_principal,
                 **maintenance_parameters,
             )
             self.bridge.record_capability_result(
@@ -528,16 +788,16 @@ class AutonomousRepairPolicy:
                 capability=self.maintenance_capability,
                 result=applied,
             )
-            if applied.status != "succeeded":
-                return
 
-        if effects_allowed and self.project:
-            applied = await runtime.run_capability(
-                work.id,
+        if (
+            result.status == "succeeded"
+            and sync_plan is None
+            and effects_allowed
+            and self.project
+        ):
+            applied = await invoke(
                 "docker.compose.up",
                 instruction="Apply the already prepared local repair for the configured project.",
-                run_id=run.id,
-                actor_ref=self.bridge.owner_principal,
                 project=self.project,
                 phase="apply",
             )
@@ -549,15 +809,10 @@ class AutonomousRepairPolicy:
                 capability="docker.compose.up",
                 result=applied,
             )
-            if applied.status != "succeeded":
-                return
 
-        verified = await runtime.run_capability(
-            work.id,
+        verified = await invoke(
             "monitor.alert.active",
             instruction="Verify whether the triggering Prometheus alert is still active.",
-            run_id=run.id,
-            actor_ref=self.bridge.owner_principal,
             labels=dict(self.verification_labels),
             phase="verification",
         )
@@ -608,14 +863,10 @@ class AutonomousRepairPolicy:
         ):
             result = _result_by_decision(self.controller, state.id).get(last.id)
             if not _succeeded(result):
-                if self._diagnosis_count(state) < self.max_attempts:
-                    return self._diagnosis(state, retry_context=_message(result))
-                return ControllerDecision(
-                    controller_ref=state.id,
-                    state_version=state.version,
-                    kind=ControllerDecisionKind.WAIT,
-                    reason="the bounded diagnosis attempt budget is exhausted",
-                )
+                result = result or {
+                    "status": "failed",
+                    "message": "diagnosis returned no result; treat safety as UNKNOWN",
+                }
             return self._form_closure(state, result)
         raise ValueError(f"unexpected open repair controller stage after {last.kind.value}")
 

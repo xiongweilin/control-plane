@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -15,6 +16,10 @@ from portable_runtime.core.capabilities import (
 )
 
 from .config import ControlPlaneConfig
+
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_REMOTE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 
 class PersonalOperationsProvider:
@@ -30,11 +35,14 @@ class PersonalOperationsProvider:
         self._descriptor = ProviderDescriptor(
             id="personal-operations",
             name="Personal Git/Docker Operations",
-            version="2.0.0",
+            version="2.1.0",
             capabilities=[
                 "git.merge",
                 "git.push",
                 "git.rollback",
+                "git.fast_forward",
+                "git.push_exact_ref",
+                "chezmoi.apply",
                 "docker.restart",
                 "docker.compose.up",
                 "maintenance.cleanup_known_garbage",
@@ -57,12 +65,23 @@ class PersonalOperationsProvider:
     async def health(self) -> ProviderHealth:
         git_ok = shutil.which("git.exe") is not None or shutil.which("git") is not None
         docker_ok = shutil.which("docker.exe") is not None or shutil.which("docker") is not None
+        chezmoi_ok = shutil.which("chezmoi.exe") is not None or shutil.which("chezmoi") is not None
         maintenance_ok = self._maintenance_boundary_is_valid()
         return ProviderHealth(
             provider_id=self.descriptor.id,
-            available=git_ok or docker_ok or maintenance_ok,
-            detail=f"git={git_ok} docker={docker_ok} maintenance={maintenance_ok}",
-            metadata={"maintenance_cleanup_available": maintenance_ok},
+            available=git_ok or docker_ok or chezmoi_ok or maintenance_ok,
+            detail=(
+                f"git={git_ok} docker={docker_ok} chezmoi={chezmoi_ok} "
+                f"maintenance={maintenance_ok}"
+            ),
+            metadata={
+                "maintenance_cleanup_available": maintenance_ok,
+                "synchronization_capabilities": [
+                    "git.fast_forward",
+                    "git.push_exact_ref",
+                    "chezmoi.apply",
+                ],
+            },
         )
 
     async def invoke(
@@ -74,6 +93,8 @@ class PersonalOperationsProvider:
         try:
             if request.capability.startswith("git."):
                 message = await self._git(request)
+            elif request.capability == "chezmoi.apply":
+                message = await self._chezmoi_apply(request)
             elif request.capability.startswith("docker."):
                 message = await self._docker(request)
             elif request.capability == "maintenance.cleanup_known_garbage":
@@ -203,17 +224,211 @@ class PersonalOperationsProvider:
         err = (stderr or b"").decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             raise RuntimeError(f"command failed ({proc.returncode}): {(err or out)[:800]}")
-        return out or "ok"
+        return out
 
     def _repo(self, request: CapabilityRequest) -> str:
-        repo = str(request.parameters.get("repo", "")).strip()
+        repo = str(request.parameters.get("repo") or request.resource_ref or "").strip()
         if not repo:
             raise ValueError("git operation requires parameters.repo")
         if not self.config.repo_allowed(repo):
             raise ValueError(f"repo is outside personal allowlist: {repo}")
         return repo
 
+    def _sync_repo(self, request: CapabilityRequest) -> str:
+        if not self.config.automatic_handling_enabled:
+            raise ValueError("automatic handling is disabled")
+        project = str(request.parameters.get("project", "")).strip()
+        if project not in self.config.allowed_auto_projects:
+            raise ValueError(f"synchronization project is outside personal allowlist: {project}")
+        configured_repo = self.config.project_dirs.get(project)
+        repo = str(request.parameters.get("repo") or request.resource_ref or "").strip()
+        if not configured_repo or not repo:
+            raise ValueError("synchronization requires an exact project and repo")
+        if Path(repo).resolve(strict=False) != Path(configured_repo).resolve(strict=False):
+            raise ValueError("synchronization repo does not match the configured project")
+        if not self.config.repo_allowed(repo):
+            raise ValueError(f"synchronization repo is outside personal allowlist: {repo}")
+        if request.actor_ref != self.config.owner_principal:
+            raise ValueError("synchronization actor does not match the configured owner")
+        return repo
+
+    @staticmethod
+    def _required_sha(request: CapabilityRequest, name: str) -> str:
+        value = str(request.parameters.get(name, "")).strip().lower()
+        if not _GIT_SHA.fullmatch(value):
+            raise ValueError(f"{name} must be a full 40-character SHA")
+        return value
+
+    @staticmethod
+    def _required_remote(request: CapabilityRequest) -> str:
+        remote = str(request.parameters.get("remote", "")).strip()
+        if not _REMOTE_NAME.fullmatch(remote):
+            raise ValueError("remote is not a valid Git remote name")
+        return remote
+
+    @staticmethod
+    def _required_branch(request: CapabilityRequest) -> str:
+        branch = str(request.parameters.get("branch", "")).strip()
+        if (
+            not _BRANCH_NAME.fullmatch(branch)
+            or ".." in branch
+            or "@{" in branch
+            or branch.endswith(".")
+            or branch.endswith("/")
+        ):
+            raise ValueError("branch is not a valid Git branch name")
+        return branch
+
+    async def _git_clean(self, repo: str) -> None:
+        status = await self._run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=repo
+        )
+        if status:
+            raise ValueError("repository worktree is not clean")
+
+    async def _git_head(self, repo: str) -> str:
+        value = (await self._run(["git", "rev-parse", "HEAD"], cwd=repo)).strip().lower()
+        if not _GIT_SHA.fullmatch(value):
+            raise RuntimeError("repository HEAD is not a full commit SHA")
+        return value
+
+    async def _git_branch(self, repo: str) -> str:
+        try:
+            return (
+                await self._run(
+                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo
+                )
+            ).strip()
+        except RuntimeError as exc:
+            raise ValueError("repository is detached or has no symbolic branch") from exc
+
+    async def _remote_sha(self, repo: str, remote: str, branch: str) -> str:
+        output = await self._run(
+            ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"], cwd=repo
+        )
+        rows = [line.split() for line in output.splitlines() if line.strip()]
+        if len(rows) != 1 or len(rows[0]) < 2 or rows[0][1] != f"refs/heads/{branch}":
+            raise RuntimeError("target remote branch is missing or ambiguous")
+        remote_sha = rows[0][0].lower()
+        if not _GIT_SHA.fullmatch(remote_sha):
+            raise RuntimeError("target remote branch did not return a full commit SHA")
+        return remote_sha
+
+    async def _is_ancestor(self, repo: str, old_sha: str, new_sha: str) -> bool:
+        try:
+            await self._run(["git", "merge-base", "--is-ancestor", old_sha, new_sha], cwd=repo)
+        except RuntimeError:
+            return False
+        return True
+
+    async def _git_fast_forward(self, request: CapabilityRequest) -> str:
+        repo = self._sync_repo(request)
+        remote = self._required_remote(request)
+        branch = self._required_branch(request)
+        old_sha = self._required_sha(request, "expected_old_sha")
+        remote_sha = self._required_sha(request, "expected_remote_sha")
+
+        await self._git_clean(repo)
+        if await self._git_branch(repo) != branch:
+            raise ValueError("current branch does not match the synchronization target")
+        current_sha = await self._git_head(repo)
+        observed_remote_sha = await self._remote_sha(repo, remote, branch)
+        if observed_remote_sha != remote_sha:
+            raise ValueError("remote branch changed after diagnosis")
+        if current_sha == remote_sha:
+            return "synchronization already complete"
+        if current_sha != old_sha:
+            raise ValueError("local HEAD changed after diagnosis")
+        if not await self._is_ancestor(repo, old_sha, remote_sha):
+            raise ValueError("fast-forward target is not a descendant of local HEAD")
+
+        await self._run(
+            ["git", "fetch", "--no-tags", remote, f"refs/heads/{branch}"],
+            cwd=repo,
+            timeout=900,
+        )
+        fetched_sha = (
+            await self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo)
+        ).strip().lower()
+        if fetched_sha != remote_sha:
+            raise ValueError("fetched target changed after diagnosis")
+        await self._git_clean(repo)
+        if await self._git_head(repo) != old_sha:
+            raise ValueError("local HEAD changed during synchronization preflight")
+        await self._run(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=repo, timeout=900)
+        if await self._git_head(repo) != remote_sha:
+            raise RuntimeError("fast-forward postcondition did not reach the expected SHA")
+        await self._git_clean(repo)
+        return f"fast-forwarded {branch} to {remote_sha}"
+
+    async def _git_push_exact_ref(self, request: CapabilityRequest) -> str:
+        repo = self._sync_repo(request)
+        remote = self._required_remote(request)
+        branch = self._required_branch(request)
+        old_sha = self._required_sha(request, "expected_old_sha")
+        new_sha = self._required_sha(request, "expected_new_sha")
+
+        await self._git_clean(repo)
+        if await self._git_branch(repo) != branch:
+            raise ValueError("current branch does not match the synchronization target")
+        if await self._git_head(repo) != new_sha:
+            raise ValueError("local HEAD does not match the exact push target")
+        observed_remote_sha = await self._remote_sha(repo, remote, branch)
+        if observed_remote_sha == new_sha:
+            return "synchronization already complete"
+        if observed_remote_sha != old_sha:
+            raise ValueError("remote branch changed after diagnosis")
+        if not await self._is_ancestor(repo, old_sha, new_sha):
+            raise ValueError("push target is not a fast-forward descendant")
+
+        try:
+            await self._run(
+                ["git", "push", remote, f"{new_sha}:refs/heads/{branch}"],
+                cwd=repo,
+                timeout=900,
+            )
+        except TimeoutError:
+            if await self._remote_sha(repo, remote, branch) == new_sha:
+                return "exact push completed before the provider timeout"
+            raise
+        if await self._remote_sha(repo, remote, branch) != new_sha:
+            raise RuntimeError("push postcondition did not reach the expected remote SHA")
+        await self._git_clean(repo)
+        return f"pushed {branch} at exact SHA {new_sha}"
+
+    async def _chezmoi_apply(self, request: CapabilityRequest) -> str:
+        repo = self._sync_repo(request)
+        source_dir = str(request.parameters.get("source_dir", "")).strip()
+        configured_source = self.config.chezmoi_source_dir
+        expected_source_sha = self._required_sha(request, "expected_source_sha")
+        if (
+            not source_dir
+            or Path(source_dir).resolve(strict=False)
+            != Path(configured_source).resolve(strict=False)
+            or Path(repo).resolve(strict=False) != Path(configured_source).resolve(strict=False)
+        ):
+            raise ValueError("chezmoi source is outside the configured exact boundary")
+        if await self._git_head(repo) != expected_source_sha:
+            raise ValueError("chezmoi source revision changed after diagnosis")
+        await self._run(
+            ["chezmoi", "verify", "--skip-secrets", "--no-tty", "--source", source_dir],
+            timeout=900,
+        )
+        await self._run(
+            ["chezmoi", "apply", "--skip-secrets", "--no-tty", "--source", source_dir],
+            timeout=900,
+        )
+        await self._run(
+            ["chezmoi", "verify", "--skip-secrets", "--no-tty", "--source", source_dir],
+            timeout=900,
+        )
+        return "chezmoi source verified and applied"
+
     async def _git(self, request: CapabilityRequest) -> str:
+        if request.capability == "git.fast_forward":
+            return await self._git_fast_forward(request)
+        if request.capability == "git.push_exact_ref":
+            return await self._git_push_exact_ref(request)
         repo = self._repo(request)
         if request.capability == "git.push":
             remote = str(request.parameters.get("remote", "origin"))

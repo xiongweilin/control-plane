@@ -6,10 +6,9 @@ Kernel。provider 的 `available` 表示“探针本身可用”，不表示被�
 由 `control_plane_environment_check` 的 `status` 标签表达。
 
 `automation` 标签表示处置路由意图，不是当前告警的安全性结论：`none` 表示无需处置，
-`codex-judgment` 表示 problem/unknown 必须先进入当前 Codex 安全性判断，`automatic`
-只表示精确的 known-garbage 路径可以作为候选 effect。只有 Codex 输出
-`SAFETY_CLASS=IRREVERSIBLE` 时，告警结果才可命名为 fail-safe；`UNKNOWN` 仍禁止 effect，
-但不等同于 fail-safe。
+`codex-judgment` 表示 problem/unknown 必须先进入当前 Codex 判断，`automatic` 只表示
+精确的 known-garbage 路径可以作为候选 effect。所有 firing 告警都由 Codex 先判断；
+`SAFETY_CLASS`、仓库干净性和具体目标由当前证据共同决定是否允许执行。
 
 ## 告警接收与恢复
 
@@ -20,33 +19,30 @@ control-plane 监听 `0.0.0.0:18083`，本机守护脚本仍使用
 动态网关地址写入配置，也不要把 Docker Compose 改成 host network。
 
 Alertmanager webhook 只做认证、字段清洗、指纹去重和 durable enqueue，然后立即返回
-2xx；Codex 诊断、Agent Kernel Work/Run 闭环、效果执行和 Prometheus 验证由后台有界
-dispatcher 完成。`policy.max_concurrent` 限制并发修复数，
-`policy.per_repair_timeout_seconds` 限制同一 Alertmanager fingerprint 活动周期的累计
-repair 时长；一次 firing 周期只能创建一个 controller/Work。Codex provider 返回失败或
-超时时，重试只能在原 Work 的有界认知循环内进行，webhook 重发不得创建第二个
-controller/Work；首次 enqueue 的 deadline 持久化并跨进程重启复用。只有收到 resolved
-后再次 firing，才开始新的告警周期。接收、完成、解析状态写入 Agent Kernel 事件存储，
-进程重启时恢复同一 Work；deadline 到达后停止新的 Codex 调用并等待明确命令。
+2xx；Codex 诊断、Agent Kernel Work/Run 闭环、效果执行和 Prometheus 验证由后台
+dispatcher 完成。`policy.max_concurrent` 限制并发修复数；同一 firing fingerprint
+最多执行两轮，每轮各包含一次 diagnosis 和一次 execution。diagnosis 与 execution
+调用的独立超时都是 900 秒，不存在累计的 episode deadline，也不会用累计 1800 秒
+截断第二轮。接收、完成、解析状态和每次阶段结果写入 Agent Kernel 事件存储，进程重启
+后可从持久化状态继续尚未完成的轮次。
 
-Codex provider timeout is a transient processing failure for the current
-attempt: it never proves `IRREVERSIBLE`, never creates a `fail-safe` judgment,
-and does not authorize a new controller/Work for the same firing fingerprint.
-The original Work keeps the bounded attempt budget and the persisted repair
-deadline; after that deadline the alert waits for an owner command. The Codex
-CLI session budget is intentionally longer than a single HTTP round-trip
-because one diagnosis may contain multiple model turns.
+Codex provider timeout is a transient processing failure for the current phase:
+it never proves `IRREVERSIBLE` and never authorizes an effect by itself. A first
+diagnosis that declares an irreversible operation or finds a dirty target
+repository escalates to Feishu immediately and stops automatic effects. Otherwise
+an unresolved result consumes the next diagnosis/execution round; after the
+second unresolved round the alert is escalated to Feishu. The Codex CLI session
+budget is intentionally long enough for a complete 900-second phase.
 
-自动 effect 仍必须同时满足 `environment.automatic_handling_enabled` 和告警 allowlist；
-这两个条件只决定候选 effect 范围，不直接决定告警是否 fail-safe。每一条告警都必须
-先调用 Codex 对当前证据作可逆性判断；只有 Codex 明确输出 `SAFETY_CLASS=IRREVERSIBLE`
-时才转为 fail-safe。`SAFETY_CLASS=UNKNOWN` 不命名为 fail-safe，但同样禁止所有 effect，
-直到后续判断明确证明可逆。Prometheus 未提供 project 映射的告警不会凭 job/instance
-猜测项目或执行 Compose effect。
+自动 effect 仍必须同时满足 `environment.automatic_handling_enabled`、告警 allowlist、
+目标资源 allowlist 和 effect rule；这些条件只决定候选 effect 范围，不跳过 Codex 判断。
+`SAFETY_CLASS=REVERSIBLE` 且证据完整时才允许相应的确定性 effect；`UNKNOWN` 只能进入
+只读执行/验证路径，不能自行扩大权限。Prometheus 未提供 project 映射的告警不会凭
+job/instance 猜测项目或执行 Compose effect。
 
 `/ready` 与 `/metrics` 共用短时 kernel health cache，避免 Prometheus 抓取并发触发
-重复 provider 探针；环境巡检的 Git、PowerShell 和 SSH 子进程使用 control-plane 自己
-的有界终止路径，超时后不保留失控子进程。`/live` 只证明 HTTP 进程存活，不等待 Codex、
+重复 provider 探针；环境巡检的 Git 和 PowerShell 子进程使用 control-plane 自己的
+有界终止路径，超时后不保留失控子进程。`/live` 只证明 HTTP 进程存活，不等待 Codex、
 环境巡检或外部依赖。
 
 ## 覆盖范围
@@ -60,9 +56,6 @@ because one diagnosis may contain multiple model turns.
   容器/卷/镜像/cache 或历史经验混入自动清理；
 - `automatic_handling`：Agent Kernel 注册的 personal-operations provider 可用且自动处理开关开启；
 - `codex_primary`：`codex-primary` provider 健康、CLI 路径存在且不是旧 OpenCodex 路径；
-- `windows_defender`、`third_party_protection`：WinDefend 状态和第三方防护责任可证明性；
-- `ditto_listener`、`smb_rpc_listeners`：Ditto `0.0.0.0:23443` 以及 SMB/RPC 监听；若现有入站 Block 规则明确覆盖监听，则记录防火墙证据并不将监听本身判为暴露；
-- `windows_recursive_scan`：递归扫描 access errors，错误不会被当作扫描成功；
 - `docker_exited_containers`、`docker_build_cache`：退出容器和 build cache 大小；
   只有现有游戏会话 owner 提供新鲜状态、明确的游戏进程名或 PID，实时进程探针命中，
   且状态明确声明 `DockerExpectedDown=true` 时，Docker Desktop/容器被主动停止才属于
@@ -73,13 +66,9 @@ because one diagnosis may contain multiple model turns.
   Docker daemon 不可用、Docker Desktop 进程已退出；Steam 客户端、WebHelper、下载器和
   未知进程不满足条件。
 - `v2rayn_path`、`v2rayn_status`：实际 `v2rayN.exe` 路径与运行状态漂移；
-- `cloud_protected_root`、`cloud_tailscale_profile`、`cloud_swap`、`cloud_selinux`、
-  `cloud_cve`：可选的只读 SSH 云端探针。
-
-云端探针只使用 `ssh -o BatchMode=yes` 和生成的只读命令：保护目录检查包含根节点本身，
-Tailscale 检查只读 profile 是否存在，swap/SELinux/CVE 只读取状态。未配置
-`cloud_ssh_target` 时，云端检查标记 `configured="false"`，不会产生 SSH 流量；需要
-云端覆盖时，应同时填写 `cloud_protected_root` 和 `cloud_tailscale_profile`。
+- Windows 个人环境只做上述运维可靠性事实采集；不主动检查 Defender/第三方防护、
+  监听端口/防火墙、递归目录权限、云端基线或 CVE。这些安全基线不属于本 profile 的
+  日常巡检闭环。
 
 ## 指标和建议告警
 
@@ -95,13 +84,14 @@ control_plane_known_garbage_paths
 control_plane_automatic_handling_status
 control_plane_ready_provider_mismatch{provider}
 control_plane_ready_status
+control_plane_synchronization_repository_status{path,project}
 control_plane_docker_exited_containers
 control_plane_docker_build_cache_bytes
-control_plane_windows_recursive_scan_access_errors
 ```
 
 `status` 值为 `ok`、`problem`、`unknown`，对应数值为 0、1、2；建议告警规则使用
-`status=~"problem|unknown"`，并对云端检查加 `configured="true"`。建议的告警名如下：
+`status=~"problem|unknown"`。同步规则应按 `path,project` 维度使用
+`control_plane_synchronization_repository_status`，避免只看 aggregate 值。建议的告警名如下：
 
 修复 Work 指标的状态语义与 Agent Kernel 的 canonical Work status 保持一致：
 `personal-incident-repair` 和 `personal-incident-repair-blocked` 都纳入统计；
@@ -117,16 +107,11 @@ control_plane_windows_recursive_scan_access_errors
 | 自动处理能力 | `ControlPlaneAutomaticHandlingUnavailable` |
 | codex_primary | `ControlPlaneCodexUnavailable` / `ControlPlaneCodexLegacyPath` |
 | readiness/provider 一致性 | `ControlPlaneReadyProviderMismatch` |
-| WinDefend/第三方责任 | `WinDefendStopped` / `ThirdPartyProtectionUnknown` |
-| Ditto/SMB/RPC | `DittoExposed` / `SMBOrRPCListenerDetected` |
-| Windows 递归扫描 | `WindowsRecursiveScanAccessErrors` |
 | Docker | `DockerExitedContainers` / `DockerBuildCacheAccumulating` |
 | v2rayN | `V2rayNPathDrift` / `V2rayNStatusDrift` |
-| 云端保护/Tailscale | `ProtectedDirectoryRootVerificationMissing` / `CloudTailscaleProfileMissing` |
-| 云端基线/CVE | `CloudSwapMissing` / `CloudSELinuxPermissive` / `CloudCVEDetected` |
 
-可恢复性、同步状态、自动处理能力告警在 control-plane 中属于需要 Codex 安全复核的告警，
-不是按检查名直接得出的运行时 fail-safe 判定；旧 alert-name 只作为历史提示。已知垃圾告警允许进入唯一的受限自动候选路径。`ControlPlaneReadinessDegraded` 和
+所有环境告警在 control-plane 中都先进入 Codex 判断，不按检查名直接得出运行时安全结论；
+旧 alert-name 只作为历史提示。`ControlPlaneReadinessDegraded` 和
 `ControlPlaneReadyProviderMismatch` 已由 observability 的 `rules/control-plane.yml` 使用
 上述同源指标进行告警。游戏模式下，若 Prometheus/Alertmanager 与
 `personal-monitoring` 同时因容器停止而不可用，且上述游戏会话条件全部满足时，`/ready` 保留
@@ -136,31 +121,32 @@ waiting Work，不代表修复已经授权或成功。当前没有配置可用�
 
 ## 自动处理边界
 
-每一条 Alertmanager 告警都会先经 Agent Kernel 的 Work/Run/Revision 路径调用 Codex
-作当前安全性判断，诊断结果第一行必须是 `SAFETY_CLASS=REVERSIBLE`、
-`SAFETY_CLASS=IRREVERSIBLE` 或 `SAFETY_CLASS=UNKNOWN`。只有明确的 `REVERSIBLE` 才能
-进入配置 allowlist 允许的候选 effect；`IRREVERSIBLE` 才会标记为 fail-safe；`UNKNOWN`
-保持待安全审查状态并禁止文件、Git、Docker、云端或凭据 effect。系统仍会保留告警事实
-并进入 waiting Work；需要执行危险或无法证明可逆的动作时，必须由 owner 发送现有的
-`/task <controller_id> <明确命令>`，之后继续经过 Agent Kernel 的 closure、WorkProposal、
-责任准入和 revision 路径。
+每一条 Alertmanager 告警都会先经 Agent Kernel 的 Work/Run/Revision 路径调用一次
+diagnosis Codex，诊断结果第一行必须是 `SAFETY_CLASS=REVERSIBLE`、
+`SAFETY_CLASS=IRREVERSIBLE` 或 `SAFETY_CLASS=UNKNOWN`。如果第一次 diagnosis 判断
+操作不可逆，或发现目标仓库不干净，立即发送 Feishu 并禁止自动 effect。否则继续一次
+execution Codex；验证仍未完成时再进行第二次 diagnosis 和第二次 execution。单个 firing
+告警最多两次 diagnosis、两次 execution；第二次仍未解决才发送 Feishu。`UNKNOWN` 不开放
+effect，但仍可通过只读 execution/verification 完成判断，不会绕过该两轮闭环。
 
-当前自动修复 allowlist 仅保留既有的 `ContainerRestartStorm`、
-`PrometheusScrapeFailed`、`ControlPlaneStaleReady`。自动路径仍受现有 repo/project
-allowlist 和 effect rule 约束。
+不再按 alert name 维护第二套自动修复 allowlist：所有未被抑制的 firing 告警都进入两轮
+Codex 闭环；只有告警携带已配置的 `project`、个人自动处理开关开启且目标目录通过
+repo/project allowlist 时，才会把目标 repo 交给可逆 effect 路径。同步自动路径由 diagnosis
+选择并填充精确的 `git.fast_forward`、`git.push_exact_ref` 或 `chezmoi.apply`；provider
+会重新核对仓库、分支、remote、旧/新 SHA、祖先关系、owner 和 worktree。
 
 所有非确定性判断和执行计划都必须通过 Codex；provider 只执行代码中固定、可验证的确定性
-动作。唯一允许的自动 effect 是 `maintenance.cleanup_known_garbage`：由 Agent Kernel 建立 Work、
-记录 effect、把 `known_garbage_paths` 中存在的精确路径移入 `garbage_quarantine_dir`，
-下一轮探针验证源路径已消失；隔离目录可用于回滚。路径校验失败、移动失败或验证仍失败时，
-Work 进入失败/等待，不扩大范围。
+动作。允许的自动 effect 包括配置 allowlist 内的本地仓库修改、精确 Git 同步、
+`chezmoi.apply`、配置 Compose effect，以及 `maintenance.cleanup_known_garbage`。已知垃圾
+仍只把 `known_garbage_paths` 中的精确路径移入 `garbage_quarantine_dir`，下一轮探针验证
+源路径已消失；路径校验失败、移动失败或验证仍失败时，不扩大范围而进入下一轮或告警。
 
 状态库恢复规则：`personal-incident-repair-blocked` 只能处于等待，不得以 `running` 表示；
 绑定认知失败证据所创建的临时 Run 必须收束为 `interrupted`。启动时会按
-`policy.per_repair_timeout_seconds` 将没有完成证明且超时的 repair Work 从 `running` 收束为
-`waiting`，只修正执行占用状态，不伪造 `completed`。
+900 秒清理失效的 execution claim，使未完成的 repair 状态回到可恢复的等待路径；这只是
+启动恢复清理，不是 episode deadline，也不限制两轮累计时长。
 
-以下动作明确禁止自动执行：启用或切换杀毒、修改 Windows 防火墙、关闭 Ditto/SMB/RPC、
-删除 Docker 容器/卷/镜像/build cache、移动或替换 v2rayN、生成/复制/删除 Tailscale
-或其他云端凭据、配置 swap、切换 SELinux、安装补丁或修复 CVE。人工升级信息必须包含
-检查名、最近一次探针时间、原始 detail、受影响主机/路径和拟执行动作的回滚方案。
+本 profile 不主动巡检或自动处置 Defender/第三方防护、端口/防火墙、递归目录权限、云端
+基线和 CVE。任何未被确定性 capability 覆盖的外部、凭据或不可逆动作都必须停在
+diagnosis/Feishu 路径；人工升级信息应包含检查名、最近一次探针时间、原始 detail、
+受影响主机/路径和拟执行动作的回滚方案。
