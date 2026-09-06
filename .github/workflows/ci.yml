@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -33,3 +35,13 @@ jobs:
           test ! -e src/control_plane/portable_authority.py
           test ! -e src/control_plane/closure_authority.py
           test ! -e src/control_plane/reconciliation.py
+      - name: SonarQube Cloud Scan
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+      - name: SonarQube Cloud Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1.2.1
+        timeout-minutes: 10
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
