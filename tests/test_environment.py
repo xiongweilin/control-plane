@@ -22,7 +22,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
     )
 
 
-def test_environment_evaluation_covers_fail_safe_findings(tmp_path: Path) -> None:
+def test_environment_evaluation_covers_codex_judgment_findings(tmp_path: Path) -> None:
     snapshot = evaluate_environment(
         make_config(tmp_path),
         {
@@ -65,7 +65,7 @@ def test_environment_evaluation_covers_fail_safe_findings(tmp_path: Path) -> Non
         "cloud_selinux",
         "cloud_cve",
     } <= findings.keys()
-    assert findings["windows_defender"].automation == "fail-safe"
+    assert findings["windows_defender"].automation == "codex-judgment"
     assert findings["docker_build_cache"].metadata["bytes"] == 2048
     assert any(
         item.name == "third_party_protection" and item.status == "unknown"
@@ -95,7 +95,7 @@ def test_environment_evaluation_covers_standing_control_plane_responsibilities(
     assert observations["recoverability"].status == "problem"
     assert observations["recoverability"].severity == "critical"
     assert observations["synchronization"].status == "problem"
-    assert observations["synchronization"].automation == "fail-safe"
+    assert observations["synchronization"].automation == "codex-judgment"
     assert observations["known_garbage"].status == "problem"
     assert observations["known_garbage"].automation == "automatic"
     assert observations["automatic_handling"].status == "ok"

@@ -5,6 +5,12 @@
 Kernel。provider 的 `available` 表示“探针本身可用”，不表示被检查对象健康；对象健康
 由 `control_plane_environment_check` 的 `status` 标签表达。
 
+`automation` 标签表示处置路由意图，不是当前告警的安全性结论：`none` 表示无需处置，
+`codex-judgment` 表示 problem/unknown 必须先进入当前 Codex 安全性判断，`automatic`
+只表示精确的 known-garbage 路径可以作为候选 effect。只有 Codex 输出
+`SAFETY_CLASS=IRREVERSIBLE` 时，告警结果才可命名为 fail-safe；`UNKNOWN` 仍禁止 effect，
+但不等同于 fail-safe。
+
 ## 告警接收与恢复
 
 control-plane 监听 `0.0.0.0:18083`，本机守护脚本仍使用
@@ -119,8 +125,8 @@ control_plane_windows_recursive_scan_access_errors
 | 云端保护/Tailscale | `ProtectedDirectoryRootVerificationMissing` / `CloudTailscaleProfileMissing` |
 | 云端基线/CVE | `CloudSwapMissing` / `CloudSELinuxPermissive` / `CloudCVEDetected` |
 
-可恢复性、同步状态、自动处理能力告警在 control-plane 中属于需要安全复核的历史提示集合，
-不是运行时 fail-safe 判定；已知垃圾告警允许进入唯一的受限自动候选路径。`ControlPlaneReadinessDegraded` 和
+可恢复性、同步状态、自动处理能力告警在 control-plane 中属于需要 Codex 安全复核的告警，
+不是按检查名直接得出的运行时 fail-safe 判定；旧 alert-name 只作为历史提示。已知垃圾告警允许进入唯一的受限自动候选路径。`ControlPlaneReadinessDegraded` 和
 `ControlPlaneReadyProviderMismatch` 已由 observability 的 `rules/control-plane.yml` 使用
 上述同源指标进行告警。游戏模式下，若 Prometheus/Alertmanager 与
 `personal-monitoring` 同时因容器停止而不可用，且上述游戏会话条件全部满足时，`/ready` 保留
