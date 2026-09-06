@@ -41,7 +41,7 @@ jobs:
           fi
           exit "$status"
       - name: Pytest
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=src/control_plane --cov-report=xml:coverage.xml
       - name: Prove no embedded kernel remains
         run: |
           test ! -e src/portable_runtime
