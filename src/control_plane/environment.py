@@ -133,7 +133,13 @@ class EnvironmentSnapshot:
 ProbeRunner = Callable[[], Mapping[str, Any]]
 
 
-def _unknown(name: str, detail: str, *, configured: bool = True) -> CheckObservation:
+def _unknown(
+    name: str,
+    detail: str,
+    *,
+    configured: bool = True,
+    metadata: Mapping[str, Any] | None = None,
+) -> CheckObservation:
     return CheckObservation(
         name=name,
         status="unknown",
@@ -141,7 +147,7 @@ def _unknown(name: str, detail: str, *, configured: bool = True) -> CheckObserva
         automation="fail-safe",
         detail=detail,
         manual_action="确认探针权限/配置后，由人工执行只读复核；不要据此自动修复。",
-        metadata={"configured": configured},
+        metadata={"configured": configured, **dict(metadata or {})},
     )
 
 
@@ -254,6 +260,7 @@ def _lifecycle_observations(
                 metadata={
                     "failure_count": len(failures),
                     "failures": failures,
+                    "failure_reasons": payload.get("synchronization_failure_reasons", []),
                     "checked_count": int(payload.get("synchronization_checked", 0) or 0),
                 },
             )
@@ -360,7 +367,11 @@ def _ports(payload: Mapping[str, Any]) -> list[dict[str, Any]] | None:
 def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool | None, str]:
     actual = str(payload.get("v2rayn_path", "")).strip()
     running = payload.get("v2rayn_running")
-    if not actual and not running:
+    if not actual:
+        if running is True:
+            return None, f"v2rayN 进程正在运行，但可执行路径不可读；expected={expected or '<not configured>'}"
+        if expected and Path(expected).is_file():
+            return True, f"expected={expected} exists; v2rayN process is not running"
         return None, "v2rayN 进程路径/状态未能核验"
     if expected:
         expected_path = os.path.normcase(os.path.abspath(expected))
@@ -417,6 +428,17 @@ def evaluate_environment(
         ]
 
     defender = str(payload.get("win_defend_status", "")).strip().lower()
+    third_party_raw = payload.get("third_party_products")
+    third_party_products = (
+        [
+            item
+            for item in third_party_raw
+            if isinstance(item, Mapping) and str(item.get("display_name", "")).strip()
+        ]
+        if isinstance(third_party_raw, list)
+        else []
+    )
+    third_party_names = [str(item["display_name"]) for item in third_party_products]
     if defender in {"stopped", "stop", "disabled"}:
         observations.append(
             _problem(
@@ -429,14 +451,28 @@ def evaluate_environment(
         observations.append(
             _unknown(
                 "third_party_protection",
-                "WinDefend 未运行，且第三方防护责任/接管状态无法由只读探针证明。",
+                (
+                    "WinDefend 未运行；Security Center 已登记第三方产品，"
+                    "但当前只读探针未证明其运行状态。"
+                    if third_party_names
+                    else "WinDefend 未运行，且 Security Center 未登记可证明的第三方防护 owner。"
+                ),
+                metadata={"registered_products": third_party_names},
             )
         )
     elif defender in {"running", "start", "started"}:
         observations.extend(
             [
                 _ok("windows_defender", "WinDefend is running"),
-                _ok("third_party_protection", "Windows protection owner is observable"),
+                _ok(
+                    "third_party_protection",
+                    (
+                        "Windows Defender is the active protection owner"
+                        if not third_party_names
+                        else "Windows Defender is running; third-party products are also registered"
+                    ),
+                    metadata={"registered_products": third_party_names},
+                ),
             ]
         )
     else:
@@ -537,16 +573,46 @@ def evaluate_environment(
             ]
         )
     elif isinstance(exited, (int, float)):
-        observations.append(
-            _problem(
-                "docker_exited_containers",
-                f"exited containers={int(exited)}",
-                "人工检查退出原因和 compose 期望状态；可在 allowlisted 项目内人工决定是否重启，但不要删除容器、卷或镜像。",
-                metadata={"exited_count": int(exited)},
-            )
-            if exited > 0
-            else _ok("docker_exited_containers", "no exited containers", metadata={"exited_count": 0})
+        exited_names_raw = payload.get("docker_exited_container_names")
+        exited_names = (
+            [str(item) for item in exited_names_raw if item]
+            if isinstance(exited_names_raw, list)
+            else []
         )
+        expected_names = set(config.docker_expected_exited_containers)
+        unexpected_names = [name for name in exited_names if name not in expected_names]
+        expected_only = int(exited) > 0 and bool(exited_names) and not unexpected_names
+        if int(exited) <= 0:
+            observations.append(
+                _ok("docker_exited_containers", "no exited containers", metadata={"exited_count": 0})
+            )
+        elif expected_only:
+            observations.append(
+                _ok(
+                    "docker_exited_containers",
+                    "only configured one-shot containers are exited",
+                    metadata={
+                        "exited_count": 0,
+                        "total_exited_count": int(exited),
+                        "expected_down": True,
+                        "expected_containers": exited_names,
+                    },
+                )
+            )
+        else:
+            observations.append(
+                _problem(
+                    "docker_exited_containers",
+                    f"unexpected exited containers={len(unexpected_names) if exited_names else int(exited)}",
+                    "人工检查退出原因和 compose 期望状态；可在 allowlisted 项目内人工决定是否重启，但不要删除容器、卷或镜像。",
+                    metadata={
+                        "exited_count": len(unexpected_names) if exited_names else int(exited),
+                        "total_exited_count": int(exited),
+                        "expected_containers": sorted(expected_names),
+                        "unexpected_containers": unexpected_names,
+                    },
+                )
+            )
         if cache_raw in (None, ""):
             observations.append(_unknown("docker_build_cache", "build cache 未能核验"))
         elif cache_bytes > config.docker_build_cache_max_bytes:
@@ -874,12 +940,18 @@ class EnvironmentInspectionProvider:
                 missing_recovery.append(raw_path)
 
         sync_failures: list[str] = []
+        sync_failure_reasons: list[dict[str, str]] = []
         checked = 0
         git = shutil.which("git.exe") or shutil.which("git")
+
+        def record_sync_failure(path: str, reason: str) -> None:
+            sync_failures.append(path)
+            sync_failure_reasons.append({"path": path, "reason": reason})
+
         for raw_path in self.config.synchronization_paths:
             path = Path(raw_path)
             if not path.is_dir() or not (path / ".git").exists() or not git:
-                sync_failures.append(raw_path)
+                record_sync_failure(raw_path, "not_git_repository_or_git_unavailable")
                 continue
             checked += 1
             status = self._run_bounded_command(
@@ -887,7 +959,10 @@ class EnvironmentInspectionProvider:
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
             )
             if status.returncode != 0 or status.stdout.strip():
-                sync_failures.append(raw_path)
+                record_sync_failure(
+                    raw_path,
+                    "worktree_status_failed" if status.returncode != 0 else "uncommitted_worktree",
+                )
                 continue
             head = self._run_bounded_command(
                 [git, "-C", str(path), "rev-parse", "HEAD"],
@@ -907,7 +982,7 @@ class EnvironmentInspectionProvider:
                 or not remote_sha
                 or head_text != remote_sha
             ):
-                sync_failures.append(raw_path)
+                record_sync_failure(raw_path, "local_head_or_origin_main_mismatch")
 
         chezmoi = shutil.which("chezmoi.exe") or shutil.which("chezmoi")
         if chezmoi:
@@ -916,9 +991,9 @@ class EnvironmentInspectionProvider:
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
             )
             if verify.returncode != 0:
-                sync_failures.append("chezmoi-runtime")
+                record_sync_failure("chezmoi-runtime", "chezmoi_verify_failed")
         else:
-            sync_failures.append("chezmoi-runtime")
+            record_sync_failure("chezmoi-runtime", "chezmoi_unavailable")
 
         known_garbage = [
             raw_path for raw_path in self.config.known_garbage_paths if Path(raw_path).exists()
@@ -929,6 +1004,7 @@ class EnvironmentInspectionProvider:
             "synchronization_ok": bool(self.config.synchronization_paths)
             and not sync_failures,
             "synchronization_failures": sync_failures,
+            "synchronization_failure_reasons": sync_failure_reasons,
             "synchronization_checked": checked,
             "known_garbage_count": len(known_garbage),
             "known_garbage_paths": known_garbage,
@@ -939,8 +1015,13 @@ class EnvironmentInspectionProvider:
         script = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 $service = Get-CimInstance Win32_Service -Filter \"Name='WinDefend'\"
+$thirdParty = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object {{ $_.displayName -and $_.displayName -notmatch 'Microsoft Defender|Windows Defender' }} | Select-Object displayName,productState)
 $listeners = @(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess)
-$v2 = @(Get-CimInstance Win32_Process -Filter \"Name='v2rayN.exe'\" | Select-Object ProcessId,ExecutablePath)
+$v2 = @(Get-CimInstance Win32_Process -Filter \"Name='v2rayN.exe'\" | ForEach-Object {{
+  $path = [string]$_.ExecutablePath
+  if (-not $path) {{ try {{ $path = [string](Get-Process -Id $_.ProcessId -ErrorAction Stop).Path }} catch {{ }} }}
+  [pscustomobject]@{{ ProcessId = $_.ProcessId; ExecutablePath = $path }}
+}})
 $scanErrors = 0
 $roots = '{roots}' | ConvertFrom-Json
 foreach ($root in @($roots)) {{
@@ -953,21 +1034,25 @@ foreach ($root in @($roots)) {{
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 $dockerAvailable = $false
 $exited = $null
+$exitedItems = @()
 $cache = $null
 if ($docker) {{
   docker info --format '{{{{.ServerVersion}}}}' 2>$null | Out-Null
   $dockerAvailable = $LASTEXITCODE -eq 0
 }}
 if ($dockerAvailable) {{
-  $exited = @(docker ps -a --filter status=exited --format '{{{{json .}}}}').Count
+  $exitedItems = @(docker ps -a --filter status=exited --format '{{{{json .}}}}' | ConvertFrom-Json)
+  $exited = $exitedItems.Count
   $cache = @(docker system df --format '{{{{json .}}}}' 2>$null | ConvertFrom-Json | Where-Object {{ $_.Type -match 'Build Cache' }} | Select-Object -ExpandProperty Size -First 1)
 }}
 [pscustomobject]@{{
   win_defend_status = if ($service) {{ [string]$service.State }} else {{ '' }}
+  third_party_products = $thirdParty | ForEach-Object {{ @{{ display_name = [string]$_.displayName; product_state = [int]$_.productState }} }}
   listeners = $listeners | ForEach-Object {{ @{{ address = [string]$_.LocalAddress; port = [int]$_.LocalPort }} }}
   recursive_scan_access_errors = $scanErrors
   docker_available = $dockerAvailable
   docker_exited_count = $exited
+  docker_exited_container_names = $exitedItems | ForEach-Object {{ [string]$_.Names }}
   docker_build_cache_size = if ($cache) {{ [string]$cache }} else {{ '' }}
   v2rayn_running = ($v2.Count -gt 0)
   v2rayn_path = if ($v2.Count -gt 0) {{ [string]$v2[0].ExecutablePath }} else {{ '' }}

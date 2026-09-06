@@ -89,6 +89,10 @@ class ControlPlaneConfig:
     cloud_probe_timeout_seconds: int = 30
     windows_scan_roots: tuple[str, ...] = (r"D:\agent",)
     docker_build_cache_max_bytes: int = 5 * 1024**3
+    docker_expected_exited_containers: tuple[str, ...] = (
+        "commerce-migrate",
+        "dify-init_permissions-1",
+    )
     recovery_paths: tuple[str, ...] = (
         r"D:\agent\ratio",
         r"D:\agent\docker备份",
@@ -117,7 +121,7 @@ class ControlPlaneConfig:
     cloud_tailscale_profile: str = ""
 
     game_mode_enabled: bool = True
-    game_mode_state_path: Path = Path(r"D:\agent\cs2-game-mode\state.json")
+    game_mode_state_path: Path | None = None
     game_mode_active_max_age_seconds: int = 12 * 60 * 60
     game_mode_restore_grace_seconds: int = 10 * 60
     game_mode_alertnames: tuple[str, ...] = (
@@ -299,6 +303,12 @@ class ControlPlaneConfig:
                     "docker_build_cache_max_bytes", base.docker_build_cache_max_bytes
                 )
             ),
+            docker_expected_exited_containers=tuple(
+                str(v)
+                for v in environment.get(
+                    "docker_expected_exited_containers", base.docker_expected_exited_containers
+                )
+            ),
             recovery_paths=tuple(
                 str(v) for v in environment.get("recovery_paths", base.recovery_paths)
             ),
@@ -348,8 +358,10 @@ class ControlPlaneConfig:
                 "CONTROL_PLANE_GAME_MODE",
                 bool(game_mode.get("enabled", base.game_mode_enabled)),
             ),
-            game_mode_state_path=Path(
-                str(game_mode.get("state_path", base.game_mode_state_path))
+            game_mode_state_path=(
+                Path(str(game_mode["state_path"]))
+                if game_mode.get("state_path")
+                else base.game_mode_state_path
             ),
             game_mode_active_max_age_seconds=int(
                 game_mode.get("active_max_age_seconds", base.game_mode_active_max_age_seconds)

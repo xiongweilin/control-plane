@@ -16,6 +16,7 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
         cloud_protected_root="/srv/protected",
         cloud_tailscale_profile="/var/lib/tailscale/tailscaled.state",
         docker_build_cache_max_bytes=1024,
+        docker_expected_exited_containers=("commerce-migrate", "dify-init_permissions-1"),
         automatic_handling_enabled=True,
         game_mode_enabled=False,
     )
@@ -111,6 +112,46 @@ def test_game_mode_treats_docker_down_as_expected_state(tmp_path: Path) -> None:
     assert observations["docker_exited_containers"].status == "ok"
     assert observations["docker_build_cache"].status == "ok"
     assert observations["docker_exited_containers"].metadata["expected_down"] is True
+
+
+def test_expected_one_shot_containers_do_not_become_unexpected_exited_alerts(
+    tmp_path: Path,
+) -> None:
+    snapshot = evaluate_environment(
+        make_config(tmp_path),
+        {
+            "docker_available": True,
+            "docker_exited_count": 2,
+            "docker_exited_container_names": ["commerce-migrate", "dify-init_permissions-1"],
+            "docker_build_cache_bytes": 0,
+        },
+    )
+    observation = {item.name: item for item in snapshot.observations}["docker_exited_containers"]
+    assert observation.status == "ok"
+    assert observation.metadata["expected_down"] is True
+
+
+def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    expected = Path(config.v2rayn_expected_path or "")
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    expected.touch()
+    snapshot = evaluate_environment(config, {"v2rayn_running": False, "v2rayn_path": ""})
+    observations = {item.name: item for item in snapshot.observations}
+    assert observations["v2rayn_path"].status == "ok"
+    assert observations["v2rayn_status"].status == "problem"
+
+
+def test_stopped_defender_without_security_center_owner_stays_explicit_unknown(
+    tmp_path: Path,
+) -> None:
+    snapshot = evaluate_environment(
+        make_config(tmp_path),
+        {"win_defend_status": "Stopped", "third_party_products": []},
+    )
+    observations = {item.name: item for item in snapshot.observations}
+    assert observations["windows_defender"].status == "problem"
+    assert observations["third_party_protection"].status == "unknown"
 
 
 @pytest.mark.asyncio

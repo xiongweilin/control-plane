@@ -58,9 +58,14 @@ because one diagnosis may contain multiple model turns.
 - `ditto_listener`、`smb_rpc_listeners`：Ditto `0.0.0.0:23443` 以及 SMB/RPC 监听；
 - `windows_recursive_scan`：递归扫描 access errors，错误不会被当作扫描成功；
 - `docker_exited_containers`、`docker_build_cache`：退出容器和 build cache 大小；
-  CS2 游戏模式处于 `Active`（且 `cs2.exe` 存在）或 `Restored` 短宽限期时，Docker
-  Desktop/容器被启动器主动停止属于预期状态，记录为 `ok` 并标注
-  `suppressed_by_game_mode=true`，不得按异常处理；游戏模式之外才检查 daemon 与退出容器。
+  只有现有游戏会话 owner 提供新鲜状态、明确的游戏进程名或 PID，实时进程探针命中，
+  且状态明确声明 `DockerExpectedDown=true` 时，Docker Desktop/容器被主动停止才属于
+  预期状态，记录为 `ok` 并标注 `suppressed_by_game_mode=true`；状态缺失、过期、
+  没有进程身份或没有 Docker 预期声明时不得抑制告警。未配置游戏会话 owner 时，个人
+  Windows 环境可使用严格的 Steam bridge：只读取 Steam libraryfolders/appmanifest 元数据，
+  将已安装游戏目录缓存 60 秒，并要求前台窗口所属进程路径位于已安装游戏目录内，且
+  Docker daemon 不可用、Docker Desktop 进程已退出；Steam 客户端、WebHelper、下载器和
+  未知进程不满足条件。
 - `v2rayn_path`、`v2rayn_status`：实际 `v2rayN.exe` 路径与运行状态漂移；
 - `cloud_protected_root`、`cloud_tailscale_profile`、`cloud_swap`、`cloud_selinux`、
   `cloud_cve`：可选的只读 SSH 云端探针。
@@ -118,8 +123,10 @@ control_plane_windows_recursive_scan_access_errors
 不是运行时 fail-safe 判定；已知垃圾告警允许进入唯一的受限自动候选路径。`ControlPlaneReadinessDegraded` 和
 `ControlPlaneReadyProviderMismatch` 已由 observability 的 `rules/control-plane.yml` 使用
 上述同源指标进行告警。游戏模式下，若 Prometheus/Alertmanager 与
-`personal-monitoring` 同时因容器停止而不可用，`/ready` 保留 `expected_degraded` 事实但返回
-正常状态；这不是运行时异常。指标告警只负责通知和形成 waiting Work，不代表修复已经授权或成功。
+`personal-monitoring` 同时因容器停止而不可用，且上述游戏会话条件全部满足时，`/ready` 保留
+`expected_degraded` 事实但返回正常状态；这不是运行时异常。指标告警只负责通知和形成
+waiting Work，不代表修复已经授权或成功。当前没有配置可用的通用游戏会话 owner 时，
+`/ready` 不会进入该 expected-degraded 分支。
 
 ## 自动处理边界
 
