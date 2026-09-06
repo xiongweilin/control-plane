@@ -22,11 +22,11 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Apply deterministic refactor
         run: python scripts/apply_meta_controller_refactor.py
-      - name: Refresh lock and validate changed Python
+      - name: Refresh lock and validate generated Python
         run: |
           uv lock
           uv sync --extra dev
-          uv run ruff check src/control_plane/alert_policy.py src/control_plane/__init__.py tests/test_meta_policy_integration.py scripts/apply_meta_controller_refactor.py
+          uv run ruff check src/control_plane/alert_policy.py src/control_plane/__init__.py tests/test_meta_policy_integration.py
       - name: Commit refactor
         run: |
           git config user.name "github-actions[bot]"
