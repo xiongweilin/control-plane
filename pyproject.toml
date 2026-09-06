@@ -51,5 +51,5 @@ strict = true
 packages = ["control_plane"]
 
 [[tool.mypy.overrides]]
-module = ["portable_runtime.*", "meta_controller.*"]
+module = ["portable_runtime.*"]
 ignore_missing_imports = true
