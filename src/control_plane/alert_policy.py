@@ -23,6 +23,10 @@ from portable_runtime.core.capabilities import CapabilityResult
 from portable_runtime.core.models import Event, new_id
 from portable_runtime.responsibility import EffectClass
 
+from .epistemic_profile import (
+    build_repair_epistemic_profile,
+    render_meta_control_directive,
+)
 from .kernel_bridge import PersonalKernelBridge
 
 _RESULT_EVENT = "ControllerCapabilityResultObserved"
@@ -342,6 +346,28 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         attempt = self._diagnosis_count(state) + 1
         if not retry_context and attempt > 1:
             retry_context = _recent_reality_context(self.bridge, state.id)
+        epistemic_profile = build_repair_epistemic_profile(
+            controller_ref=state.id,
+            state_version=state.version,
+            attempt=attempt,
+            attempt_limit=self.attempt_limit,
+            is_line_ending_cleanup=self._is_line_ending_cleanup(),
+            has_repo=bool(self.repo),
+            has_project=bool(self.project),
+            has_maintenance_capability=bool(self.maintenance_capability),
+            retry_context=retry_context,
+        )
+        meta_frame = self.meta_control_frame(
+            state,
+            issues=epistemic_profile.issues,
+            tensions=epistemic_profile.tensions,
+            candidates=epistemic_profile.candidates,
+            self_model=epistemic_profile.self_model,
+            budget=epistemic_profile.budget,
+            used_redundancy_keys=epistemic_profile.used_redundancy_keys,
+            basis_refs=epistemic_profile.basis_refs,
+        )
+        meta_directive = render_meta_control_directive(meta_frame)
         instruction = (
             f"Diagnose this incident for autonomous repair attempt {attempt}/"
             f"{self.attempt_limit}.\n"
@@ -363,6 +389,8 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
             )
         if retry_context:
             instruction += f"\n\nPrevious attempt evidence:\n{retry_context}"
+        if meta_directive:
+            instruction += f"\n\nEpistemic control directive:\n{meta_directive}"
         if self._is_line_ending_cleanup():
             instruction += (
                 "\n\nThis is an exact allowlisted line-ending-noise cleanup. The provider may act "
@@ -396,6 +424,8 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
             "model": self.diagnosis_model,
             "phase": "diagnosis",
             "attempt_index": attempt,
+            "meta_intent": meta_frame.intent.kind.value,
+            "meta_candidate_ref": meta_frame.intent.candidate_ref or "",
             "timeout_seconds": self.diagnosis_timeout_seconds,
         }
         if self.repo:
