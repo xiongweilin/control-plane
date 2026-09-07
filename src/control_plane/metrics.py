@@ -20,6 +20,8 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from .environment import CHECK_NAMES, EnvironmentSnapshot
 
 _REPAIR_KINDS = frozenset(
+    # The blocked kind is retained only so historical journal projections do
+    # not disappear when the no-closure diagnosis semantics are deployed.
     {"personal-incident-repair", "personal-incident-repair-blocked"}
 )
 _REPAIR_STATUS_LABELS = ("active", "waiting", "blocked", "closed", "failed", "interrupted")

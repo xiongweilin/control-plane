@@ -329,6 +329,7 @@ async def test_unknown_safety_uses_only_read_only_execution_and_verification(
         diagnosis,
         message="SAFETY_CLASS=UNKNOWN\nmissing evidence",
     )
+    assert policy.safety_class(state) == "unknown"
     waiting, _work = await _materialize_repair_work(policy, controller, state)
 
     calls = []
@@ -360,6 +361,76 @@ async def test_unknown_safety_uses_only_read_only_execution_and_verification(
         not in {"shell.exec", "git.fast_forward", "git.push_exact_ref", "chezmoi.apply"}
         for event in bridge.result_events(state.id, work_id=_work.id)
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        ("failed", "provider failure"),
+        ("timeout", "diagnosis timed out"),
+        ("unavailable", "diagnosis provider unavailable"),
+        ("succeeded", "provider returned no safety marker"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_diagnosis_waits_without_closure_work_or_effect(
+    status: str, message: str
+) -> None:
+    _runtime, controller, bridge, state, _assessment_ref = _setup(
+        kind="personal-incident-repair"
+    )
+    policy = AutonomousRepairPolicy(
+        controller=controller,
+        bridge=bridge,
+        prompt="alert fact",
+        diagnosis_model=DIAGNOSIS_MODEL,
+        execution_model=EXECUTION_MODEL,
+        repo="C:/repo",
+        project="test",
+        verification_labels={"alertname": "Broken"},
+    )
+
+    first_diagnosis = await policy.select(state)
+    _record_cognitive_result(
+        controller,
+        state.id,
+        first_diagnosis,
+        status=status,
+        message=message,
+    )
+    assert policy.safety_class(state) == "invalid"
+
+    next_decision = await policy.select(state)
+    if status == "succeeded":
+        # A successful provider response without exactly one safety marker is
+        # malformed, not a valid UNKNOWN diagnosis. It may consume the
+        # bounded retry, but it must not form a closure.
+        assert next_decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+        assert next_decision.capability == "reason.generate"
+        assert next_decision.parameters["attempt_index"] == 2
+        assert next_decision.closure is None
+        _record_cognitive_result(
+            controller,
+            state.id,
+            next_decision,
+            status="failed",
+            message="second diagnosis failed",
+        )
+        waiting_decision = await policy.select(state)
+    else:
+        waiting_decision = next_decision
+    assert waiting_decision.kind is ControllerDecisionKind.WAIT
+    assert waiting_decision.closure is None
+    waiting = await controller.apply(waiting_decision)
+    assert waiting.status is ControllerStatus.WAITING
+    assert waiting.active_closure_ref is None
+    assert waiting.work_proposal_ref is None
+    assert bridge.runtime.list_work() == []
+    assert bridge.result_events(state.id) == []
+    assert policy._diagnosis_count(waiting) == (2 if status == "succeeded" else 1)
+    with pytest.raises(RuntimeError, match="invalid diagnosis"):
+        await policy.execute_work(waiting)
+    assert bridge.runtime.list_work() == []
 
 
 @pytest.mark.asyncio
@@ -759,7 +830,7 @@ async def test_line_ending_cleanup_is_a_provider_only_reversible_effect() -> Non
     assert closure.closure.effect_class is EffectClass.INTERNAL_REVERSIBLE
 
 
-def test_safety_class_requires_the_current_codex_marker() -> None:
+def test_safety_class_requires_success_and_the_current_codex_marker() -> None:
     assert (
         classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=REVERSIBLE\nplan"})
         == "reversible"
@@ -768,7 +839,29 @@ def test_safety_class_requires_the_current_codex_marker() -> None:
         classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=IRREVERSIBLE\nplan"})
         == "irreversible"
     )
-    assert classify_safety({"status": "succeeded", "message": "historical label only"}) == "unknown"
+    assert (
+        classify_safety({"status": "succeeded", "message": "SAFETY_CLASS=UNKNOWN\nplan"})
+        == "unknown"
+    )
+    assert (
+        classify_safety(
+            {"status": "failed", "message": "SAFETY_CLASS=UNKNOWN\nprovider failure"}
+        )
+        == "invalid"
+    )
+    assert (
+        classify_safety({"status": "succeeded", "message": "historical label only"})
+        == "invalid"
+    )
+    assert (
+        classify_safety(
+            {
+                "status": "succeeded",
+                "message": "SAFETY_CLASS=REVERSIBLE\nSAFETY_CLASS=UNKNOWN",
+            }
+        )
+        == "invalid"
+    )
 
 
 async def test_non_reversible_judgment_forms_read_only_closure() -> None:
