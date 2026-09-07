@@ -8,6 +8,8 @@ from typing import Any
 from portable_runtime.core.models import Event, new_id, utcnow
 
 _REPAIR_KIND = "personal-incident-repair"
+# Legacy journal compatibility only. New failed/invalid diagnosis paths never
+# create this Work kind; historical records remain queryable and recoverable.
 _BLOCKED_REPAIR_KIND = "personal-incident-repair-blocked"
 _RECONCILIATION_EVENT = "ControlPlaneRepairStateReconciled"
 

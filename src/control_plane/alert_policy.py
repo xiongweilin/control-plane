@@ -162,18 +162,26 @@ def _succeeded(result: dict[str, Any] | None) -> bool:
 _SAFETY_CLASS_PATTERN = re.compile(
     r"(?im)^\s*SAFETY_CLASS\s*[=:]\s*(REVERSIBLE|IRREVERSIBLE|UNKNOWN)\s*$"
 )
+_VALID_SAFETY_CLASSES = frozenset({"reversible", "irreversible", "unknown"})
+_INVALID_SAFETY_CLASS = "invalid"
 
 
 def classify_safety(result: dict[str, Any] | None) -> str:
-    """Read the current Codex safety judgment from the diagnosis result.
+    """Read the current Codex safety judgment from a valid diagnosis result.
 
-    A missing or malformed judgment is ``unknown``. Unknown is denied all
-    effect capabilities, but still receives the bounded read-only execution
-    and verification pass before the next round or Feishu escalation.
+    Only a successful provider result with an explicit safety marker is a
+    diagnosis. A missing, malformed, or failed provider result is ``invalid``
+    rather than ``unknown``. Explicit UNKNOWN is denied all effect
+    capabilities, but still receives the bounded read-only execution and
+    verification pass before the next round or Feishu escalation.
     """
+    if not _succeeded(result):
+        return _INVALID_SAFETY_CLASS
 
-    match = _SAFETY_CLASS_PATTERN.search(_message(result))
-    return match.group(1).lower() if match else "unknown"
+    matches = _SAFETY_CLASS_PATTERN.findall(_message(result))
+    if len(matches) != 1:
+        return _INVALID_SAFETY_CLASS
+    return str(matches[0]).lower()
 
 
 def _event_result(event: Event) -> dict[str, Any]:
@@ -225,7 +233,7 @@ def _recent_reality_context(bridge: PersonalKernelBridge, controller_id: str) ->
 class AutonomousRepairPolicy(StagedMetaPolicy):
     """Personal incident policy executed through the Agent Kernel v2 loop.
 
-    Diagnosis is read-class cognition. A successful diagnosis must form a
+    Diagnosis is read-class cognition. A valid diagnosis must form a
     CognitiveClosure and hand it to WorkProposal. The profile then admits and
     materializes Work through ResponsibilityKernel, executes effects through the
     Runtime boundary, and returns reality through RevisionAssessment. No direct
@@ -255,11 +263,6 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         """Hard ceiling for alert repair: at most two diagnosis/execution rounds."""
 
         return _AUTONOMOUS_ATTEMPT_LIMIT
-
-    def _accept_failed_diagnosis_as_unknown(self) -> bool:
-        # Preserve the profile's fail-closed behavior: a malformed/failed diagnosis
-        # may close only as UNKNOWN/read-only and can never open effect authority.
-        return True
 
     def _session_cutoff(self, controller_id: str) -> datetime | None:
         if not self.human_instruction:
@@ -457,6 +460,9 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
     def safety_class(self, state: ControllerState) -> str:
         return classify_safety(self._latest_diagnosis_result(state))
 
+    def _diagnosis_is_valid(self, diagnosis_result: dict[str, Any] | None) -> bool:
+        return classify_safety(diagnosis_result) in _VALID_SAFETY_CLASSES
+
     def _effects_allowed(self, diagnosis_result: dict[str, Any] | None) -> bool:
         return classify_safety(diagnosis_result) == "reversible" and (
             not self._is_sync_alert() or self._sync_plan(diagnosis_result) is not None
@@ -509,6 +515,27 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         state: ControllerState,
         diagnosis_result: dict[str, Any] | None,
     ) -> ControllerDecision:
+        if not self._diagnosis_is_valid(diagnosis_result):
+            attempts = self._diagnosis_count(state)
+            if attempts < self.attempt_limit:
+                status = str((diagnosis_result or {}).get("status", "missing"))
+                return self._diagnosis(
+                    state,
+                    retry_context=(
+                        "The previous diagnosis result was invalid and must not be "
+                        f"treated as UNKNOWN (provider status={status})."
+                    ),
+                )
+            return ControllerDecision(
+                controller_ref=state.id,
+                state_version=state.version,
+                kind=ControllerDecisionKind.WAIT,
+                reason=(
+                    "diagnosis returned no valid safety class; the bounded diagnosis "
+                    "attempt budget is exhausted"
+                ),
+            )
+
         assessment_ref = self.bridge.assessment_ref(state)
         basis_refs = [assessment_ref]
         if state.last_result_ref:
@@ -730,8 +757,24 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         )
 
     async def execute_work(self, state: ControllerState) -> None:
-        work = self.bridge.materialize_work(state)
         runtime = self.bridge.runtime
+        diagnosis_decisions = [
+            decision
+            for _event, decision in _ordered_decisions(self.controller, state.id)
+            if decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
+            and decision.parameters.get("phase") == "diagnosis"
+        ]
+        if not diagnosis_decisions:
+            raise ValueError("materialized repair Work has no diagnosis")
+        diagnosis = diagnosis_decisions[-1]
+        diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
+        safety = classify_safety(diagnosis_result)
+        if safety == _INVALID_SAFETY_CLASS:
+            raise RuntimeError(
+                "invalid diagnosis cannot materialize or execute repair Work"
+            )
+
+        work = self.bridge.materialize_work(state)
         run = _latest_run(runtime, work.id)
         if run is None:
             run = runtime.start_run(work.id, workflow_id="personal-incident-repair")
@@ -754,17 +797,6 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
                     metadata={"exception": type(exc).__name__, "capability": capability},
                 )
 
-        diagnosis_decisions = [
-            decision
-            for _event, decision in _ordered_decisions(self.controller, state.id)
-            if decision.kind is ControllerDecisionKind.INVOKE_CAPABILITY
-            and decision.parameters.get("phase") == "diagnosis"
-        ]
-        if not diagnosis_decisions:
-            raise ValueError("materialized repair Work has no diagnosis")
-        diagnosis = diagnosis_decisions[-1]
-        diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
-        safety = classify_safety(diagnosis_result)
         effects_allowed = self._effects_allowed(diagnosis_result)
         blocker = self.diagnosis_blocker(state)
         if blocker is not None:

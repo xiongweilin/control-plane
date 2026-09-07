@@ -355,7 +355,12 @@ async def test_alert_ingress_is_deduplicated_and_does_not_wait_for_repair(
                 "status": "firing",
                 "fingerprint": "stable-fingerprint",
                 "labels": {"alertname": "PrometheusScrapeFailed", "job": "control-plane"},
-                "annotations": {"summary": "probe failed"},
+                "annotations": {
+                    "summary": "probe failed",
+                    "description": "sanitized ingress description",
+                    "detail": "sanitized ingress detail",
+                },
+                "observed_at": "2026-09-07T08:00:00+08:00",
             }
         ]
     }
@@ -389,6 +394,17 @@ async def test_alert_ingress_is_deduplicated_and_does_not_wait_for_repair(
     assert "fail_safe" not in queued[0].payload
     assert "repair_deadline_at" not in queued[0].payload
     assert queued[0].payload["title"] == "Alert: PrometheusScrapeFailed"
+    assert queued[0].payload["alert_context"] == {
+        "status": "firing",
+        "labels": {"alertname": "PrometheusScrapeFailed", "job": "control-plane"},
+        "annotations": {
+            "summary": "probe failed",
+            "description": "sanitized ingress description",
+            "detail": "sanitized ingress detail",
+        },
+        "observed_at": "2026-09-07T08:00:00+08:00",
+    }
+    assert "sanitized ingress description" in queued[0].payload["description"]
     await asyncio.sleep(0.1)
 
 
@@ -522,6 +538,11 @@ async def test_first_round_irreversible_blocker_escalates_through_feishu(
             provider_id="test",
             status=notification_status,
             message="sent",
+            metadata={
+                "provider_accepted": expected_sent,
+                "delivery_confirmed": False,
+                "delivery_confirmation": "not_available",
+            },
         )
 
     monkeypatch.setattr(app.state.kernel_runtime, "invoke", fake_invoke)
@@ -531,8 +552,18 @@ async def test_first_round_irreversible_blocker_escalates_through_feishu(
             {
                 "status": "firing",
                 "fingerprint": "irreversible-feishu-escalation",
-                "labels": {"alertname": "IrreversibleRepairDetected"},
-                "annotations": {"summary": "requires an owner decision"},
+                "labels": {
+                    "alertname": "IrreversibleRepairDetected",
+                    "instance": "node-01",
+                    "path": "/srv/control-plane",
+                    "project": "test",
+                },
+                "annotations": {
+                    "summary": "requires an owner decision",
+                    "description": "sanitized diagnosis context",
+                    "detail": "sanitized probe detail",
+                },
+                "observed_at": "2026-09-07T08:30:00+08:00",
             }
         ]
     }
@@ -561,11 +592,124 @@ async def test_first_round_irreversible_blocker_escalates_through_feishu(
     ]
     assert len(escalated) == 1
     assert escalated[0].payload["reason"] == "irreversible"
-    assert escalated[0].payload["notification_sent"] is expected_sent
+    assert escalated[0].payload["notification_provider_accepted"] is expected_sent
+    assert escalated[0].payload["notification_delivery_confirmed"] is False
+    assert escalated[0].payload["notification_delivery_confirmation"] == "not_available"
+    assert "notification_sent" not in escalated[0].payload
     assert escalated[0].payload["diagnosis_attempts"] == 1
     assert escalated[0].payload["execution_attempts"] == 1
     assert diagnosis_calls[0].parameters["phase"] == "diagnosis"
     assert "首轮" in notification_calls[0][2]["instruction"]
+    assert "sanitized diagnosis context" in notification_calls[0][2]["instruction"]
+    assert "sanitized probe detail" in notification_calls[0][2]["instruction"]
+    assert "alertname=IrreversibleRepairDetected" in notification_calls[0][2]["instruction"]
+    assert "instance=node-01" in notification_calls[0][2]["instruction"]
+    assert "path=/srv/control-plane" in notification_calls[0][2]["instruction"]
+    assert "project=test" in notification_calls[0][2]["instruction"]
+    assert "observed_at=2026-09-07T08:30:00+08:00" in notification_calls[0][2]["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_failed_diagnosis_escalation_does_not_invent_codex_judgment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(replace(make_config(tmp_path), notification_enabled=True))
+    diagnosis_calls = []
+    notification_calls = []
+
+    async def fake_invoke(request):
+        if request.capability == "notify.send":
+            notification_calls.append(
+                (request.work_id, request.capability, {"instruction": request.instruction})
+            )
+            return CapabilityResult(
+                request_id=request.id,
+                provider_id="test",
+                status="succeeded",
+                message="accepted by notification provider",
+                metadata={
+                    "provider_accepted": True,
+                    "delivery_confirmed": False,
+                    "delivery_confirmation": "not_available",
+                },
+            )
+        diagnosis_calls.append(request)
+        return CapabilityResult(
+            request_id=request.id,
+            provider_id="test",
+            status="failed",
+            message="diagnosis provider failed",
+            error={"type": "provider_failed"},
+        )
+
+    async def fake_run_capability(work_id, capability, **kwargs):
+        if capability == "notify.send":
+            notification_calls.append((work_id, capability, kwargs))
+            return CapabilityResult(
+                request_id=f"request:notify:{len(notification_calls)}",
+                provider_id="test",
+                status="succeeded",
+                message="accepted by notification provider",
+            )
+        return CapabilityResult(
+            request_id=f"request:{capability}",
+            provider_id="test",
+            status="failed",
+            message="execution was not available without diagnosis",
+            error={"type": "provider_failed"},
+        )
+
+    monkeypatch.setattr(app.state.kernel_runtime, "invoke", fake_invoke)
+    monkeypatch.setattr(app.state.kernel_runtime, "run_capability", fake_run_capability)
+    payload = {
+        "alerts": [
+            {
+                "status": "firing",
+                "fingerprint": "failed-diagnosis-escalation",
+                "labels": {"alertname": "DiagnosisUnavailable", "instance": "node-02"},
+                "annotations": {
+                    "summary": "provider unavailable",
+                    "description": "sanitized failure description",
+                    "detail": "sanitized failure detail",
+                },
+            }
+        ]
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/alerts/alertmanager",
+            json=payload,
+            headers={"X-Control-Plane-Key": "test-key"},
+        )
+
+    assert response.status_code == 200
+    for _ in range(40):
+        escalated = [
+            event
+            for event in app.state.kernel_runtime.store.list_events()
+            if event.type == ALERT_ESCALATED_EVENT
+        ]
+        if escalated:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(diagnosis_calls) == 1
+    assert len(notification_calls) == 1
+    assert notification_calls[0][0] is None
+    instruction = notification_calls[0][2]["instruction"]
+    assert "diagnosis_status=provider_failed" in instruction
+    assert "execution_attempts=0" in instruction
+    assert "sanitized failure description" in instruction
+    assert "sanitized failure detail" in instruction
+    assert "两轮 Codex" not in instruction
+    assert "Codex 判断" not in instruction
+    assert escalated[0].payload["diagnosis_status"] == "provider_failed"
+    assert escalated[0].payload["execution_attempts"] == 0
+    assert escalated[0].payload["notification_provider_accepted"] is True
+    assert escalated[0].payload["notification_delivery_confirmed"] is False
+    assert escalated[0].payload["work_id"] == ""
+    assert app.state.kernel_runtime.list_work() == []
 
 
 @pytest.mark.asyncio
