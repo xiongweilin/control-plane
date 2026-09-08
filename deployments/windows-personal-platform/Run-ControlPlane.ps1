@@ -21,6 +21,19 @@ $stderrLog = Join-Path $logDir 'control-plane.stderr.log'
 $launcherLog = Join-Path $logDir 'control-plane.launcher.log'
 $liveUrl = 'http://127.0.0.1:18083/live'
 
+# Idempotent start: a second instance can never bind the port while the
+# current server is alive. Exit quiet zero instead of racing it and
+# surfacing a false task failure (the running instance keeps supervision).
+try {
+    $existing = Invoke-WebRequest -Uri $liveUrl -Method Get -TimeoutSec 5 -SkipHttpErrorCheck
+    if ($existing.StatusCode -eq 200) {
+        exit 0
+    }
+}
+catch {
+    # No live server; continue to normal supervised start below.
+}
+
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Virtual environment not found. Run: uv sync --extra dev"
 }
