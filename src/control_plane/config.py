@@ -98,6 +98,7 @@ class ControlPlaneConfig:
         r"D:\agent\python-llm-application-engineering-teaching",
         r"D:\agent\ratio-mcp",
         r"D:\agent\responsibility_topology",
+        r"D:\agent\administrative-orchestrator",
         r"D:\infrastructure\compose\dify",
         r"D:\infrastructure\compose\observability",
         r"D:\infrastructure\compose\commerce-orchestrator",
@@ -152,6 +153,7 @@ class ControlPlaneConfig:
         "python-llm-application-engineering-teaching",
         "ratio-mcp",
         "responsibility_topology",
+        "administrative-orchestrator",
         "chezmoi",
     )
     project_dirs: dict[str, str] = field(
@@ -172,6 +174,7 @@ class ControlPlaneConfig:
             ),
             "ratio-mcp": r"D:\agent\ratio-mcp",
             "responsibility_topology": r"D:\agent\responsibility_topology",
+            "administrative-orchestrator": r"D:\agent\administrative-orchestrator",
             "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
         }
     )

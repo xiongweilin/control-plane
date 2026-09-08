@@ -36,7 +36,7 @@ docker_build_cache_max_bytes = 5368709120
 docker_expected_exited_containers = ["dify-init_permissions-1", "commerce-db-bootstrap", "commerce-migrate"]
 line_ending_auto_discard_repos = ["D:\\agent\\ratio"]
 recovery_paths = ["D:\\agent\\ratio", "D:\\agent\\docker备份"]
-synchronization_paths = ["D:\\agent\\ratio", "D:\\agent\\control-plane", "D:\\agent\\agent-kernel", "D:\\agent\\agent-skills", "D:\\agent\\codex-video-background", "D:\\agent\\litellm-gateway", "D:\\agent\\meta-controller", "D:\\agent\\python-llm-application-engineering-teaching", "D:\\agent\\ratio-mcp", "D:\\agent\\responsibility_topology", "D:\\infrastructure\\compose\\dify", "D:\\infrastructure\\compose\\observability", "D:\\infrastructure\\compose\\commerce-orchestrator", "D:\\infrastructure\\compose\\feishu-dify-gateway", "C:\\Users\\metra\\.local\\share\\chezmoi"]
+synchronization_paths = ["D:\\agent\\ratio", "D:\\agent\\control-plane", "D:\\agent\\agent-kernel", "D:\\agent\\agent-skills", "D:\\agent\\codex-video-background", "D:\\agent\\litellm-gateway", "D:\\agent\\meta-controller", "D:\\agent\\python-llm-application-engineering-teaching", "D:\\agent\\ratio-mcp", "D:\\agent\\responsibility_topology", "D:\\agent\\administrative-orchestrator", "D:\\infrastructure\\compose\\dify", "D:\\infrastructure\\compose\\observability", "D:\\infrastructure\\compose\\commerce-orchestrator", "D:\\infrastructure\\compose\\feishu-dify-gateway", "C:\\Users\\metra\\.local\\share\\chezmoi"]
 chezmoi_source_dir = "C:\\Users\\metra\\.local\\share\\chezmoi"
 known_garbage_paths = ["D:\\agent\\portable-runtime-worktrees"]
 garbage_quarantine_dir = "D:\\agent\\_recovery-quarantine"
@@ -53,7 +53,7 @@ restore_grace_seconds = 600
 [projects]
 # `allowed_auto` is the standing local auto-repair scope.
 # `project_dirs` is the exact path registry used for labels and target resolution; Docker and remote Git stay denied to Codex.
-allowed_auto = ["dify", "commerce-orchestrator", "observability", "feishu-dify-gateway", "control-plane", "ratio", "agent-kernel", "agent-skills", "codex-video-background", "litellm-gateway", "meta-controller", "python-llm-application-engineering-teaching", "ratio-mcp", "responsibility_topology", "chezmoi"]
+allowed_auto = ["dify", "commerce-orchestrator", "observability", "feishu-dify-gateway", "control-plane", "ratio", "agent-kernel", "agent-skills", "codex-video-background", "litellm-gateway", "meta-controller", "python-llm-application-engineering-teaching", "ratio-mcp", "responsibility_topology", "administrative-orchestrator", "chezmoi"]
 allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\agent", "C:\\Users\\metra\\.local\\share\\chezmoi"]
 
 [projects.project_dirs]
@@ -71,4 +71,5 @@ meta-controller = "D:\\agent\\meta-controller"
 python-llm-application-engineering-teaching = "D:\\agent\\python-llm-application-engineering-teaching"
 ratio-mcp = "D:\\agent\\ratio-mcp"
 responsibility_topology = "D:\\agent\\responsibility_topology"
+administrative-orchestrator = "D:\\agent\\administrative-orchestrator"
 chezmoi = "C:\\Users\\metra\\.local\\share\\chezmoi"
