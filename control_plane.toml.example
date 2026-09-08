@@ -56,8 +56,8 @@ restore_grace_seconds = 600
 
 [projects]
 # `allowed_auto` is the standing local auto-repair scope.
-# `project_dirs` also includes monitoring-only repositories; Docker and remote Git stay denied to Codex.
-allowed_auto = ["dify", "docker", "observability", "feishu-dify-gateway", "commerce-orchestrator", "control-plane", "ratio", "chezmoi"]
+# `project_dirs` is the exact path registry used for labels and target resolution; Docker and remote Git stay denied to Codex.
+allowed_auto = ["dify", "docker", "observability", "feishu-dify-gateway", "commerce-orchestrator", "control-plane", "ratio", "agent-kernel", "agent-skills", "codex-video-background", "litellm-gateway", "meta-controller", "python-llm-application-engineering-teaching", "ratio-mcp", "responsibility_topology", "chezmoi"]
 allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\agent"]
 
 [projects.project_dirs]
