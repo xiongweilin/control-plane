@@ -148,6 +148,14 @@ class ControlPlaneConfig:
         "commerce-orchestrator",
         "control-plane",
         "ratio",
+        "agent-kernel",
+        "agent-skills",
+        "codex-video-background",
+        "litellm-gateway",
+        "meta-controller",
+        "python-llm-application-engineering-teaching",
+        "ratio-mcp",
+        "responsibility_topology",
         "chezmoi",
     )
     project_dirs: dict[str, str] = field(
