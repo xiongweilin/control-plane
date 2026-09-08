@@ -235,7 +235,7 @@ async def test_alert_policy_closure_declares_execution_apply_and_verification() 
     assert diagnosis.kind is ControllerDecisionKind.INVOKE_CAPABILITY
     assert diagnosis.capability == "reason.generate"
     assert diagnosis.parameters["attempt_index"] == 1
-    assert diagnosis.parameters["timeout_seconds"] == 900.0
+    assert "timeout_seconds" not in diagnosis.parameters
     assert "attempt 1/2" in diagnosis.instruction
     _record_cognitive_result(
         controller,
@@ -258,7 +258,7 @@ async def test_alert_policy_closure_declares_execution_apply_and_verification() 
 
 
 @pytest.mark.asyncio
-async def test_autonomous_repair_execution_uses_the_nine_hundred_second_deadline(
+async def test_autonomous_repair_execution_omits_an_explicit_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, controller, bridge, state, _assessment_ref = _setup(
@@ -299,7 +299,7 @@ async def test_autonomous_repair_execution_uses_the_nine_hundred_second_deadline
         item for item in calls if item[2].get("phase") == "execution"
     ]
     assert len(execution_calls) == 1
-    assert execution_calls[0][2]["timeout_seconds"] == 900.0
+    assert "timeout_seconds" not in execution_calls[0][2]
     assert execution_calls[0][2]["attempt_index"] == 1
 
 
@@ -353,7 +353,7 @@ async def test_unknown_safety_uses_only_read_only_execution_and_verification(
         ("monitor.alert.active", "verification"),
     ]
     execution_call = calls[0][2]
-    assert execution_call["timeout_seconds"] == 900.0
+    assert "timeout_seconds" not in execution_call
     assert execution_call["attempt_index"] == 1
     assert "UNKNOWN" in execution_call["instruction"]
     assert all(
@@ -482,7 +482,7 @@ async def test_unresolved_alert_runs_exactly_two_diagnosis_and_execution_rounds(
     reopened = await controller.apply(await policy.select(reopened_required))
     second_diagnosis = await policy.select(reopened)
     assert second_diagnosis.parameters["attempt_index"] == 2
-    assert second_diagnosis.parameters["timeout_seconds"] == 900.0
+    assert "timeout_seconds" not in second_diagnosis.parameters
     _record_cognitive_result(
         controller,
         reopened.id,
@@ -506,7 +506,7 @@ async def test_unresolved_alert_runs_exactly_two_diagnosis_and_execution_rounds(
     ]
     assert len(execution_calls) == 2
     assert [item[2]["attempt_index"] for item in execution_calls] == [1, 2]
-    assert [item[2]["timeout_seconds"] for item in execution_calls] == [900.0, 900.0]
+    assert all("timeout_seconds" not in item[2] for item in execution_calls)
 
 
 @pytest.mark.parametrize(

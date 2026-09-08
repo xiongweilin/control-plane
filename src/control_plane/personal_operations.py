@@ -468,7 +468,6 @@ class PersonalOperationsProvider:
         await self._run(
             ["git", "fetch", "--no-tags", remote, f"refs/heads/{branch}"],
             cwd=repo,
-            timeout=900,
         )
         fetched_sha = (
             await self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo)
@@ -478,7 +477,7 @@ class PersonalOperationsProvider:
         await self._git_clean(repo)
         if await self._git_head(repo) != old_sha:
             raise ValueError("local HEAD changed during synchronization preflight")
-        await self._run(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=repo, timeout=900)
+        await self._run(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=repo)
         if await self._git_head(repo) != remote_sha:
             raise RuntimeError("fast-forward postcondition did not reach the expected SHA")
         await self._git_clean(repo)
@@ -508,7 +507,6 @@ class PersonalOperationsProvider:
             await self._run(
                 ["git", "push", remote, f"{new_sha}:refs/heads/{branch}"],
                 cwd=repo,
-                timeout=900,
             )
         except TimeoutError:
             if await self._remote_sha(repo, remote, branch) == new_sha:
@@ -535,15 +533,12 @@ class PersonalOperationsProvider:
             raise ValueError("chezmoi source revision changed after diagnosis")
         await self._run(
             ["chezmoi", "verify", "--skip-secrets", "--no-tty", "--source", source_dir],
-            timeout=900,
         )
         await self._run(
             ["chezmoi", "apply", "--skip-secrets", "--no-tty", "--source", source_dir],
-            timeout=900,
         )
         await self._run(
             ["chezmoi", "verify", "--skip-secrets", "--no-tty", "--source", source_dir],
-            timeout=900,
         )
         return "chezmoi source verified and applied"
 

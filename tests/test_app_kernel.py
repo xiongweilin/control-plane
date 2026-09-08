@@ -112,14 +112,14 @@ async def test_codex_boundary_promotes_phase_timeout_to_request_deadline(phase: 
     request = CapabilityRequest(
         id=f"request:{phase}",
         capability="reason.generate",
-        parameters={"phase": phase, "timeout_seconds": 900.0},
+        parameters={"phase": phase, "timeout_seconds": 120.0},
     )
 
     result = await boundary.invoke(request, InvocationContext(runtime_id="test"))
 
     assert result.status == "succeeded"
     assert provider.request is not None
-    assert provider.request.timeout_seconds == 900.0
+    assert provider.request.timeout_seconds == 120.0
 
 
 def test_personal_task_and_waiting_command_surfaces_are_unchanged(tmp_path: Path) -> None:

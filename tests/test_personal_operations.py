@@ -59,7 +59,7 @@ def init_git_repo(repo: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_push_capability_uses_the_expected_ref_and_900_second_command_timeout(
+async def test_exact_push_capability_uses_the_expected_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old_sha = "1" * 40
@@ -108,7 +108,7 @@ async def test_exact_push_capability_uses_the_expected_ref_and_900_second_comman
         (
             ["git", "push", "origin", f"{new_sha}:refs/heads/main"],
             str(tmp_path),
-            900,
+            120,
         )
     ]
 

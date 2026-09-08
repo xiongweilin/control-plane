@@ -249,8 +249,6 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
     project: str | None = None
     verification_labels: dict[str, str] = field(default_factory=dict)
     human_instruction: str | None = None
-    diagnosis_timeout_seconds: float = 900.0
-    execution_timeout_seconds: float = 900.0
     maintenance_capability: str | None = None
     maintenance_parameters: dict[str, Any] = field(default_factory=dict)
 
@@ -429,7 +427,6 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
             "attempt_index": attempt,
             "meta_intent": meta_frame.intent.kind.value,
             "meta_candidate_ref": meta_frame.intent.candidate_ref or "",
-            "timeout_seconds": self.diagnosis_timeout_seconds,
         }
         if self.repo:
             parameters["repo"] = self.repo
@@ -859,7 +856,6 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
             "model": self.execution_model,
             "phase": "execution",
             "attempt_index": execution_attempt,
-            "timeout_seconds": self.execution_timeout_seconds,
         }
         if (
             effects_allowed

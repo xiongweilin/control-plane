@@ -23,7 +23,7 @@ Alertmanager webhook 只做认证、字段清洗、指纹去重和 durable enque
 dispatcher 完成。`policy.max_concurrent` 限制并发修复数；同一 firing fingerprint
 最多执行两轮；有效 diagnosis episode 每轮各包含一次 diagnosis 和一次 execution，
 无效 diagnosis 只消耗 diagnosis 重试预算，不进入 execution。diagnosis 与 execution
-调用的独立超时都是 900 秒，不存在累计的 episode deadline，也不会用累计 1800 秒
+调用不设显式超时上限，底层 provider 默认生效；不存在累计的 episode deadline，也不会用累计时长
 截断第二轮。接收、完成、解析状态和每次阶段结果写入 Agent Kernel 事件存储，进程重启
 后可从持久化状态继续尚未完成的轮次。
 
@@ -37,8 +37,8 @@ response with a missing or duplicated safety marker is malformed; it may consume
 one bounded diagnosis-only retry, but it still cannot form a closure or execute
 an effect. A valid but unresolved result consumes the next diagnosis/execution
 round; after the second unresolved round the alert is escalated to Feishu. The
-Codex CLI session budget is intentionally long enough for a complete 900-second
-phase.
+Codex CLI session budget relies on underlying provider defaults with no explicit
+per-phase timeout ceiling.
 
 自动 effect 仍必须同时满足 `environment.automatic_handling_enabled`、告警 allowlist、
 目标资源 allowlist 和 effect rule；这些条件只决定候选 effect 范围，不跳过 Codex 判断。
