@@ -172,7 +172,9 @@ class ControlPlaneConfig:
             "codex-video-background": r"D:\agent\codex-video-background",
             "litellm-gateway": r"D:\agent\litellm-gateway",
             "meta-controller": r"D:\agent\meta-controller",
-            "python-llm-application-engineering-teaching": r"D:\agent\python-llm-application-engineering-teaching",
+            "python-llm-application-engineering-teaching": (
+                r"D:\agent\python-llm-application-engineering-teaching"
+            ),
             "ratio-mcp": r"D:\agent\ratio-mcp",
             "responsibility_topology": r"D:\agent\responsibility_topology",
             "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
