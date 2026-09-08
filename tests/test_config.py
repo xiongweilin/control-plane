@@ -23,14 +23,18 @@ def test_auto_project_requires_exact_configured_repo(tmp_path: Path) -> None:
     assert cfg.auto_project_for_repo(project / "nested") is None
 
 
-def test_default_diagnosis_and_execution_timeouts_are_nine_hundred_seconds() -> None:
+def test_no_explicit_phase_or_gateway_timeout_ceiling() -> None:
     cfg = ControlPlaneConfig(api_key="x")
 
-    assert cfg.diagnosis_timeout_seconds == 900.0
-    assert cfg.execution_timeout_seconds == 900.0
+    for legacy_name in (
+        "gateway_timeout_seconds",
+        "diagnosis_timeout_seconds",
+        "execution_timeout_seconds",
+    ):
+        assert not hasattr(cfg, legacy_name)
 
 
-def test_loads_phase_timeouts_without_a_cumulative_episode_limit(
+def test_loads_policy_without_a_cumulative_episode_limit(
     tmp_path: Path, monkeypatch
 ) -> None:
     config_path = tmp_path / "control-plane.toml"
@@ -39,16 +43,11 @@ def test_loads_phase_timeouts_without_a_cumulative_episode_limit(
 [server]
 host = "0.0.0.0"
 port = 18083
-[agent]
-gateway_timeout_seconds = 42
-diagnosis_timeout_seconds = 900
-execution_timeout_seconds = 900
-[policy]
-cooldown_seconds = 17
-max_concurrent = 4
-max_agent_calls_per_repair = 8
-max_attempts = 2
-per_repair_timeout_seconds = 1800
+ [policy]
+ cooldown_seconds = 17
+ max_concurrent = 4
+ max_agent_calls_per_repair = 8
+ max_attempts = 2
 """,
         encoding="utf-8",
     )
@@ -57,12 +56,12 @@ per_repair_timeout_seconds = 1800
     cfg = ControlPlaneConfig.load(config_path)
 
     assert cfg.host == "0.0.0.0"
-    assert cfg.gateway_timeout_seconds == 42
-    assert cfg.diagnosis_timeout_seconds == 900
-    assert cfg.execution_timeout_seconds == 900
     assert cfg.cooldown_seconds == 17
     assert cfg.max_concurrent == 4
     for legacy_name in (
+        "gateway_timeout_seconds",
+        "diagnosis_timeout_seconds",
+        "execution_timeout_seconds",
         "per_repair_timeout_seconds",
         "max_agent_calls",
         "max_agent_calls_per_repair",

@@ -63,12 +63,9 @@ class ControlPlaneConfig:
     codex_disable_ssh_credentials: bool = True
     codex_worktree_root: Path = PROJECT_ROOT.parent / ".control-plane-codex-worktrees"
     max_agent_output_bytes: int = 200_000
-    # A Codex invocation is a complete agent session, not a single HTTP
-    # round-trip. Keep enough time for multi-turn reasoning before treating
-    # the provider as unavailable.
-    gateway_timeout_seconds: float = 900.0
-    diagnosis_timeout_seconds: float = 900.0
-    execution_timeout_seconds: float = 900.0
+    # No explicit Codex invocation timeout here: LiteLLM no longer sets a
+    # model-level timeout/stream_timeout, so control-plane also does not
+    # impose a routing ceiling. Underlying provider defaults apply.
 
     prometheus_url: str = "http://127.0.0.1:19090"
     alertmanager_url: str = ""
@@ -221,7 +218,6 @@ class ControlPlaneConfig:
         server = _section(data, "server")
         kernel = _section(data, "kernel")
         model = _section(data, "model")
-        agent = _section(data, "agent")
         monitoring = _section(data, "monitoring")
         policy = _section(data, "policy")
         environment = _section(data, "environment")
@@ -239,16 +235,6 @@ class ControlPlaneConfig:
             else dict(base.project_dirs)
         )
         legacy_model = str(model.get("name", "")).strip()
-
-        gateway_timeout_seconds = float(
-            agent.get("gateway_timeout_seconds", base.gateway_timeout_seconds)
-        )
-        diagnosis_timeout_seconds = float(
-            agent.get("diagnosis_timeout_seconds", gateway_timeout_seconds)
-        )
-        execution_timeout_seconds = float(
-            agent.get("execution_timeout_seconds", gateway_timeout_seconds)
-        )
 
         return cls(
             host=str(server.get("host", base.host)),
@@ -278,9 +264,6 @@ class ControlPlaneConfig:
             ),
             codex_worktree_root=Path(str(model.get("worktree_root", base.codex_worktree_root))),
             max_agent_output_bytes=int(model.get("max_output_bytes", base.max_agent_output_bytes)),
-            gateway_timeout_seconds=gateway_timeout_seconds,
-            diagnosis_timeout_seconds=diagnosis_timeout_seconds,
-            execution_timeout_seconds=execution_timeout_seconds,
             prometheus_url=str(
                 monitoring.get("prometheus_url", policy.get("prometheus_url", base.prometheus_url))
             ),

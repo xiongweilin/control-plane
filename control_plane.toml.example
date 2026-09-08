@@ -8,8 +8,8 @@ state_db = "data/agent-kernel.db"
 artifact_root = "data/artifacts"
 
 [model]
-diagnosis_model = "codex/gpt-5.6-luna"
-execution_model = "codex/gpt-5.6-luna"
+diagnosis_model = "gpt-5.6-luna"
+execution_model = "gpt-5.6-luna"
 gateway_base_url = "http://127.0.0.1:4101/v1"
 isolate_worktree = true
 disable_docker = true
@@ -18,30 +18,26 @@ worktree_root = "../.control-plane-codex-worktrees"
 session_dir = "data/agent-sessions"
 max_output_bytes = 200000
 
-[agent]
-gateway_timeout_seconds = 900
-diagnosis_timeout_seconds = 900
-execution_timeout_seconds = 900
-
 [policy]
 cooldown_seconds = 600
 max_concurrent = 2
 
 [monitoring]
 prometheus_url = "http://127.0.0.1:19090"
-alertmanager_url = ""
+alertmanager_url = "http://127.0.0.1:19093"
 notification_enabled = true
 
 [environment]
 # 仅保留个人 Windows 的运维可靠性巡检；不执行 Defender、端口/防火墙、递归目录、云端基线或 CVE 巡检。
 enabled = true
 cache_seconds = 60
-probe_timeout_seconds = 30
+probe_timeout_seconds = 60
 docker_build_cache_max_bytes = 5368709120
 docker_expected_exited_containers = ["dify-init_permissions-1", "commerce-db-bootstrap", "commerce-migrate"]
 line_ending_auto_discard_repos = ["D:\\agent\\ratio"]
 recovery_paths = ["D:\\agent\\ratio", "D:\\agent\\docker备份"]
 synchronization_paths = ["D:\\agent\\ratio", "D:\\agent\\control-plane", "D:\\agent\\agent-kernel", "D:\\agent\\agent-skills", "D:\\agent\\codex-video-background", "D:\\agent\\litellm-gateway", "D:\\agent\\meta-controller", "D:\\agent\\python-llm-application-engineering-teaching", "D:\\agent\\ratio-mcp", "D:\\agent\\responsibility_topology", "D:\\infrastructure\\compose\\dify", "D:\\infrastructure\\compose\\observability", "D:\\infrastructure\\compose\\commerce-orchestrator", "D:\\infrastructure\\compose\\feishu-dify-gateway", "C:\\Users\\metra\\.local\\share\\chezmoi"]
+chezmoi_source_dir = "C:\\Users\\metra\\.local\\share\\chezmoi"
 known_garbage_paths = ["D:\\agent\\portable-runtime-worktrees"]
 garbage_quarantine_dir = "D:\\agent\\_recovery-quarantine"
 automatic_handling_enabled = true
@@ -57,14 +53,14 @@ restore_grace_seconds = 600
 [projects]
 # `allowed_auto` is the standing local auto-repair scope.
 # `project_dirs` is the exact path registry used for labels and target resolution; Docker and remote Git stay denied to Codex.
-allowed_auto = ["dify", "observability", "feishu-dify-gateway", "commerce-orchestrator", "control-plane", "ratio", "agent-kernel", "agent-skills", "codex-video-background", "litellm-gateway", "meta-controller", "python-llm-application-engineering-teaching", "ratio-mcp", "responsibility_topology", "chezmoi"]
-allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\agent"]
+allowed_auto = ["dify", "commerce-orchestrator", "observability", "feishu-dify-gateway", "control-plane", "ratio", "agent-kernel", "agent-skills", "codex-video-background", "litellm-gateway", "meta-controller", "python-llm-application-engineering-teaching", "ratio-mcp", "responsibility_topology", "chezmoi"]
+allowed_repo_roots = ["D:\\infrastructure\\compose", "D:\\agent", "C:\\Users\\metra\\.local\\share\\chezmoi"]
 
 [projects.project_dirs]
 dify = "D:\\infrastructure\\compose\\dify"
+commerce-orchestrator = "D:\\infrastructure\\compose\\commerce-orchestrator"
 observability = "D:\\infrastructure\\compose\\observability"
 feishu-dify-gateway = "D:\\infrastructure\\compose\\feishu-dify-gateway"
-commerce-orchestrator = "D:\\infrastructure\\compose\\commerce-orchestrator"
 control-plane = "D:\\agent\\control-plane"
 ratio = "D:\\agent\\ratio"
 agent-kernel = "D:\\agent\\agent-kernel"

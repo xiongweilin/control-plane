@@ -614,7 +614,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 model=cfg.diagnosis_model,
                 cli=cfg.codex_cli,
                 gateway_base_url=cfg.gateway_base_url,
-                timeout_seconds=cfg.gateway_timeout_seconds,
                 execution_boundary=CodexExecutionBoundary(cfg),
             )
         )
@@ -922,8 +921,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             repo=spec.repo,
             project=spec.project if spec.project in cfg.allowed_auto_projects else None,
             verification_labels=spec.verification_labels,
-            diagnosis_timeout_seconds=cfg.diagnosis_timeout_seconds,
-            execution_timeout_seconds=cfg.execution_timeout_seconds,
             maintenance_capability=spec.maintenance_capability,
             maintenance_parameters=spec.maintenance_parameters,
         )
@@ -1316,8 +1313,6 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 ),
                 verification_labels=context.verification_labels,
                 human_instruction=command,
-                diagnosis_timeout_seconds=cfg.diagnosis_timeout_seconds,
-                execution_timeout_seconds=cfg.execution_timeout_seconds,
             )
         else:
             policy = ManualTaskPolicy(
