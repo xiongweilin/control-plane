@@ -142,7 +142,6 @@ class ControlPlaneConfig:
 
     allowed_auto_projects: tuple[str, ...] = (
         "dify",
-        "docker",
         "observability",
         "feishu-dify-gateway",
         "commerce-orchestrator",
@@ -160,7 +159,6 @@ class ControlPlaneConfig:
     )
     project_dirs: dict[str, str] = field(
         default_factory=lambda: {
-            "docker": r"D:\infrastructure\compose\dify",
             "dify": r"D:\infrastructure\compose\dify",
             "observability": r"D:\infrastructure\compose\observability",
             "feishu-dify-gateway": r"D:\infrastructure\compose\feishu-dify-gateway",
