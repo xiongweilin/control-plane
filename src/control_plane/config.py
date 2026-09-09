@@ -79,8 +79,6 @@ class ControlPlaneConfig:
     docker_build_cache_max_bytes: int = 5 * 1024**3
     docker_expected_exited_containers: tuple[str, ...] = (
         "dify-init_permissions-1",
-        "commerce-db-bootstrap",
-        "commerce-migrate",
     )
     line_ending_auto_discard_repos: tuple[str, ...] = (r"D:\agent\ratio",)
     recovery_paths: tuple[str, ...] = (
@@ -97,11 +95,9 @@ class ControlPlaneConfig:
         r"D:\agent\meta-controller",
         r"D:\agent\python-llm-application-engineering-teaching",
         r"D:\agent\ratio-mcp",
-        r"D:\agent\responsibility_topology",
         r"D:\infrastructure\compose\administrative-orchestrator",
         r"D:\infrastructure\compose\dify",
         r"D:\infrastructure\compose\observability",
-        r"D:\infrastructure\compose\commerce-orchestrator",
         r"D:\infrastructure\compose\feishu-dify-gateway",
         r"C:\Users\metra\.local\share\chezmoi",
     )
@@ -142,7 +138,6 @@ class ControlPlaneConfig:
         "dify",
         "observability",
         "feishu-dify-gateway",
-        "commerce-orchestrator",
         "control-plane",
         "ratio",
         "agent-kernel",
@@ -152,7 +147,6 @@ class ControlPlaneConfig:
         "meta-controller",
         "python-llm-application-engineering-teaching",
         "ratio-mcp",
-        "responsibility_topology",
         "administrative-orchestrator",
         "chezmoi",
     )
@@ -161,7 +155,6 @@ class ControlPlaneConfig:
             "dify": r"D:\infrastructure\compose\dify",
             "observability": r"D:\infrastructure\compose\observability",
             "feishu-dify-gateway": r"D:\infrastructure\compose\feishu-dify-gateway",
-            "commerce-orchestrator": r"D:\infrastructure\compose\commerce-orchestrator",
             "control-plane": r"D:\agent\control-plane",
             "ratio": r"D:\agent\ratio",
             "agent-kernel": r"D:\agent\agent-kernel",
@@ -173,7 +166,6 @@ class ControlPlaneConfig:
                 r"D:\agent\python-llm-application-engineering-teaching"
             ),
             "ratio-mcp": r"D:\agent\ratio-mcp",
-            "responsibility_topology": r"D:\agent\responsibility_topology",
             "administrative-orchestrator": r"D:\infrastructure\compose\administrative-orchestrator",
             "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
         }
