@@ -98,7 +98,7 @@ class ControlPlaneConfig:
         r"D:\agent\python-llm-application-engineering-teaching",
         r"D:\agent\ratio-mcp",
         r"D:\agent\responsibility_topology",
-        r"D:\agent\administrative-orchestrator",
+        r"D:\infrastructure\compose\administrative-orchestrator",
         r"D:\infrastructure\compose\dify",
         r"D:\infrastructure\compose\observability",
         r"D:\infrastructure\compose\commerce-orchestrator",
@@ -174,7 +174,7 @@ class ControlPlaneConfig:
             ),
             "ratio-mcp": r"D:\agent\ratio-mcp",
             "responsibility_topology": r"D:\agent\responsibility_topology",
-            "administrative-orchestrator": r"D:\agent\administrative-orchestrator",
+            "administrative-orchestrator": r"D:\infrastructure\compose\administrative-orchestrator",
             "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
         }
     )
