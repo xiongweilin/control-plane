@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -33,10 +34,45 @@ from portable_runtime.core.capabilities import (
     ProviderHealth,
 )
 
-from .config import ControlPlaneConfig
+from .config import PROJECT_ROOT, ControlPlaneConfig
 from .game_mode import read_game_mode_state
 
 _log = logging.getLogger(__name__)
+
+REMOTE_SHA_CACHE_TTL_SECONDS = 15 * 60
+REMOTE_SHA_CACHE_PATH = PROJECT_ROOT / "data" / "remote-sha-cache.json"
+_REMOTE_REFRESH_MIN_INTERVAL_SECONDS = 60.0
+
+
+def _load_remote_cache() -> dict[str, Any]:
+    try:
+        raw = REMOTE_SHA_CACHE_PATH.read_bytes()
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    entries = data.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _cached_remote_sha(cache: Mapping[str, Any], raw_path: str) -> str:
+    entry = cache.get(raw_path)
+    if not isinstance(entry, dict):
+        return ""
+    sha = str(entry.get("sha", "")).strip()
+    checked_at = entry.get("checked_at", 0)
+    try:
+        age = time.time() - float(checked_at)
+    except (TypeError, ValueError):
+        return ""
+    if age < 0 or age > REMOTE_SHA_CACHE_TTL_SECONDS:
+        return ""
+    return sha
+
 
 CHECK_NAMES = (
     "recoverability",
@@ -553,6 +589,7 @@ class EnvironmentInspectionProvider:
         self._provider_health: dict[str, Any] = {}
         self._snapshot: EnvironmentSnapshot | None = None
         self._lock = asyncio.Lock()
+        self._last_remote_refresh_started = 0.0
         self._descriptor = ProviderDescriptor(
             id="environment-inspection",
             name="Personal Environment Inspection",
@@ -735,6 +772,8 @@ class EnvironmentInspectionProvider:
         sync_subjects: list[dict[str, str]] = []
         checked = 0
         git = shutil.which("git.exe") or shutil.which("git")
+        remote_cache = _load_remote_cache()
+        stale_remote_paths: list[str] = []
 
         def project_for_path(raw_path: str) -> str:
             candidate = Path(raw_path).resolve(strict=False)
@@ -795,22 +834,20 @@ class EnvironmentInspectionProvider:
                 [git, "-C", str(path), "rev-parse", "HEAD"],
                 timeout=min(self.config.environment_probe_timeout_seconds, 10),
             )
-            remote = self._run_bounded_command(
-                [git, "-C", str(path), "ls-remote", "--heads", "origin", "main"],
-                timeout=min(self.config.environment_probe_timeout_seconds, 10),
-            )
             head_text = head.stdout.decode("utf-8", errors="replace").strip()
-            remote_text = remote.stdout.decode("utf-8", errors="replace").strip()
-            remote_sha = remote_text.split()[0] if remote_text else ""
             subject["head_sha"] = head_text[:40]
+            # Remote SHAs come from the background-refreshed cache, never from
+            # a blocking ls-remote in the hot path. A stale or missing entry is
+            # reported as unknown (honestly unverifiable), not as a mismatch.
+            remote_sha = _cached_remote_sha(remote_cache, raw_path)
             subject["remote_sha"] = remote_sha[:40]
-            if (
-                head.returncode != 0
-                or remote.returncode != 0
-                or not head_text
-                or not remote_sha
-                or head_text != remote_sha
-            ):
+            if head.returncode != 0 or not head_text:
+                record_sync_failure(raw_path, "local_head_unreadable")
+            elif not remote_sha:
+                subject["status"] = "unknown"
+                subject["reason"] = "remote_cache_stale"
+                stale_remote_paths.append(raw_path)
+            elif head_text != remote_sha:
                 record_sync_failure(raw_path, "local_head_or_origin_main_mismatch")
             else:
                 subject["status"] = "ok"
@@ -833,14 +870,23 @@ class EnvironmentInspectionProvider:
             chezmoi_subject["chezmoi_verify"] = "unavailable"
             record_sync_failure(chezmoi_path, "chezmoi_unavailable")
 
+        if stale_remote_paths:
+            self._spawn_remote_refresh(stale_remote_paths)
+
+        if sync_failures:
+            synchronization_ok = False
+        elif any(item.get("status") == "unknown" for item in sync_subjects):
+            synchronization_ok = None
+        else:
+            synchronization_ok = bool(self.config.synchronization_paths)
+
         known_garbage = [
             raw_path for raw_path in self.config.known_garbage_paths if Path(raw_path).exists()
         ]
         return {
             "recovery_ok": bool(self.config.recovery_paths) and not missing_recovery,
             "recovery_missing_paths": missing_recovery,
-            "synchronization_ok": bool(self.config.synchronization_paths)
-            and not sync_failures,
+            "synchronization_ok": synchronization_ok,
             "synchronization_failures": sync_failures,
             "synchronization_failure_reasons": sync_failure_reasons,
             "synchronization_checked": checked,
@@ -848,6 +894,49 @@ class EnvironmentInspectionProvider:
             "known_garbage_count": len(known_garbage),
             "known_garbage_paths": known_garbage,
         }
+
+    def _spawn_remote_refresh(self, paths: list[str]) -> None:
+        now = time.time()
+        if now - self._last_remote_refresh_started < _REMOTE_REFRESH_MIN_INTERVAL_SECONDS:
+            return
+        self._last_remote_refresh_started = now
+        git = shutil.which("git.exe") or shutil.which("git")
+        if not git:
+            return
+        targets = [p for p in paths if Path(p).is_dir() and (Path(p) / ".git").exists()]
+        if not targets:
+            return
+
+        def _work() -> None:
+            try:
+                cache = _load_remote_cache()
+            except Exception:
+                cache = {}
+            entries = cache if isinstance(cache, dict) else {}
+            for raw_path in targets:
+                try:
+                    proc = subprocess.run(
+                        [git, "-C", raw_path, "ls-remote", "--heads", "origin", "main"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                    text = proc.stdout.decode("utf-8", errors="replace").strip()
+                    sha = text.split()[0] if proc.returncode == 0 and text else ""
+                    if sha:
+                        entries[raw_path] = {"sha": sha[:40], "checked_at": time.time()}
+                except Exception as exc:
+                    _log.warning("remote refresh failed for %s: %s", raw_path, str(exc)[:200])
+            try:
+                REMOTE_SHA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = REMOTE_SHA_CACHE_PATH.with_suffix(".json.tmp")
+                tmp_path.write_text(json.dumps({"version": 1, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp_path, REMOTE_SHA_CACHE_PATH)
+            except Exception as exc:
+                _log.warning("remote cache write failed: %s", str(exc)[:200])
+
+        thread = threading.Thread(target=_work, name="remote-sha-refresh", daemon=True)
+        thread.start()
 
     def _run_windows_probe(self) -> Mapping[str, Any]:
         script = """
