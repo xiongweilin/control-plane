@@ -129,7 +129,6 @@ class ControlPlaneConfig:
         "alertmanager",
         "blackbox",
         "blackbox-protected",
-        "feedback-analysis",
         "feishu-dify-gateway",
         "control-plane-ready",
     )

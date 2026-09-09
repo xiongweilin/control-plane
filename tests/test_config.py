@@ -34,6 +34,12 @@ def test_no_explicit_phase_or_gateway_timeout_ceiling() -> None:
         assert not hasattr(cfg, legacy_name)
 
 
+def test_removed_feedback_scrape_job_is_not_game_mode_suppressed() -> None:
+    cfg = ControlPlaneConfig(api_key="x")
+
+    assert "feedback-analysis" not in cfg.game_mode_scrape_jobs
+
+
 def test_loads_policy_without_a_cumulative_episode_limit(
     tmp_path: Path, monkeypatch
 ) -> None:
