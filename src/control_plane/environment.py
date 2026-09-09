@@ -14,6 +14,7 @@ from __future__ import annotations
 # ruff: noqa: E501, RUF001
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -34,6 +35,8 @@ from portable_runtime.core.capabilities import (
 
 from .config import ControlPlaneConfig
 from .game_mode import read_game_mode_state
+
+_log = logging.getLogger(__name__)
 
 CHECK_NAMES = (
     "recoverability",
@@ -347,6 +350,8 @@ def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool
     running = payload.get("v2rayn_running")
     if not actual:
         if running is True:
+            if expected and Path(expected).is_file():
+                return True, f"v2rayN running, path unreadable (protected process); expected={expected} exists"
             return None, f"v2rayN 进程正在运行，但可执行路径不可读；expected={expected or '<not configured>'}"
         if expected and Path(expected).is_file():
             return True, f"expected={expected} exists; v2rayN process is not running"
@@ -627,6 +632,9 @@ class EnvironmentInspectionProvider:
                 )
             except Exception as exc:  # pragma: no cover - defensive boundary
                 probe_error = str(exc)[:500]
+                if self._snapshot is not None:
+                    _log.warning("environment probe failed, retaining last snapshot: %s", probe_error)
+                    return self._snapshot
                 snapshot = EnvironmentSnapshot(
                     checked_at=time.time(),
                     observations=tuple(
@@ -689,9 +697,23 @@ class EnvironmentInspectionProvider:
 
     def _run_local_probe(self) -> Mapping[str, Any]:
         payload: dict[str, Any] = {}
+        section_errors: dict[str, str] = {}
         if os.name == "nt":
-            payload.update(self._run_windows_probe())
-        payload.update(self._run_lifecycle_probe())
+            try:
+                payload.update(self._run_windows_probe())
+            except Exception as exc:
+                section_errors["windows"] = str(exc)[:500]
+                _log.warning("environment windows probe failed: %s", section_errors["windows"])
+        try:
+            payload.update(self._run_lifecycle_probe())
+        except Exception as exc:
+            section_errors["lifecycle"] = str(exc)[:500]
+            _log.warning("environment lifecycle probe failed: %s", section_errors["lifecycle"])
+        if section_errors:
+            payload["_probe_section_errors"] = section_errors
+        meaningful = any(k in payload for k in ("docker_available", "recovery_ok", "synchronization_ok", "known_garbage_count", "v2rayn_running"))
+        if not meaningful:
+            raise RuntimeError(f"environment probe sections failed: {section_errors}")
         return payload
 
     def _run_lifecycle_probe(self) -> Mapping[str, Any]:
