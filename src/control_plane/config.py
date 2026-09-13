@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CHEZMOI_SOURCE_DIR = str(Path.home() / ".local" / "share" / "chezmoi")
 
 
 class ConfigurationError(RuntimeError):
@@ -99,9 +100,9 @@ class ControlPlaneConfig:
         r"D:\infrastructure\compose\dify",
         r"D:\infrastructure\compose\observability",
         r"D:\infrastructure\compose\feishu-gateway",
-        r"C:\Users\metra\.local\share\chezmoi",
+        DEFAULT_CHEZMOI_SOURCE_DIR,
     )
-    chezmoi_source_dir: str = r"C:\Users\metra\.local\share\chezmoi"
+    chezmoi_source_dir: str = DEFAULT_CHEZMOI_SOURCE_DIR
     known_garbage_paths: tuple[str, ...] = (
         r"D:\agent\portable-runtime-worktrees",
     )
@@ -166,13 +167,13 @@ class ControlPlaneConfig:
             ),
             "ratio-mcp": r"D:\agent\ratio-mcp",
             "administrative-orchestrator": r"D:\infrastructure\compose\administrative-orchestrator",
-            "chezmoi": r"C:\Users\metra\.local\share\chezmoi",
+            "chezmoi": DEFAULT_CHEZMOI_SOURCE_DIR,
         }
     )
     allowed_repo_roots: tuple[str, ...] = (
         r"D:\infrastructure\compose",
         r"D:\agent",
-        r"C:\Users\metra\.local\share\chezmoi",
+        DEFAULT_CHEZMOI_SOURCE_DIR,
     )
 
     @property
