@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from control_plane.app import (
+from control_plane.alert_diagnostics import (
     _diagnosis_status,
     _fallback_policy_count,
     _policy_count,
