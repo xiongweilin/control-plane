@@ -1,89 +1,98 @@
 # control-plane
 
-Autonomous personal operations deployment/profile for [agent-kernel](https://github.com/xiongweilin/agent-kernel).
+A real deployment profile for [agent-kernel](https://github.com/xiongweilin/agent-kernel): personal operations automation with authenticated command ingress, monitoring signals, bounded repair policy, and narrowly scoped external effects.
 
-`control-plane` has no GUI. It normally runs unattended. Personal commands still enter through the existing Feishu gateway or authenticated HTTP task surface; Alertmanager ingress, game-mode suppression, repository/project allowlists, notifications and Windows deployment behavior remain personal-profile concerns.
-
-This repository contains no alternative runtime implementation. Generic cognitive control, durable Work/Run execution, persistent responsibility, records, authorization, recovery, verification and provider routing are imported from `agent-kernel` through its compatibility Python distribution name `portable-runtime` / namespace `portable_runtime`.
-
-## Operating model
-
-The personal surfaces are unchanged. The core is now exclusively the Agent Kernel v2 cognitive loop:
+This repository is intentionally not a second agent runtime.
 
 ```text
-PC / Prometheus / Alertmanager / Feishu
-                  |
-                  v
-            control-plane
- ingress + personal facts + physical boundaries
-                  |
-                  v
-             agent-kernel
-                  |
-                  v
-       StandingResponsibility
-                  |
-                  v
-      ResponsibilityAssessment
-                  |
-                  v
-        cognitive exploration
-      (read-class capabilities)
-                  |
-                  v
-        CognitiveClosure
-                  |
-                  v
-          WorkProposal
-                  |
-                  v
- priority / portfolio / reservation / commitment
-                  |
-                  v
-         materialized Work
-                  |
-                  v
-          Work / Run effects
-       through Runtime boundary
-                  |
-                  v
-        reality observations
-                  |
-                  v
-       RevisionAssessment
-        /       |        \
-     close   reopen      wait
-               |
-               v
-       explicit controller REOPEN
-               |
-               +----> new cognition / closure / proposal
+agent-kernel
+= generic durable cognition / responsibility / Work / authorization / recovery semantics
+
+control-plane
+= one concrete deployment profile with environment facts, integrations, policies, and effect boundaries
 ```
 
-There is no controller-to-effect shortcut. A reasoner result is not Work. A diagnosis must first become a `CognitiveClosure`; the closure can only hand off to `WorkProposal`; a proposal must pass the Agent Kernel persistent-responsibility admission/commitment path before Work exists. Execution and personal effects then run against that materialized Work through `Runtime.run_capability`. Reality is returned to cognition as a `RevisionAssessment` before retry, reopen or close.
+The main purpose of this repository is to show where deployment-specific concerns should live without leaking them back into the generic kernel.
 
-Autonomous incident repair runs in at most two valid diagnosis/execution rounds per unsuppressed firing alert. Each valid round has one diagnosis Codex call and one execution Codex call, with no explicit per-round timeout ceiling; underlying provider defaults apply and there is no cumulative episode deadline. Alertmanager ingress authenticates, persists a canonical sanitized alert envelope, deduplicates by fingerprint and returns immediately; a bounded background dispatcher then performs diagnosis, materialized Work, effects and verification. Provider failure/timeout or an unavailable diagnosis enters `WAIT` without inventing a closure or Work; a malformed successful response may receive one diagnosis-only retry. A first valid diagnosis that identifies an irreversible operation or a dirty target repository escalates to Feishu immediately. Otherwise, if monitoring still reports the triggering alert after the second valid round, the controller waits and notifies the owner. An explicit `/task <controller_id> <command>` does not bypass the failed Work: it records owner direction, creates a new reality-grounded revision, enters `REOPEN_REQUIRED`, and then explicitly reopens cognition on the same controller history.
+## Why this split matters
 
-## Boundary
+A reusable runtime should not have to know the details of one machine, one notification channel, one monitoring stack, one project allowlist, or one local deployment policy.
+
+Those are real operational facts, but they are not universal Agent Kernel semantics.
+
+`control-plane` therefore owns the deployment-specific layer while importing generic cognitive control, persistent responsibility, Work/Run execution, records, authorization, recovery, verification, and provider routing from `agent-kernel` through its compatibility Python distribution name `portable-runtime` / namespace `portable_runtime`.
+
+## Example: bounded incident repair
+
+A firing alert does not become an authorized repair merely because a model produced a diagnosis.
+
+The path is:
+
+```text
+monitoring signal
+        |
+        v
+control-plane ingress
+  authenticate / persist / deduplicate
+        |
+        v
+Agent Kernel cognition
+        |
+        v
+CognitiveClosure
+        |
+        v
+WorkProposal
+        |
+        v
+admission / commitment / authorization
+        |
+        v
+materialized Work / Run
+        |
+        v
+scoped external capability
+        |
+        v
+reality observation / verification
+        |
+        v
+RevisionAssessment
+   /        |        \
+close     reopen     wait/escalate
+```
+
+There is no controller-to-effect shortcut. A reasoner result is not Work. A diagnosis must first become a `CognitiveClosure`; the closure can only hand off to `WorkProposal`; the proposal must pass the Agent Kernel persistent-responsibility admission/commitment path before Work exists. Reality is returned to cognition as a `RevisionAssessment` before retry, reopen, or close.
+
+Autonomous repair is bounded. Provider failure, timeout, or unavailable diagnosis enters `WAIT` without inventing a closure or Work. Irreversible operations or invalid target state escalate rather than silently broadening authority. If verification still reports the triggering condition after the bounded repair budget, the controller waits and notifies the owner.
+
+An explicit owner continuation command does not bypass failed Work. It records new direction, creates a reality-grounded revision, and reopens cognition on the same controller history.
+
+## Deployment boundary
 
 `control-plane` owns only personal/platform-specific concerns:
 
-- Windows launch/watchdog/Task Scheduler integration;
-- personal Codex process and credential/Docker boundary;
-- local LiteLLM/Codex model configuration;
-- Alertmanager/Prometheus ingress and read-only verification provider;
-- the personal bounded repair and manual-task `ControllerPolicy` implementations;
-- the thin mapping from personal task context into Agent Kernel standing responsibility/admission objects;
-- Feishu task/command ingress compatibility and notification providers;
-- personal Git/Docker effect provider with local project/repository allowlists;
-- Steam game-session alert suppression while Docker is intentionally stopped;
+- platform launch and supervision;
+- local model/provider configuration;
+- monitoring ingress and read-only verification providers;
+- bounded repair and manual-task `ControllerPolicy` implementations;
+- mapping personal task context into Agent Kernel standing-responsibility/admission objects;
+- command ingress compatibility and notification providers;
+- narrowly scoped source-control and deployment effect providers;
+- local suppression/maintenance-state policy;
 - personal API authentication and thin administrative HTTP ingress.
 
-Everything else is Agent Kernel.
+Everything else belongs upstream in Agent Kernel.
 
-For configured `allowed_auto` projects, a clean exact project repository remains standing local auto-repair scope. Codex may edit it through the Kernel `shell.exec` capability. Synchronization uses provider-owned, exact capabilities (`git.fast_forward`, `git.push_exact_ref`, and `chezmoi.apply`) that re-check the repository, branch, remote and expected SHAs before and after the effect; Codex never receives remote credentials or an unrestricted Git command. Applying the configured Compose project remains a separate Agent Kernel capability (`docker.compose.up`) and the personal provider independently re-checks the project allowlist. Generic remote Git changes, rollback and targeted restart remain authorization-required capabilities.
+Health/readiness probes and local state inspection are deployment observations or ingress facts, not Agent Work. Model calls, alert verification, notifications, and effect execution cross Agent Kernel provider/capability boundaries.
 
-Health/readiness, game-mode projection and session-field inspection are deployment probes or ingress facts, not Agent Work. Model calls, alert verification, notifications and repair/effect execution cross Agent Kernel provider/capability boundaries.
+## Effect safety
+
+Automatic effects are restricted to explicitly configured local scope. Effect providers independently re-check relevant project and state constraints before acting.
+
+Source-control synchronization and deployment are separate capabilities rather than one unrestricted shell boundary. Generic remote changes, rollback, and other consequential operations remain authorization-required.
+
+The important rule is that model selection does not widen runtime authority: capabilities and effect classes remain enforced outside the model.
 
 ## Deliberately absent
 
@@ -109,58 +118,29 @@ There is no dual core or legacy fallback. If Agent Kernel needs a semantic featu
 
 ## Agent Kernel dependency
 
-`pyproject.toml` pins `portable-runtime` directly to the Agent Kernel commit containing cognitive-control v2: explicit `CognitiveClosure`, closure-bound `WorkProposal`, persistent-responsibility admission/commitment, reality-grounded `RevisionAssessment`, and strict reopen guards. The repository/product name is `agent-kernel`; the package/namespace remain compatibility axes owned upstream.
+`pyproject.toml` pins `portable-runtime` directly to the Agent Kernel revision used by this deployment profile. The repository/product name is `agent-kernel`; the package/namespace remain compatibility axes owned upstream.
 
-## Personal HTTP surface
+## Public service surface
 
-The external personal surface is preserved:
+The profile exposes a small operational surface for:
 
-- `GET /healthz` — process health.
-- `GET /live` — liveness.
-- `GET /ready` — Prometheus/Alertmanager readiness plus provider health.
-- `GET /metrics` — Prometheus metrics.
-- `GET /status` — concise personal runtime/model status for Feishu `/cp status`.
-- `GET /v1/runtime` — Agent Kernel runtime/work/contract view (API key).
-- `POST /v1/tasks` — explicit personal command/task. A prompt beginning with `<controller_id> ` remains an explicit continuation command for that waiting controller.
-- `POST /v1/alerts/alertmanager` — authenticated unattended incident ingress; durable, deduplicated, immediately acknowledged, bounded background repair.
-- `POST /v1/controllers/{controller_id}/command` — direct authenticated equivalent of the Feishu continuation form.
-- `GET /v1/game-mode` — current personal game-mode projection.
-- `GET /v1/sessions/inspect` — reports sensitive field names only, never values.
+- health, liveness, readiness, and metrics;
+- concise runtime status;
+- authenticated task submission and continuation;
+- authenticated monitoring ingress;
+- controller continuation commands;
+- local operational-state inspection.
 
-Environment inspection, metric names, Codex-judged alert routing and manual escalation boundaries
-are documented in [`docs/environment-checks.md`](docs/environment-checks.md).
-
-Feishu transport remains owned by `feishu-dify-gateway`. Normal text and `/task` continue to dispatch to `/v1/tasks`, so no second Feishu command protocol is introduced. Escalation still tells the owner to send `/task <controller_id> <explicit command>`.
-
-## Models
-
-```toml
-[model]
-diagnosis_model = "gpt-5.6-luna"
-execution_model = "gpt-5.6-luna"
-gateway_base_url = "http://127.0.0.1:4101/v1"
-```
-
-The Codex CLI receives the same official model through `http://127.0.0.1:4100/v1`; the 4100 proxy forwards to LiteLLM on 4101. The model list is generated from the official Codex cache by `D:\agent\litellm-gateway\scripts\sync-agent-gpt-models.ps1` without creating a filtered Codex catalog.
-
-Both phases use the same Agent Kernel `CodexProvider`; the semantic distinction is enforced by the core loop and capability boundary rather than by a separate model tier.
+Transport integrations remain separate from Agent Kernel authority. A transport may forward a request or render a confirmed response, but it does not mint task authority, authorize effects, or decide that an objective has been completed.
 
 ## Setup
 
 ```powershell
-$env:CONTROL_PLANE_API_KEY = "..."
 uv sync --extra dev
 uv run control-plane
 ```
 
-Example configuration is `control_plane.toml.example`.
-
-Windows deployment scripts live only under `deployments/windows-personal-platform/`.
-
-The Windows deployment binds the service to `0.0.0.0:18083` for Docker Desktop's
-`host.docker.internal` path while keeping the local supervisor probe on loopback. The
-installer maintains the narrow `LocalSubnet` firewall rule and is safe to rerun after a
-configuration change.
+Example configuration is `control_plane.toml.example`. Platform-specific deployment scripts live under `deployments/`.
 
 ## Verification
 
@@ -171,4 +151,4 @@ uv run mypy src
 uv run pytest -q
 ```
 
-Structural tests fail if an embedded `src/portable_runtime` tree or any retired generic control-plane module reappears. Cognitive-loop tests fail if execution is reachable directly from diagnosis: they require closure, proposal, materialized Work lineage and revision before close/reopen. Route tests lock the existing personal HTTP surface in place.
+Structural tests fail if an embedded `src/portable_runtime` tree or retired generic control-plane modules reappear. Cognitive-loop tests fail if execution is reachable directly from diagnosis: they require closure, proposal, materialized Work lineage, and revision before close/reopen. Route tests lock the intended public service surface in place.
