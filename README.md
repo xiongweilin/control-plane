@@ -140,7 +140,7 @@ uv sync --extra dev
 uv run control-plane
 ```
 
-Example configuration is `control_plane.toml.example`. Platform-specific deployment scripts live under `deployments/`.
+Example configuration is `control_plane.toml.example`; copy it to the ignored local `control_plane.toml` and fill in the machine-owned paths there. Platform-specific deployment scripts live under `deployments/`.
 
 ## Verification
 

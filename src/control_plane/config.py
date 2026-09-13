@@ -78,40 +78,19 @@ class ControlPlaneConfig:
     environment_cache_seconds: int = 60
     environment_probe_timeout_seconds: int = 30
     docker_build_cache_max_bytes: int = 5 * 1024**3
-    docker_expected_exited_containers: tuple[str, ...] = (
-        "dify-init_permissions-1",
-    )
-    line_ending_auto_discard_repos: tuple[str, ...] = (r"D:\agent\ratio",)
-    recovery_paths: tuple[str, ...] = (
-        r"D:\agent\ratio",
-        r"D:\agent\docker备份",
-    )
-    synchronization_paths: tuple[str, ...] = (
-        r"D:\agent\ratio",
-        r"D:\agent\control-plane",
-        r"D:\agent\agent-kernel",
-        r"D:\agent\agent-skills",
-        r"D:\agent\codex-video-background",
-        r"D:\agent\litellm-gateway",
-        r"D:\agent\meta-controller",
-        r"D:\agent\python-llm-application-engineering-teaching",
-        r"D:\agent\ratio-mcp",
-        r"D:\infrastructure\compose\administrative-orchestrator",
-        r"D:\infrastructure\compose\dify",
-        r"D:\infrastructure\compose\observability",
-        r"D:\infrastructure\compose\feishu-gateway",
-        DEFAULT_CHEZMOI_SOURCE_DIR,
-    )
+    # Machine-specific paths belong in the ignored control_plane.toml profile.
+    docker_expected_exited_containers: tuple[str, ...] = ()
+    line_ending_auto_discard_repos: tuple[str, ...] = ()
+    recovery_paths: tuple[str, ...] = ()
+    synchronization_paths: tuple[str, ...] = ()
     chezmoi_source_dir: str = DEFAULT_CHEZMOI_SOURCE_DIR
-    known_garbage_paths: tuple[str, ...] = (
-        r"D:\agent\portable-runtime-worktrees",
-    )
-    garbage_quarantine_dir: str = r"D:\agent\_recovery-quarantine"
+    known_garbage_paths: tuple[str, ...] = ()
+    garbage_quarantine_dir: str = str(PROJECT_ROOT / "data" / "recovery-quarantine")
     automatic_handling_enabled: bool = False
     auto_maintenance_alertnames: tuple[str, ...] = (
         "ControlPlaneGarbageDetected",
     )
-    v2rayn_expected_path: str | None = r"D:\agent\v2rayN-windows-64\v2rayN.exe"
+    v2rayn_expected_path: str | None = None
 
     game_mode_enabled: bool = True
     game_mode_state_path: Path | None = None
@@ -134,47 +113,9 @@ class ControlPlaneConfig:
         "control-plane-ready",
     )
 
-    allowed_auto_projects: tuple[str, ...] = (
-        "dify",
-        "observability",
-        "feishu-gateway",
-        "control-plane",
-        "ratio",
-        "agent-kernel",
-        "agent-skills",
-        "codex-video-background",
-        "litellm-gateway",
-        "meta-controller",
-        "python-llm-application-engineering-teaching",
-        "ratio-mcp",
-        "administrative-orchestrator",
-        "chezmoi",
-    )
-    project_dirs: dict[str, str] = field(
-        default_factory=lambda: {
-            "dify": r"D:\infrastructure\compose\dify",
-            "observability": r"D:\infrastructure\compose\observability",
-            "feishu-gateway": r"D:\infrastructure\compose\feishu-gateway",
-            "control-plane": r"D:\agent\control-plane",
-            "ratio": r"D:\agent\ratio",
-            "agent-kernel": r"D:\agent\agent-kernel",
-            "agent-skills": r"D:\agent\agent-skills",
-            "codex-video-background": r"D:\agent\codex-video-background",
-            "litellm-gateway": r"D:\agent\litellm-gateway",
-            "meta-controller": r"D:\agent\meta-controller",
-            "python-llm-application-engineering-teaching": (
-                r"D:\agent\python-llm-application-engineering-teaching"
-            ),
-            "ratio-mcp": r"D:\agent\ratio-mcp",
-            "administrative-orchestrator": r"D:\infrastructure\compose\administrative-orchestrator",
-            "chezmoi": DEFAULT_CHEZMOI_SOURCE_DIR,
-        }
-    )
-    allowed_repo_roots: tuple[str, ...] = (
-        r"D:\infrastructure\compose",
-        r"D:\agent",
-        DEFAULT_CHEZMOI_SOURCE_DIR,
-    )
+    allowed_auto_projects: tuple[str, ...] = ()
+    project_dirs: dict[str, str] = field(default_factory=dict)
+    allowed_repo_roots: tuple[str, ...] = ()
 
     @property
     def model(self) -> str:
