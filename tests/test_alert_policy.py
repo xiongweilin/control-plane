@@ -596,7 +596,7 @@ async def test_first_diagnosis_blocker_stops_effect_execution(
         (
             "chezmoi.apply",
             (
-                "SYNC_SOURCE_DIR=C:/Users/metra/.local/share/chezmoi",
+                "SYNC_SOURCE_DIR=C:/Users/example/.local/share/chezmoi",
                 f"SYNC_EXPECTED_SOURCE_SHA={SYNC_SOURCE_SHA}",
             ),
             EffectClass.INTERNAL_REVERSIBLE,
@@ -664,7 +664,7 @@ async def test_sync_alert_selects_only_the_exact_kernel_capability(
         (
             "chezmoi.apply",
             (
-                "SYNC_SOURCE_DIR=C:/Users/metra/.local/share/chezmoi",
+                "SYNC_SOURCE_DIR=C:/Users/example/.local/share/chezmoi",
                 f"SYNC_EXPECTED_SOURCE_SHA={SYNC_SOURCE_SHA}",
             ),
         ),
