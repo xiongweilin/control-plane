@@ -98,7 +98,7 @@ class ControlPlaneConfig:
         r"D:\infrastructure\compose\administrative-orchestrator",
         r"D:\infrastructure\compose\dify",
         r"D:\infrastructure\compose\observability",
-        r"D:\infrastructure\compose\feishu-dify-gateway",
+        r"D:\infrastructure\compose\feishu-gateway",
         r"C:\Users\metra\.local\share\chezmoi",
     )
     chezmoi_source_dir: str = r"C:\Users\metra\.local\share\chezmoi"
@@ -129,14 +129,14 @@ class ControlPlaneConfig:
         "alertmanager",
         "blackbox",
         "blackbox-protected",
-        "feishu-dify-gateway",
+        "feishu-gateway",
         "control-plane-ready",
     )
 
     allowed_auto_projects: tuple[str, ...] = (
         "dify",
         "observability",
-        "feishu-dify-gateway",
+        "feishu-gateway",
         "control-plane",
         "ratio",
         "agent-kernel",
@@ -153,7 +153,7 @@ class ControlPlaneConfig:
         default_factory=lambda: {
             "dify": r"D:\infrastructure\compose\dify",
             "observability": r"D:\infrastructure\compose\observability",
-            "feishu-dify-gateway": r"D:\infrastructure\compose\feishu-dify-gateway",
+            "feishu-gateway": r"D:\infrastructure\compose\feishu-gateway",
             "control-plane": r"D:\agent\control-plane",
             "ratio": r"D:\agent\ratio",
             "agent-kernel": r"D:\agent\agent-kernel",
