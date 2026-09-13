@@ -1,6 +1,6 @@
 # control-plane
 
-A real deployment profile for [agent-kernel](https://github.com/xiongweilin/agent-kernel): personal operations automation with authenticated command ingress, monitoring signals, bounded repair policy, and narrowly scoped external effects.
+A concrete [agent-kernel](https://github.com/xiongweilin/agent-kernel) deployment profile for authenticated operations, monitoring, bounded repair, and narrowly scoped external effects.
 
 This repository is intentionally not a second agent runtime.
 
