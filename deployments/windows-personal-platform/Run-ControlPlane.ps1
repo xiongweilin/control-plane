@@ -169,6 +169,12 @@ $launcherExitCode = 1
 $startedAt = Get-Date
 $consecutiveFailures = 0
 
+# Tracing is opt-in in code: without an endpoint the app runs uninstrumented.
+# This deployment points at the host-loopback OTLP port published by the
+# observability stack's otel-collector. Remove these two lines to disable.
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = 'http://127.0.0.1:4318'
+$env:OTEL_SERVICE_NAME = 'control-plane'
+
 try {
     $child = Start-Process -FilePath $python `
         -ArgumentList @('-m', 'control_plane', '--log-level', 'info') `

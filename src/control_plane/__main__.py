@@ -7,6 +7,7 @@ import uvicorn
 
 from .app import create_app
 from .config import ControlPlaneConfig
+from .telemetry import configure_telemetry
 
 
 def main() -> None:
@@ -21,8 +22,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     config = ControlPlaneConfig.load()
+    app = create_app(config)
+    configure_telemetry(app)
     uvicorn.run(
-        create_app(config),
+        app,
         host=args.host or config.host,
         port=args.port or config.port,
         log_level=args.log_level,
