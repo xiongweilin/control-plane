@@ -17,7 +17,11 @@ def make_config(tmp_path: Path) -> ControlPlaneConfig:
         codex_cli=tmp_path / "codex.cmd",
         v2rayn_expected_path=r"D:\agent\v2rayN-windows-64\v2rayN.exe",
         docker_build_cache_max_bytes=1024,
-        docker_expected_exited_containers=("dify-init_permissions-1",),
+        docker_expected_exited_containers=(
+            "dify-init_permissions-1",
+            "administrative-staging-v1-migrate-1",
+            "administrative-staging-v1-odoo-bootstrap-1",
+        ),
         automatic_handling_enabled=True,
         game_mode_enabled=False,
     )
@@ -133,12 +137,37 @@ def test_expected_one_shot_containers_do_not_become_unexpected_exited_alerts(
             "docker_available": True,
             "docker_exited_count": 1,
             "docker_exited_container_names": ["dify-init_permissions-1"],
+            "docker_exited_container_records": [
+                {"name": "dify-init_permissions-1", "exit_code": 0}
+            ],
             "docker_build_cache_bytes": 0,
         },
     )
     observation = {item.name: item for item in snapshot.observations}["docker_exited_containers"]
     assert observation.status == "ok"
     assert observation.metadata["expected_down"] is True
+
+
+def test_expected_one_shot_nonzero_exit_remains_an_unexpected_alert(
+    tmp_path: Path,
+) -> None:
+    snapshot = evaluate_environment(
+        make_config(tmp_path),
+        {
+            "docker_available": True,
+            "docker_exited_count": 1,
+            "docker_exited_container_names": ["administrative-staging-v1-migrate-1"],
+            "docker_exited_container_records": [
+                {"name": "administrative-staging-v1-migrate-1", "exit_code": 1}
+            ],
+            "docker_build_cache_bytes": 0,
+        },
+    )
+    observation = {item.name: item for item in snapshot.observations}["docker_exited_containers"]
+    assert observation.status == "problem"
+    assert observation.metadata["unexpected_containers"] == [
+        "administrative-staging-v1-migrate-1"
+    ]
 
 
 def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: Path) -> None:

@@ -473,15 +473,48 @@ def evaluate_environment(
             ]
         )
     elif isinstance(exited, (int, float)):
+        exited_records_raw = payload.get("docker_exited_container_records")
+        exited_records: list[dict[str, Any]] = []
+        if isinstance(exited_records_raw, list):
+            for raw_record in exited_records_raw:
+                if not isinstance(raw_record, Mapping):
+                    continue
+                name = str(raw_record.get("name", "")).strip()
+                if not name:
+                    continue
+                raw_exit_code = raw_record.get("exit_code")
+                try:
+                    exit_code = int(raw_exit_code) if raw_exit_code is not None else None
+                except (TypeError, ValueError):
+                    exit_code = None
+                exited_records.append({"name": name, "exit_code": exit_code})
+
         exited_names_raw = payload.get("docker_exited_container_names")
         exited_names = (
             [str(item) for item in exited_names_raw if item]
             if isinstance(exited_names_raw, list)
             else []
         )
+        if exited_records:
+            exited_names = [str(record["name"]) for record in exited_records]
+
         expected_names = set(config.docker_expected_exited_containers)
-        unexpected_names = [name for name in exited_names if name not in expected_names]
-        expected_only = int(exited) > 0 and bool(exited_names) and not unexpected_names
+        unexpected_records = [
+            record
+            for record in exited_records
+            if record["name"] not in expected_names or record["exit_code"] != 0
+        ]
+        unexpected_names = [str(record["name"]) for record in unexpected_records]
+        exit_codes_verified = (
+            len(exited_records) == int(exited)
+            and all(record["exit_code"] is not None for record in exited_records)
+        )
+        expected_only = (
+            int(exited) > 0
+            and exit_codes_verified
+            and len(exited_records) == int(exited)
+            and not unexpected_records
+        )
         if int(exited) <= 0:
             observations.append(
                 _ok("docker_exited_containers", "no exited containers", metadata={"exited_count": 0})
@@ -496,20 +529,26 @@ def evaluate_environment(
                         "total_exited_count": int(exited),
                         "expected_down": True,
                         "expected_containers": exited_names,
+                        "exit_codes_verified": True,
+                        "exit_codes": [record["exit_code"] for record in exited_records],
                     },
                 )
             )
         else:
+            unexpected_count = len(unexpected_records) if exited_records else int(exited)
             observations.append(
                 _problem(
                     "docker_exited_containers",
-                    f"unexpected exited containers={len(unexpected_names) if exited_names else int(exited)}",
+                    f"unexpected or unverifiable exited containers={unexpected_count}",
                     "人工检查退出原因和 compose 期望状态；可在 allowlisted 项目内人工决定是否重启，但不要删除容器、卷或镜像。",
                     metadata={
-                        "exited_count": len(unexpected_names) if exited_names else int(exited),
+                        "exited_count": unexpected_count,
                         "total_exited_count": int(exited),
                         "expected_containers": sorted(expected_names),
                         "unexpected_containers": unexpected_names,
+                        "exit_codes_verified": exit_codes_verified,
+                        "observed_containers": exited_names,
+                        "observed_records": exited_records,
                     },
                 )
             )
@@ -964,6 +1003,17 @@ if ($dockerAvailable) {
   docker_available = $dockerAvailable
   docker_exited_count = $exited
   docker_exited_container_names = @($exitedItems | ForEach-Object { [string]$_.Names })
+  docker_exited_container_records = @($exitedItems | ForEach-Object {
+    $status = [string]$_.Status
+    $exitCode = $null
+    if ($status -match 'Exited \\((?<code>-?\\d+)\\)') {
+      $exitCode = [int]$Matches['code']
+    }
+    [pscustomobject]@{
+      name = [string]$_.Names
+      exit_code = $exitCode
+    }
+  })
   docker_build_cache_size = if ($cache) { [string]$cache } else { '' }
   v2rayn_running = ($v2.Count -gt 0)
   v2rayn_path = if ($v2.Count -gt 0) { [string]$v2[0].ExecutablePath } else { '' }
