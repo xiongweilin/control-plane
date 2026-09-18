@@ -587,9 +587,7 @@ async def test_first_round_irreversible_blocker_escalates_through_feishu(
         await asyncio.sleep(0.01)
 
     assert [request.capability for request in diagnosis_calls] == ["reason.generate"]
-    assert [capability for _work_id, capability, _kwargs in notification_calls] == [
-        "notify.send"
-    ]
+    assert [capability for _work_id, capability, _kwargs in notification_calls] == ["notify.send"]
     assert len(escalated) == 1
     assert escalated[0].payload["reason"] == "irreversible"
     assert escalated[0].payload["notification_provider_accepted"] is expected_sent

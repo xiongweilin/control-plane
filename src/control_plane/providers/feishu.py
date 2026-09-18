@@ -154,9 +154,7 @@ class FeishuNotificationProvider:
                 metadata={"failure_phase": "script_lookup"},
             )
 
-        timeout_seconds = (
-            request.timeout_seconds if request.timeout_seconds is not None else 10.0
-        )
+        timeout_seconds = request.timeout_seconds if request.timeout_seconds is not None else 10.0
         try:
             proc = await asyncio.create_subprocess_exec(
                 "powershell.exe",

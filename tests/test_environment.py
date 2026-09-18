@@ -165,9 +165,7 @@ def test_expected_one_shot_nonzero_exit_remains_an_unexpected_alert(
     )
     observation = {item.name: item for item in snapshot.observations}["docker_exited_containers"]
     assert observation.status == "problem"
-    assert observation.metadata["unexpected_containers"] == [
-        "administrative-staging-v1-migrate-1"
-    ]
+    assert observation.metadata["unexpected_containers"] == ["administrative-staging-v1-migrate-1"]
 
 
 def test_missing_v2rayn_process_keeps_path_fact_separate_from_status(tmp_path: Path) -> None:

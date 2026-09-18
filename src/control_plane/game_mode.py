@@ -107,11 +107,7 @@ def _steam_roots_from_registry() -> tuple[Path, ...]:
             if isinstance(value, str) and value.strip():
                 roots.append(Path(value.strip()))
         roots.append(Path(r"C:\Program Files (x86)\Steam"))
-        return tuple(
-            path
-            for path in dict.fromkeys(roots)
-            if path.is_dir()
-        )
+        return tuple(path for path in dict.fromkeys(roots) if path.is_dir())
     except (ImportError, OSError):
         return ()
 
@@ -137,10 +133,7 @@ def _steam_library_roots() -> tuple[Path, ...]:
 def _steam_game_roots() -> tuple[Path, ...]:
     global _steam_game_roots_cache, _steam_game_roots_cached_at
     now = time.monotonic()
-    if (
-        _steam_game_roots_cache
-        and now - _steam_game_roots_cached_at < STEAM_LIBRARY_CACHE_SECONDS
-    ):
+    if _steam_game_roots_cache and now - _steam_game_roots_cached_at < STEAM_LIBRARY_CACHE_SECONDS:
         return _steam_game_roots_cache
     game_roots: list[Path] = []
     for library in _steam_library_roots():
@@ -302,9 +295,7 @@ def detect_steam_game_session() -> GameSessionSignal | None:
     return None
 
 
-def is_game_process_running(
-    process_names: tuple[str, ...], process_ids: tuple[int, ...]
-) -> bool:
+def is_game_process_running(process_names: tuple[str, ...], process_ids: tuple[int, ...]) -> bool:
     """Return whether a state-owner-declared game process is live.
 
     The control plane has no psutil dependency. ``tasklist`` is a fixed,
@@ -392,8 +383,7 @@ def read_game_mode_state(
             phase="active",
             status="AutoSteam",
             reason=(
-                "installed Steam game owns the foreground window and Docker Desktop "
-                "is stopped"
+                "installed Steam game owns the foreground window and Docker Desktop is stopped"
             ),
             state_path=path,
             started_at=(now or datetime.now(UTC)).astimezone(UTC),
@@ -419,9 +409,7 @@ def read_game_mode_state(
     process_names = _normalise_process_names(
         payload.get("ProcessNames", payload.get("ProcessName"))
     )
-    process_ids = _normalise_process_ids(
-        payload.get("ProcessIds", payload.get("ProcessId"))
-    )
+    process_ids = _normalise_process_ids(payload.get("ProcessIds", payload.get("ProcessId")))
     docker_expected_down = payload.get("DockerExpectedDown") is True
 
     if status == "Active":

@@ -113,9 +113,7 @@ def settle_waiting_execution_claims(runtime: Any, work: Any | None) -> dict[str,
     for run in runtime.store.list_runs(current_work.id):
         if run.status != "running":
             continue
-        runtime.store.save_run(
-            run.model_copy(update={"status": "interrupted", "ended_at": now})
-        )
+        runtime.store.save_run(run.model_copy(update={"status": "interrupted", "ended_at": now}))
         counts["running_runs_interrupted"] += 1
 
     _record_reconciliation(

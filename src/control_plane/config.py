@@ -87,9 +87,7 @@ class ControlPlaneConfig:
     known_garbage_paths: tuple[str, ...] = ()
     garbage_quarantine_dir: str = str(PROJECT_ROOT / "data" / "recovery-quarantine")
     automatic_handling_enabled: bool = False
-    auto_maintenance_alertnames: tuple[str, ...] = (
-        "ControlPlaneGarbageDetected",
-    )
+    auto_maintenance_alertnames: tuple[str, ...] = ("ControlPlaneGarbageDetected",)
     v2rayn_expected_path: str | None = None
 
     game_mode_enabled: bool = True
@@ -185,15 +183,11 @@ class ControlPlaneConfig:
             state_db=Path(str(kernel.get("state_db", base.state_db))),
             artifact_root=Path(str(kernel.get("artifact_root", base.artifact_root))),
             agent_session_dir=Path(str(model.get("session_dir", base.agent_session_dir))),
-            diagnosis_model=str(
-                model.get("diagnosis_model", legacy_model or base.diagnosis_model)
-            ),
+            diagnosis_model=str(model.get("diagnosis_model", legacy_model or base.diagnosis_model)),
             execution_model=str(model.get("execution_model", base.execution_model)),
             codex_cli=_resolve_codex_cli(str(model.get("codex_cli", ""))),
             gateway_base_url=str(model.get("gateway_base_url", base.gateway_base_url)),
-            codex_isolate_worktree=bool(
-                model.get("isolate_worktree", base.codex_isolate_worktree)
-            ),
+            codex_isolate_worktree=bool(model.get("isolate_worktree", base.codex_isolate_worktree)),
             codex_disable_docker=bool(model.get("disable_docker", base.codex_disable_docker)),
             codex_disable_ssh_credentials=bool(
                 model.get("disable_ssh_credentials", base.codex_disable_ssh_credentials)
@@ -213,9 +207,7 @@ class ControlPlaneConfig:
                 bool(
                     monitoring.get(
                         "notification_enabled",
-                        _section(data, "notifications").get(
-                            "enabled", base.notification_enabled
-                        ),
+                        _section(data, "notifications").get("enabled", base.notification_enabled),
                     )
                 ),
             ),
@@ -229,14 +221,10 @@ class ControlPlaneConfig:
                 environment.get("cache_seconds", base.environment_cache_seconds)
             ),
             environment_probe_timeout_seconds=int(
-                environment.get(
-                    "probe_timeout_seconds", base.environment_probe_timeout_seconds
-                )
+                environment.get("probe_timeout_seconds", base.environment_probe_timeout_seconds)
             ),
             docker_build_cache_max_bytes=int(
-                environment.get(
-                    "docker_build_cache_max_bytes", base.docker_build_cache_max_bytes
-                )
+                environment.get("docker_build_cache_max_bytes", base.docker_build_cache_max_bytes)
             ),
             docker_expected_exited_containers=tuple(
                 str(v)
@@ -254,17 +242,11 @@ class ControlPlaneConfig:
                 str(v) for v in environment.get("recovery_paths", base.recovery_paths)
             ),
             synchronization_paths=tuple(
-                str(v)
-                for v in environment.get(
-                    "synchronization_paths", base.synchronization_paths
-                )
+                str(v) for v in environment.get("synchronization_paths", base.synchronization_paths)
             ),
-            chezmoi_source_dir=str(
-                environment.get("chezmoi_source_dir", base.chezmoi_source_dir)
-            ),
+            chezmoi_source_dir=str(environment.get("chezmoi_source_dir", base.chezmoi_source_dir)),
             known_garbage_paths=tuple(
-                str(v)
-                for v in environment.get("known_garbage_paths", base.known_garbage_paths)
+                str(v) for v in environment.get("known_garbage_paths", base.known_garbage_paths)
             ),
             garbage_quarantine_dir=str(
                 environment.get("garbage_quarantine_dir", base.garbage_quarantine_dir)
@@ -272,9 +254,7 @@ class ControlPlaneConfig:
             automatic_handling_enabled=_env_bool(
                 "CONTROL_PLANE_AUTOMATIC_HANDLING",
                 bool(
-                    environment.get(
-                        "automatic_handling_enabled", base.automatic_handling_enabled
-                    )
+                    environment.get("automatic_handling_enabled", base.automatic_handling_enabled)
                 ),
             ),
             auto_maintenance_alertnames=tuple(

@@ -128,9 +128,7 @@ def _policy_count(policy: Any, state: Any, method_name: str, phase: str) -> int:
     return max(0, _fallback_policy_count(policy, state, phase))
 
 
-def _diagnosis_status(
-    result: dict[str, Any] | None, *, error: BaseException | None = None
-) -> str:
+def _diagnosis_status(result: dict[str, Any] | None, *, error: BaseException | None = None) -> str:
     if result is None:
         error_text = f"{type(error).__name__} {error}".lower() if error else ""
         return "timeout" if "timeout" in error_text else "no_valid_diagnosis"
@@ -160,9 +158,9 @@ def _structured_text(value: Any, *, limit: int = 2000) -> str | None:
     if isinstance(value, (int, float, bool)):
         return str(value)
     if isinstance(value, (dict, list)):
-        return json.dumps(
-            redact_value(value), ensure_ascii=False, sort_keys=True, default=str
-        )[:limit]
+        return json.dumps(redact_value(value), ensure_ascii=False, sort_keys=True, default=str)[
+            :limit
+        ]
     return None
 
 

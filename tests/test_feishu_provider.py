@@ -136,9 +136,7 @@ async def test_timeout_is_unknown_and_does_not_claim_acceptance(
         return process
 
     monkeypatch.setattr(feishu_module.asyncio, "create_subprocess_exec", start)
-    result = await FeishuNotificationProvider().invoke(
-        _request(timeout_seconds=0.001), _context()
-    )
+    result = await FeishuNotificationProvider().invoke(_request(timeout_seconds=0.001), _context())
 
     assert result.status == "unknown"
     assert result.metadata["provider_accepted"] is None

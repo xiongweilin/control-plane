@@ -76,9 +76,7 @@ def test_reality_failure_changes_next_pass_to_representation_revision() -> None:
     assert EpistemicIssueKind.CANDIDATE_SPACE_SUSPECTED_INCOMPLETE in {
         issue.kind for issue in profile.issues
     }
-    assert StructuralTensionKind.REPEATED_REOPEN in {
-        tension.kind for tension in profile.tensions
-    }
+    assert StructuralTensionKind.REPEATED_REOPEN in {tension.kind for tension in profile.tensions}
     assert StructuralTensionKind.PERSISTENT_RESIDUAL in {
         tension.kind for tension in profile.tensions
     }
@@ -91,9 +89,7 @@ def test_reality_failure_changes_next_pass_to_representation_revision() -> None:
 def test_line_ending_incident_is_representation_mismatch_not_semantic_failure() -> None:
     profile, frame = _frame(attempt=1, line_endings=True)
 
-    assert EpistemicIssueKind.REPRESENTATION_MISMATCH in {
-        issue.kind for issue in profile.issues
-    }
+    assert EpistemicIssueKind.REPRESENTATION_MISMATCH in {issue.kind for issue in profile.issues}
     assert StructuralTensionKind.REPRESENTATION_INSTABILITY in {
         tension.kind for tension in profile.tensions
     }

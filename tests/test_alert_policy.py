@@ -21,16 +21,16 @@ SYNC_NEW_SHA = "2" * 40
 SYNC_SOURCE_SHA = "3" * 40
 
 
-def _setup(
-    *, kind: str = "personal-command", verification_labels: dict[str, str] | None = None
-):
+def _setup(*, kind: str = "personal-command", verification_labels: dict[str, str] | None = None):
     runtime = Runtime(runtime_id="personal-platform")
     controller = CognitiveController(runtime)
     bridge = PersonalKernelBridge(runtime, controller, owner_principal="principal:test")
     labels = (
         verification_labels
         if verification_labels is not None
-        else {"alertname": "Broken"} if kind == "personal-incident-repair" else {}
+        else {"alertname": "Broken"}
+        if kind == "personal-incident-repair"
+        else {}
     )
     state, assessment_ref = bridge.begin(
         title="Personal task",
@@ -261,9 +261,7 @@ async def test_alert_policy_closure_declares_execution_apply_and_verification() 
 async def test_autonomous_repair_execution_omits_an_explicit_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime, controller, bridge, state, _assessment_ref = _setup(
-        kind="personal-incident-repair"
-    )
+    runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
     policy = AutonomousRepairPolicy(
         controller=controller,
         bridge=bridge,
@@ -295,9 +293,7 @@ async def test_autonomous_repair_execution_omits_an_explicit_timeout(
     monkeypatch.setattr(runtime, "run_capability", fake_run_capability)
     await policy.execute_work(waiting)
 
-    execution_calls = [
-        item for item in calls if item[2].get("phase") == "execution"
-    ]
+    execution_calls = [item for item in calls if item[2].get("phase") == "execution"]
     assert len(execution_calls) == 1
     assert "timeout_seconds" not in execution_calls[0][2]
     assert execution_calls[0][2]["attempt_index"] == 1
@@ -307,9 +303,7 @@ async def test_autonomous_repair_execution_omits_an_explicit_timeout(
 async def test_unknown_safety_uses_only_read_only_execution_and_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime, controller, bridge, state, _assessment_ref = _setup(
-        kind="personal-incident-repair"
-    )
+    runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
     monkeypatch.setattr(AutonomousRepairPolicy, "_repo_is_dirty", lambda _policy: False)
     policy = AutonomousRepairPolicy(
         controller=controller,
@@ -345,10 +339,7 @@ async def test_unknown_safety_uses_only_read_only_execution_and_verification(
     monkeypatch.setattr(runtime, "run_capability", fake_run_capability)
     await policy.execute_work(waiting)
 
-    assert [
-        (capability, kwargs["phase"])
-        for _work_id, capability, kwargs in calls
-    ] == [
+    assert [(capability, kwargs["phase"]) for _work_id, capability, kwargs in calls] == [
         ("reason.generate", "execution"),
         ("monitor.alert.active", "verification"),
     ]
@@ -376,9 +367,7 @@ async def test_unknown_safety_uses_only_read_only_execution_and_verification(
 async def test_invalid_diagnosis_waits_without_closure_work_or_effect(
     status: str, message: str
 ) -> None:
-    _runtime, controller, bridge, state, _assessment_ref = _setup(
-        kind="personal-incident-repair"
-    )
+    _runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
     policy = AutonomousRepairPolicy(
         controller=controller,
         bridge=bridge,
@@ -437,9 +426,7 @@ async def test_invalid_diagnosis_waits_without_closure_work_or_effect(
 async def test_unresolved_alert_runs_exactly_two_diagnosis_and_execution_rounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime, controller, bridge, state, _assessment_ref = _setup(
-        kind="personal-incident-repair"
-    )
+    runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
     policy = AutonomousRepairPolicy(
         controller=controller,
         bridge=bridge,
@@ -501,9 +488,7 @@ async def test_unresolved_alert_runs_exactly_two_diagnosis_and_execution_rounds(
     assert policy._execution_count(controller.get(state.id)) == 2
     assert len(bridge.result_events(state.id, work_id=work.id)) == 2
     assert len(bridge.result_events(state.id, work_id=second_work.id)) == 2
-    execution_calls = [
-        item for item in calls if item[2].get("phase") == "execution"
-    ]
+    execution_calls = [item for item in calls if item[2].get("phase") == "execution"]
     assert len(execution_calls) == 2
     assert [item[2]["attempt_index"] for item in execution_calls] == [1, 2]
     assert all("timeout_seconds" not in item[2] for item in execution_calls)
@@ -533,9 +518,7 @@ async def test_unresolved_alert_runs_exactly_two_diagnosis_and_execution_rounds(
 async def test_first_diagnosis_blocker_stops_effect_execution(
     message: str, blocker: str, repo_is_dirty: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _runtime, controller, bridge, state, _assessment_ref = _setup(
-        kind="personal-incident-repair"
-    )
+    _runtime, controller, bridge, state, _assessment_ref = _setup(kind="personal-incident-repair")
     policy = AutonomousRepairPolicy(
         controller=controller,
         bridge=bridge,
@@ -546,9 +529,7 @@ async def test_first_diagnosis_blocker_stops_effect_execution(
         project="test",
         verification_labels={"alertname": "Broken"},
     )
-    monkeypatch.setattr(
-        AutonomousRepairPolicy, "_repo_is_dirty", lambda _policy: repo_is_dirty
-    )
+    monkeypatch.setattr(AutonomousRepairPolicy, "_repo_is_dirty", lambda _policy: repo_is_dirty)
 
     diagnosis = await policy.select(state)
     assert diagnosis.parameters["attempt_index"] == 1
@@ -711,8 +692,7 @@ async def test_sync_execution_delegates_only_to_the_selected_exact_capability(
     await policy.execute_work(waiting)
 
     assert [
-        (called_capability, kwargs["phase"])
-        for _work_id, called_capability, kwargs in calls
+        (called_capability, kwargs["phase"]) for _work_id, called_capability, kwargs in calls
     ] == [
         ("reason.generate", "execution"),
         (capability, "apply"),
@@ -844,15 +824,10 @@ def test_safety_class_requires_success_and_the_current_codex_marker() -> None:
         == "unknown"
     )
     assert (
-        classify_safety(
-            {"status": "failed", "message": "SAFETY_CLASS=UNKNOWN\nprovider failure"}
-        )
+        classify_safety({"status": "failed", "message": "SAFETY_CLASS=UNKNOWN\nprovider failure"})
         == "invalid"
     )
-    assert (
-        classify_safety({"status": "succeeded", "message": "historical label only"})
-        == "invalid"
-    )
+    assert classify_safety({"status": "succeeded", "message": "historical label only"}) == "invalid"
     assert (
         classify_safety(
             {

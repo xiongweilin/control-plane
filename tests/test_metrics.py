@@ -78,8 +78,7 @@ def test_profile_metrics_expose_environment_state() -> None:
 
     assert (
         'control_plane_environment_check{automation="codex-judgment",check="docker_build_cache",'
-        'configured="true",severity="warning",status="problem"} 1.0'
-        in text
+        'configured="true",severity="warning",status="problem"} 1.0' in text
     )
     assert "control_plane_docker_build_cache_bytes 2048.0" in text
     assert 'control_plane_ready_provider_mismatch{provider="codex-primary"} 1.0' in text

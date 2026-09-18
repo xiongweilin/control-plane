@@ -36,11 +36,7 @@ def _bounded_mapping(
     if not isinstance(value, Mapping):
         return {}
     keys = allowed if allowed is not None else tuple(str(key) for key in value)
-    return {
-        key: str(value[key])[:value_limit]
-        for key in keys
-        if key in value
-    }
+    return {key: str(value[key])[:value_limit] for key in keys if key in value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +79,7 @@ class AlertContext:
             labels=dict(sanitized.get("labels", {})),
             annotations=dict(sanitized.get("annotations", {})),
             observed_at=(
-                str(sanitized["observed_at"])
-                if sanitized.get("observed_at") is not None
-                else None
+                str(sanitized["observed_at"]) if sanitized.get("observed_at") is not None else None
             ),
         )
 

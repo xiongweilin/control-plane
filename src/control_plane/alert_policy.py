@@ -33,9 +33,7 @@ _RESULT_EVENT = "ControllerCapabilityResultObserved"
 _DECISION_EVENT = "ControllerDecisionSelected"
 _SYNC_ALERT_NAME = "ControlPlaneSynchronizationDegraded"
 _LINE_ENDING_DISCARD_CAPABILITY = "git.discard_line_ending_changes"
-_SYNC_CAPABILITIES = frozenset(
-    {"git.fast_forward", "git.push_exact_ref", "chezmoi.apply"}
-)
+_SYNC_CAPABILITIES = frozenset({"git.fast_forward", "git.push_exact_ref", "chezmoi.apply"})
 _SYNC_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _SYNC_FIELD_PATTERN = re.compile(r"(?im)^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 _AUTONOMOUS_ATTEMPT_LIMIT = 2
@@ -334,9 +332,8 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         if safety == "irreversible":
             return "irreversible"
         message = _message(diagnosis_result).upper()
-        if (
-            not self._is_line_ending_cleanup()
-            and re.search(r"(?:EXECUTION|REPAIR)_BLOCKER\s*=\s*DIRTY_REPO", message)
+        if not self._is_line_ending_cleanup() and re.search(
+            r"(?:EXECUTION|REPAIR)_BLOCKER\s*=\s*DIRTY_REPO", message
         ):
             return "dirty-repository"
         if not self._is_line_ending_cleanup() and self._repo_is_dirty() is True:
@@ -465,9 +462,7 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
             not self._is_sync_alert() or self._sync_plan(diagnosis_result) is not None
         )
 
-    def _requested_capabilities(
-        self, diagnosis_result: dict[str, Any] | None = None
-    ) -> list[str]:
+    def _requested_capabilities(self, diagnosis_result: dict[str, Any] | None = None) -> list[str]:
         if not self._effects_allowed(diagnosis_result):
             return ["reason.generate", "monitor.alert.active"]
         if self._is_line_ending_cleanup():
@@ -613,9 +608,7 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         if not events:
             raise ValueError("repair revision requires durable Work result observations")
 
-        execution_events = [
-            event for event in events if event.payload.get("stage") == "execution"
-        ]
+        execution_events = [event for event in events if event.payload.get("stage") == "execution"]
         apply_events = [event for event in events if event.payload.get("stage") == "apply"]
         verification_events = [
             event for event in events if event.payload.get("stage") == "verification"
@@ -767,9 +760,7 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
         diagnosis_result = _result_by_decision(self.controller, state.id).get(diagnosis.id)
         safety = classify_safety(diagnosis_result)
         if safety == _INVALID_SAFETY_CLASS:
-            raise RuntimeError(
-                "invalid diagnosis cannot materialize or execute repair Work"
-            )
+            raise RuntimeError("invalid diagnosis cannot materialize or execute repair Work")
 
         work = self.bridge.materialize_work(state)
         run = _latest_run(runtime, work.id)
@@ -847,11 +838,7 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
                 "remote/deployment effects belong to Agent Kernel providers. Finish with a "
                 "concise execution summary.\n\n"
             )
-        instruction = (
-            execution_prefix
-            + "Diagnosis and plan:\n"
-            + _message(diagnosis_result)
-        )
+        instruction = execution_prefix + "Diagnosis and plan:\n" + _message(diagnosis_result)
         parameters: dict[str, Any] = {
             "model": self.execution_model,
             "phase": "execution",
@@ -933,12 +920,7 @@ class AutonomousRepairPolicy(StagedMetaPolicy):
                 result=applied,
             )
 
-        if (
-            result.status == "succeeded"
-            and sync_plan is None
-            and effects_allowed
-            and self.project
-        ):
+        if result.status == "succeeded" and sync_plan is None and effects_allowed and self.project:
             applied = await invoke(
                 "docker.compose.up",
                 instruction="Apply the already prepared local repair for the configured project.",

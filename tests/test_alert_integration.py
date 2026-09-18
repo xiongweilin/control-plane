@@ -161,8 +161,7 @@ async def test_alert_ingress_runs_controller_codex_result_and_finished_event(
     assert any(
         event.type == "ControllerDecisionSelected"
         and event.payload.get("decision", {}).get("capability") == "reason.generate"
-        and event.payload.get("decision", {}).get("parameters", {}).get("phase")
-        == "diagnosis"
+        and event.payload.get("decision", {}).get("parameters", {}).get("phase") == "diagnosis"
         for event in events
     )
     assert any(event.type == "ControllerCapabilityResultObserved" for event in events)

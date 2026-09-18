@@ -252,9 +252,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             "provider_accepted": provider_accepted,
             "provider_status": provider_status,
             "delivery_confirmed": metadata.get("delivery_confirmed") is True,
-            "delivery_confirmation": str(
-                metadata.get("delivery_confirmation") or "not_available"
-            ),
+            "delivery_confirmation": str(metadata.get("delivery_confirmation") or "not_available"),
             "failure_phase": metadata.get("failure_phase"),
             "error": getattr(result, "error", None),
         }
@@ -277,9 +275,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             if health_cache is not None and now - health_cache[0] < 5:
                 return health_cache[1]
             try:
-                value = cast(
-                    dict[str, Any], await asyncio.wait_for(runtime.health(), timeout=5)
-                )
+                value = cast(dict[str, Any], await asyncio.wait_for(runtime.health(), timeout=5))
             except Exception as exc:
                 value = {
                     "runtime_id": runtime.runtime_id,
@@ -492,8 +488,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 should_escalate = result.status == ControllerStatus.WAITING.value and (
                     blocker is not None
                     or snapshot["diagnosis_status"] != "valid"
-                    or max(diagnosis_attempts, execution_attempts)
-                    >= policy.attempt_limit
+                    or max(diagnosis_attempts, execution_attempts) >= policy.attempt_limit
                 )
                 append_alert_event(
                     ALERT_FINISHED_EVENT,
@@ -543,9 +538,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         notification_provider_accepted=notification["provider_accepted"],
                         notification_provider_status=notification["provider_status"],
                         notification_delivery_confirmed=notification["delivery_confirmed"],
-                        notification_delivery_confirmation=notification[
-                            "delivery_confirmation"
-                        ],
+                        notification_delivery_confirmation=notification["delivery_confirmation"],
                         notification_failure_phase=notification["failure_phase"],
                         notification_error=notification["error"],
                         escalated_at=time.time(),
@@ -617,9 +610,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                         notification_provider_accepted=notification["provider_accepted"],
                         notification_provider_status=notification["provider_status"],
                         notification_delivery_confirmed=notification["delivery_confirmed"],
-                        notification_delivery_confirmation=notification[
-                            "delivery_confirmation"
-                        ],
+                        notification_delivery_confirmation=notification["delivery_confirmation"],
                         notification_failure_phase=notification["failure_phase"],
                         notification_error=notification["error"],
                         escalated_at=time.time(),
@@ -643,9 +634,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             journal_events = [Event.model_validate_json(row[0]) for row in rows]
         else:
             journal_events = [
-                event
-                for event in runtime.store.list_events()
-                if event.type in journal_types
+                event for event in runtime.store.list_events() if event.type in journal_types
             ]
         for event in journal_events:
             if event.type not in {ALERT_QUEUED_EVENT, ALERT_FINISHED_EVENT, ALERT_RESOLVED_EVENT}:
@@ -716,9 +705,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             return None
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                response = await client.get(
-                    f"{cfg.alertmanager_url.rstrip('/')}/api/v2/alerts"
-                )
+                response = await client.get(f"{cfg.alertmanager_url.rstrip('/')}/api/v2/alerts")
                 response.raise_for_status()
                 payload = response.json()
         except Exception:
@@ -821,8 +808,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 repo=context.repo,
                 project=(
                     context.project
-                    if context.project is not None
-                    and context.project in cfg.allowed_auto_projects
+                    if context.project is not None and context.project in cfg.allowed_auto_projects
                     else None
                 ),
                 verification_labels=context.verification_labels,
@@ -916,24 +902,16 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         expected_monitoring_down = game_mode_active and any(
             value.get("expected_down") is True for value in checks.values()
         )
-        expected_unavailable = (
-            expected_monitoring_down
-            and set(unavailable_providers) <= {"personal-monitoring"}
-        )
+        expected_unavailable = expected_monitoring_down and set(unavailable_providers) <= {
+            "personal-monitoring"
+        }
         checks_ok = all(
-            value["ok"] or value.get("expected_down") is True
-            for value in checks.values()
+            value["ok"] or value.get("expected_down") is True for value in checks.values()
         )
-        ready_ok = checks_ok and (
-            not unavailable_providers or expected_unavailable
-        )
+        ready_ok = checks_ok and (not unavailable_providers or expected_unavailable)
         profile_metrics.record_readiness(ready_ok, kernel)
         body: dict[str, Any] = {
-            "status": (
-                "ok"
-                if ready_ok
-                else "degraded"
-            ),
+            "status": ("ok" if ready_ok else "degraded"),
             "checks": checks,
             "kernel": kernel,
         }
@@ -955,15 +933,10 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
     async def metrics() -> Response:
         from agent_kernel.core import metrics as runtime_metrics
 
-        if (
-            metrics_content_cache is None
-            or time.monotonic() - metrics_content_cache[0] >= 5
-        ):
+        if metrics_content_cache is None or time.monotonic() - metrics_content_cache[0] >= 5:
             schedule_metrics_refresh()
         if metrics_content_cache is None:
-            content = b"".join(
-                (generate_latest(), runtime_metrics.generate_metrics_content()[0])
-            )
+            content = b"".join((generate_latest(), runtime_metrics.generate_metrics_content()[0]))
         else:
             content = metrics_content_cache[1]
         return Response(content=content, media_type=CONTENT_TYPE_LATEST)
@@ -1019,10 +992,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
         bearer = authorization.partition(" ")
         bearer_value = bearer[2] if len(bearer) == 3 and bearer[0].lower() == "bearer" else ""
         if not (
-            (
-                x_control_plane_key
-                and secrets.compare_digest(x_control_plane_key, cfg.api_key)
-            )
+            (x_control_plane_key and secrets.compare_digest(x_control_plane_key, cfg.api_key))
             or (bearer_value and secrets.compare_digest(bearer_value, cfg.api_key))
         ):
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1073,8 +1043,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             if alert_status != "firing":
                 continue
             game_mode_suppressible = alertname in cfg.game_mode_alertnames or (
-                alertname == "PrometheusScrapeFailed"
-                and job in cfg.game_mode_scrape_jobs
+                alertname == "PrometheusScrapeFailed" and job in cfg.game_mode_scrape_jobs
             )
             if game is not None and game.suppress_alerts and game_mode_suppressible:
                 suppressed += 1
@@ -1090,8 +1059,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                     controllers.append(existing_controller)
                     continue
             automatic_maintenance = (
-                cfg.automatic_handling_enabled
-                and alertname in cfg.auto_maintenance_alertnames
+                cfg.automatic_handling_enabled and alertname in cfg.auto_maintenance_alertnames
             )
             project = project_label if project_label in cfg.allowed_auto_projects else None
             line_ending_target: tuple[str, str] | None = None
@@ -1127,9 +1095,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 fingerprint=fingerprint,
                 title=f"Alert: {alertname}",
                 description=(
-                    safety_hint
-                    + "Alertmanager canonical context (sanitized):\n"
-                    + description
+                    safety_hint + "Alertmanager canonical context (sanitized):\n" + description
                 ),
                 repo=target_repo if automatic_repair else None,
                 project=project if automatic_repair else None,
@@ -1138,11 +1104,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
                 maintenance_capability=(
                     _LINE_ENDING_DISCARD_CAPABILITY
                     if line_ending_target is not None
-                    else (
-                        "maintenance.cleanup_known_garbage"
-                        if automatic_maintenance
-                        else None
-                    )
+                    else ("maintenance.cleanup_known_garbage" if automatic_maintenance else None)
                 ),
                 maintenance_parameters=(
                     {"repo": line_ending_target[0], "project": line_ending_target[1]}

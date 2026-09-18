@@ -304,10 +304,7 @@ class ControlPlaneMetricsCollector:
         provider_ids = sorted(set(self._last_ready_providers) | set(self._current_providers))
         for provider_id in provider_ids:
             mismatch = (
-                int(
-                    self._last_ready_providers[provider_id]
-                    != self._current_providers[provider_id]
-                )
+                int(self._last_ready_providers[provider_id] != self._current_providers[provider_id])
                 if provider_id in self._last_ready_providers
                 and provider_id in self._current_providers
                 else 0

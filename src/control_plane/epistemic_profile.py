@@ -62,8 +62,7 @@ def build_repair_epistemic_profile(
             EpistemicIssue(
                 kind=EpistemicIssueKind.ACQUISITION_GAP,
                 statement=(
-                    "The incident has not yet been localized by a current discriminating "
-                    "diagnosis."
+                    "The incident has not yet been localized by a current discriminating diagnosis."
                 ),
                 scope=controller_ref,
                 basis_refs=basis,
@@ -254,9 +253,7 @@ def build_repair_epistemic_profile(
 
     self_model = WorkingSelfModel(
         capabilities=tuple(capabilities),
-        resources=(
-            ("remaining-autonomous-attempts", float(max(0, attempt_limit - attempt + 1))),
-        ),
+        resources=(("remaining-autonomous-attempts", float(max(0, attempt_limit - attempt + 1))),),
         known_blind_spots=(
             "provider success does not establish target recovery",
             "current capability belief does not grant execution authority",

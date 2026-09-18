@@ -40,9 +40,7 @@ def test_removed_feedback_scrape_job_is_not_game_mode_suppressed() -> None:
     assert "feedback-analysis" not in cfg.game_mode_scrape_jobs
 
 
-def test_loads_policy_without_a_cumulative_episode_limit(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_loads_policy_without_a_cumulative_episode_limit(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "control-plane.toml"
     config_path.write_text(
         """

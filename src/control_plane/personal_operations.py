@@ -72,8 +72,7 @@ class PersonalOperationsProvider:
             provider_id=self.descriptor.id,
             available=git_ok or docker_ok or chezmoi_ok or maintenance_ok,
             detail=(
-                f"git={git_ok} docker={docker_ok} chezmoi={chezmoi_ok} "
-                f"maintenance={maintenance_ok}"
+                f"git={git_ok} docker={docker_ok} chezmoi={chezmoi_ok} maintenance={maintenance_ok}"
             ),
             metadata={
                 "maintenance_cleanup_available": maintenance_ok,
@@ -218,9 +217,7 @@ class PersonalOperationsProvider:
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise TimeoutError(
-                f"command outcome is ambiguous after timeout: {argv[0]}"
-            ) from None
+            raise TimeoutError(f"command outcome is ambiguous after timeout: {argv[0]}") from None
         out = (stdout or b"").decode("utf-8", errors="replace").strip()
         err = (stderr or b"").decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
@@ -247,9 +244,7 @@ class PersonalOperationsProvider:
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise TimeoutError(
-                f"command outcome is ambiguous after timeout: {argv[0]}"
-            ) from None
+            raise TimeoutError(f"command outcome is ambiguous after timeout: {argv[0]}") from None
         output = stdout or b""
         if proc.returncode != 0:
             err = (stderr or b"").decode("utf-8", errors="replace").strip()
@@ -370,9 +365,9 @@ class PersonalOperationsProvider:
                     "refusing automatic line-ending cleanup: path is not UTF-8"
                 ) from exc
             unresolved_candidate = repo_path / relative
-            if unresolved_candidate.is_symlink() or getattr(
-                os.path, "isjunction", lambda _: False
-            )(unresolved_candidate):
+            if unresolved_candidate.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(
+                unresolved_candidate
+            ):
                 raise ValueError("refusing automatic line-ending cleanup: symlink path")
             candidate = unresolved_candidate.resolve(strict=False)
             if repo_path not in candidate.parents or not candidate.is_file():
@@ -418,9 +413,7 @@ class PersonalOperationsProvider:
     async def _git_branch(self, repo: str) -> str:
         try:
             return (
-                await self._run(
-                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo
-                )
+                await self._run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo)
             ).strip()
         except RuntimeError as exc:
             raise ValueError("repository is detached or has no symbolic branch") from exc
@@ -470,8 +463,8 @@ class PersonalOperationsProvider:
             cwd=repo,
         )
         fetched_sha = (
-            await self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo)
-        ).strip().lower()
+            (await self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo)).strip().lower()
+        )
         if fetched_sha != remote_sha:
             raise ValueError("fetched target changed after diagnosis")
         await self._git_clean(repo)

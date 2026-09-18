@@ -41,9 +41,7 @@ class PersonalMonitoringProvider:
             )
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                response = await client.get(
-                    f"{self.config.prometheus_url.rstrip('/')}/-/ready"
-                )
+                response = await client.get(f"{self.config.prometheus_url.rstrip('/')}/-/ready")
             return ProviderHealth(
                 provider_id=self.descriptor.id,
                 available=response.status_code == 200,
@@ -97,9 +95,7 @@ class PersonalMonitoringProvider:
             if not isinstance(current, dict):
                 continue
             if all(
-                str(current.get(key, "")) == str(value)
-                for key, value in expected.items()
-                if value
+                str(current.get(key, "")) == str(value) for key, value in expected.items() if value
             ):
                 state = str(raw.get("state", "firing"))
                 if state in {"firing", "pending"}:

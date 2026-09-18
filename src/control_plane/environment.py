@@ -236,9 +236,7 @@ def _lifecycle_observations(
     elif recovery_value is False:
         missing_raw = payload.get("recovery_missing_paths")
         missing = (
-            [str(item) for item in missing_raw if item]
-            if isinstance(missing_raw, list)
-            else []
+            [str(item) for item in missing_raw if item] if isinstance(missing_raw, list) else []
         )
         observations.append(
             _problem(
@@ -269,9 +267,7 @@ def _lifecycle_observations(
     elif sync_value is False:
         failures_raw = payload.get("synchronization_failures")
         failures = (
-            [str(item) for item in failures_raw if item]
-            if isinstance(failures_raw, list)
-            else []
+            [str(item) for item in failures_raw if item] if isinstance(failures_raw, list) else []
         )
         observations.append(
             _problem(
@@ -301,11 +297,7 @@ def _lifecycle_observations(
     garbage_value = payload.get("known_garbage_count")
     if isinstance(garbage_value, (int, float)):
         paths_raw = payload.get("known_garbage_paths")
-        paths = (
-            [str(item) for item in paths_raw if item]
-            if isinstance(paths_raw, list)
-            else []
-        )
+        paths = [str(item) for item in paths_raw if item] if isinstance(paths_raw, list) else []
         if int(garbage_value) > 0:
             observations.append(
                 _problem(
@@ -317,9 +309,7 @@ def _lifecycle_observations(
                 )
             )
         else:
-            observations.append(
-                _ok("known_garbage", "no configured known-garbage path is present")
-            )
+            observations.append(_ok("known_garbage", "no configured known-garbage path is present"))
     else:
         observations.append(
             _unknown(
@@ -387,8 +377,14 @@ def _path_status(payload: Mapping[str, Any], expected: str | None) -> tuple[bool
     if not actual:
         if running is True:
             if expected and Path(expected).is_file():
-                return True, f"v2rayN running, path unreadable (protected process); expected={expected} exists"
-            return None, f"v2rayN 进程正在运行，但可执行路径不可读；expected={expected or '<not configured>'}"
+                return (
+                    True,
+                    f"v2rayN running, path unreadable (protected process); expected={expected} exists",
+                )
+            return (
+                None,
+                f"v2rayN 进程正在运行，但可执行路径不可读；expected={expected or '<not configured>'}",
+            )
         if expected and Path(expected).is_file():
             return True, f"expected={expected} exists; v2rayN process is not running"
         return None, "v2rayN 进程路径/状态未能核验"
@@ -505,9 +501,8 @@ def evaluate_environment(
             if record["name"] not in expected_names or record["exit_code"] != 0
         ]
         unexpected_names = [str(record["name"]) for record in unexpected_records]
-        exit_codes_verified = (
-            len(exited_records) == int(exited)
-            and all(record["exit_code"] is not None for record in exited_records)
+        exit_codes_verified = len(exited_records) == int(exited) and all(
+            record["exit_code"] is not None for record in exited_records
         )
         expected_only = (
             int(exited) > 0
@@ -517,7 +512,9 @@ def evaluate_environment(
         )
         if int(exited) <= 0:
             observations.append(
-                _ok("docker_exited_containers", "no exited containers", metadata={"exited_count": 0})
+                _ok(
+                    "docker_exited_containers", "no exited containers", metadata={"exited_count": 0}
+                )
             )
         elif expected_only:
             observations.append(
@@ -560,7 +557,10 @@ def evaluate_environment(
                     "docker_build_cache",
                     f"build cache bytes={cache_bytes} exceeds threshold={config.docker_build_cache_max_bytes}",
                     "人工评估缓存用途与磁盘压力；不要自动执行 docker builder prune 或删除 Docker 数据。",
-                    metadata={"bytes": cache_bytes, "threshold_bytes": config.docker_build_cache_max_bytes},
+                    metadata={
+                        "bytes": cache_bytes,
+                        "threshold_bytes": config.docker_build_cache_max_bytes,
+                    },
                 )
             )
         else:
@@ -568,7 +568,10 @@ def evaluate_environment(
                 _ok(
                     "docker_build_cache",
                     f"build cache bytes={cache_bytes}",
-                    metadata={"bytes": cache_bytes, "threshold_bytes": config.docker_build_cache_max_bytes},
+                    metadata={
+                        "bytes": cache_bytes,
+                        "threshold_bytes": config.docker_build_cache_max_bytes,
+                    },
                 )
             )
     else:
@@ -588,11 +591,16 @@ def evaluate_environment(
                 "v2rayn_path",
                 f"v2rayN path drift: {path_detail}",
                 "人工确认实际 v2rayN.exe 路径、启动方式和配置归属；不要自动移动、替换或升级客户端。",
-                metadata={"actual_path": payload.get("v2rayn_path", ""), "expected_path": config.v2rayn_expected_path or ""},
+                metadata={
+                    "actual_path": payload.get("v2rayn_path", ""),
+                    "expected_path": config.v2rayn_expected_path or "",
+                },
             )
         )
     else:
-        observations.append(_unknown("v2rayn_path", path_detail, configured=bool(config.v2rayn_expected_path)))
+        observations.append(
+            _unknown("v2rayn_path", path_detail, configured=bool(config.v2rayn_expected_path))
+        )
     if payload.get("v2rayn_running") is True:
         observations.append(_ok("v2rayn_status", "v2rayN process is running"))
     elif payload.get("v2rayn_running") is False and config.v2rayn_expected_path:
@@ -604,13 +612,22 @@ def evaluate_environment(
             )
         )
     else:
-        observations.append(_unknown("v2rayn_status", "v2rayN 运行状态未配置或未能核验", configured=bool(config.v2rayn_expected_path)))
+        observations.append(
+            _unknown(
+                "v2rayn_status",
+                "v2rayN 运行状态未配置或未能核验",
+                configured=bool(config.v2rayn_expected_path),
+            )
+        )
 
-    observations = _lifecycle_observations(
-        config,
-        payload,
-        provider_health=provider_health,
-    ) + observations
+    observations = (
+        _lifecycle_observations(
+            config,
+            payload,
+            provider_health=provider_health,
+        )
+        + observations
+    )
     return EnvironmentSnapshot(checked_at=time.time(), observations=tuple(observations))
 
 
@@ -709,12 +726,15 @@ class EnvironmentInspectionProvider:
             except Exception as exc:  # pragma: no cover - defensive boundary
                 probe_error = str(exc)[:500]
                 if self._snapshot is not None:
-                    _log.warning("environment probe failed, retaining last snapshot: %s", probe_error)
+                    _log.warning(
+                        "environment probe failed, retaining last snapshot: %s", probe_error
+                    )
                     return self._snapshot
                 snapshot = EnvironmentSnapshot(
                     checked_at=time.time(),
                     observations=tuple(
-                        _unknown(name, f"environment probe failed: {probe_error}") for name in CHECK_NAMES
+                        _unknown(name, f"environment probe failed: {probe_error}")
+                        for name in CHECK_NAMES
                     ),
                     probe_error=probe_error,
                 )
@@ -740,7 +760,10 @@ class EnvironmentInspectionProvider:
             provider_id=self.descriptor.id,
             status="succeeded",
             message=json.dumps(snapshot.as_dict(), ensure_ascii=False),
-            metadata={"problem_count": len(snapshot.problems), "unknown_count": len(snapshot.unknowns)},
+            metadata={
+                "problem_count": len(snapshot.problems),
+                "unknown_count": len(snapshot.unknowns),
+            },
         )
 
     async def cancel(self, request_id: str) -> None:
@@ -787,7 +810,16 @@ class EnvironmentInspectionProvider:
             _log.warning("environment lifecycle probe failed: %s", section_errors["lifecycle"])
         if section_errors:
             payload["_probe_section_errors"] = section_errors
-        meaningful = any(k in payload for k in ("docker_available", "recovery_ok", "synchronization_ok", "known_garbage_count", "v2rayn_running"))
+        meaningful = any(
+            k in payload
+            for k in (
+                "docker_available",
+                "recovery_ok",
+                "synchronization_ok",
+                "known_garbage_count",
+                "v2rayn_running",
+            )
+        )
         if not meaningful:
             raise RuntimeError(f"environment probe sections failed: {section_errors}")
         return payload
@@ -969,7 +1001,10 @@ class EnvironmentInspectionProvider:
             try:
                 REMOTE_SHA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = REMOTE_SHA_CACHE_PATH.with_suffix(".json.tmp")
-                tmp_path.write_text(json.dumps({"version": 1, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+                tmp_path.write_text(
+                    json.dumps({"version": 1, "entries": entries}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
                 os.replace(tmp_path, REMOTE_SHA_CACHE_PATH)
             except Exception as exc:
                 _log.warning("remote cache write failed: %s", str(exc)[:200])
@@ -1021,11 +1056,21 @@ if ($dockerAvailable) {
 """
         executable = shutil.which("powershell.exe") or shutil.which("pwsh") or "powershell.exe"
         result = self._run_bounded_command(
-            [executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            [
+                executable,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
             timeout=self.config.environment_probe_timeout_seconds,
         )
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout).decode("utf-8", errors="replace")[:500])
+            raise RuntimeError(
+                (result.stderr or result.stdout).decode("utf-8", errors="replace")[:500]
+            )
         raw = result.stdout.decode("utf-8", errors="replace").strip()
         parsed = json.loads(raw) if raw else {}
         return parsed if isinstance(parsed, dict) else {}

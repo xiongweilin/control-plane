@@ -237,9 +237,7 @@ class CodexExecutionBoundary:
         if self.config.codex_disable_docker:
             docker_config = support_dir / "docker"
             docker_config.mkdir(parents=True, exist_ok=True)
-            (docker_config / "config.json").write_text(
-                json.dumps({"auths": {}}), encoding="utf-8"
-            )
+            (docker_config / "config.json").write_text(json.dumps({"auths": {}}), encoding="utf-8")
             disabled_host = (
                 "npipe:////./pipe/control-plane-codex-disabled"
                 if os.name == "nt"
@@ -258,9 +256,7 @@ class CodexExecutionBoundary:
 
     def prepare(self, repo: str, sandbox: Sandbox) -> _PreparedBoundary:
         source = Path(repo).resolve()
-        support_dir = (
-            self.config.codex_worktree_root.parent / f".codex-boundary-{uuid.uuid4().hex}"
-        )
+        support_dir = self.config.codex_worktree_root.parent / f".codex-boundary-{uuid.uuid4().hex}"
         support_dir.mkdir(parents=True, exist_ok=True)
         pair: tuple[Path, Path] | None = None
         try:
