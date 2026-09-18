@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 coverage.xml
 data/
+backups/
 *.patch.tmp
 control_plane.toml
 
