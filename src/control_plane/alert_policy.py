@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from meta_controller import StagedMetaPolicy
 from agent_kernel.controller import (
     CognitiveClosure,
     CognitiveController,
@@ -22,6 +21,7 @@ from agent_kernel.controller import (
 from agent_kernel.core.capabilities import CapabilityResult
 from agent_kernel.core.models import Event, new_id
 from agent_kernel.responsibility import EffectClass
+from meta_controller import StagedMetaPolicy
 
 from .epistemic_profile import (
     build_repair_epistemic_profile,

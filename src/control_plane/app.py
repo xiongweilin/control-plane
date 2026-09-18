@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
 from agent_kernel.controller import CognitiveController, ControllerStatus
 from agent_kernel.core.capabilities import CapabilityRequest
 from agent_kernel.core.models import Event, new_id
 from agent_kernel.deployment.local import create_personal_platform_runtime
 from agent_kernel.providers.codex.provider import CodexProvider
+from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
