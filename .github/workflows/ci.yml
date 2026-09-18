@@ -1,30 +1,82 @@
 name: CI
 
+# 分层门禁：每个 job 只对应一个 failure class。
+#   hygiene      workflow/仓库卫生：actionlint、zizmor、gitleaks
+#   dependencies 依赖解析结果的已知漏洞：OSV-Scanner（uv.lock）
+#   test         运行契约与部署契约：ruff、ruff format、mypy、pytest、无内嵌 kernel 证明、SonarQube Cloud
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: "1.7.12.24"
+  ZIZMOR_VERSION: "1.30.1"
+  GITLEAKS_VERSION: "8.30.1"
+
 jobs:
-  test:
+  hygiene:
+    name: hygiene
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+          persist-credentials: false
+      - name: actionlint
+        run: pipx run --spec "actionlint-py==${ACTIONLINT_VERSION}" actionlint -color
+      - name: zizmor
+        run: pipx run "zizmor==${ZIZMOR_VERSION}" --persona=regular .github/workflows
+      - name: gitleaks
+        run: |
+          curl -sSfL -o "${RUNNER_TEMP}/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" git . --redact --no-banner --exit-code 1
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: OSV-Scanner (uv.lock)
+        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
+        with:
+          scan-args: |-
+            --recursive
+            ./
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
       - name: Sync Agent Kernel dependency and dev tools
         run: uv sync --extra dev
       - name: Ruff
         run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
       - name: Mypy
         shell: bash
         run: |
@@ -52,12 +104,13 @@ jobs:
           test ! -e src/control_plane/closure_authority.py
           test ! -e src/control_plane/reconciliation.py
       - name: SonarQube Cloud Scan
-        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
       - name: SonarQube Cloud Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1.2.1
+        uses: SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
         timeout-minutes: 10
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
