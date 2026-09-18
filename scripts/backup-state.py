@@ -1,19 +1,19 @@
-"""control-plane 状态库的独立备份与恢复演练。
+"""control-plane 状态库的独立备份与恢复演练.
 
-为什么需要它：`data/` 下的状态库保存的是本平台自己做过什么——kernel 运行记录、
-repair/alert 历史、command audit、settings。它不是可重建的缓存，所以结论不是
-ephemeral，而是"必须有独立于 data/ 的快照，并且定期真的恢复一次并验证语义"。
+为什么需要它: data/ 下的状态库保存的是本平台自己做过什么 -- kernel 运行记录,
+repair/alert 历史, command audit, settings. 它不是可重建的缓存, 所以结论不是
+ephemeral, 而是 "必须有独立于 data/ 的快照, 并且定期真的恢复一次并验证语义".
 
-用法：
+用法:
     uv run python scripts/backup-state.py backup [--state-dir DIR] [--backup-root DIR]
     uv run python scripts/backup-state.py restore-drill --snapshot DIR
-    uv run python scripts/backup-state.py verify --snapshot DIR   # 只校验完整性，不建库
+    uv run python scripts/backup-state.py verify --snapshot DIR    # 只校验完整性, 不建库
 
-设计要点：
-  - 快照用 SQLite 在线备份 API（`Connection.backup`），对运行中的 WAL 库安全；
-  - 每个文件记录 sha256 与表行数，manifest.json 是该快照的唯一说明；
-  - 恢复演练把快照解到隔离目录，只读打开，核对 integrity_check、表集合与行数，
-    再做一次语义抽样读取（runtime_records / settings / alerts），任一失败即非零退出。
+设计要点:
+  - 快照用 SQLite 在线备份 API (Connection.backup), 对运行中的 WAL 库安全;
+  - 每个文件记录 sha256 与表行数, manifest.json 是该快照的唯一说明;
+  - 恢复演练把快照解到隔离目录, 只读打开, 核对 integrity_check, 表集合与行数,
+    再做一次语义抽样读取 (runtime_records / settings / alerts), 任一失败即非零退出.
 """
 
 from __future__ import annotations
