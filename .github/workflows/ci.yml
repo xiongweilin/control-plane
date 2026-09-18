@@ -44,8 +44,8 @@ jobs:
         run: uv run pytest -q --cov=src/control_plane --cov-report=xml:coverage.xml
       - name: Prove no embedded kernel remains
         run: |
-          test ! -e src/portable_runtime
-          test ! -e portable-runtime-pin.json
+          test ! -e src/agent_kernel
+          test ! -e agent-kernel-pin.json
           test ! -e src/control_plane/service.py
           test ! -e src/control_plane/storage.py
           test ! -e src/control_plane/portable_authority.py

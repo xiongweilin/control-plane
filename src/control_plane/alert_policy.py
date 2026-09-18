@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from meta_controller import StagedMetaPolicy
-from portable_runtime.controller import (
+from agent_kernel.controller import (
     CognitiveClosure,
     CognitiveController,
     ControllerDecision,
@@ -19,9 +19,9 @@ from portable_runtime.controller import (
     RevisionDisposition,
     RevisionScope,
 )
-from portable_runtime.core.capabilities import CapabilityResult
-from portable_runtime.core.models import Event, new_id
-from portable_runtime.responsibility import EffectClass
+from agent_kernel.core.capabilities import CapabilityResult
+from agent_kernel.core.models import Event, new_id
+from agent_kernel.responsibility import EffectClass
 
 from .epistemic_profile import (
     build_repair_epistemic_profile,

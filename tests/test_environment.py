@@ -96,7 +96,7 @@ def test_environment_evaluation_covers_standing_control_plane_responsibilities(
             "synchronization_failures": ["D:/agent/ratio"],
             "synchronization_checked": 2,
             "known_garbage_count": 1,
-            "known_garbage_paths": ["D:/agent/portable-runtime-worktrees"],
+            "known_garbage_paths": ["D:/agent/agent-kernel-worktrees"],
         },
         provider_health={"personal-operations": {"available": True}},
     )

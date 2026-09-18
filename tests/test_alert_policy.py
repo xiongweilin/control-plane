@@ -1,14 +1,14 @@
 import pytest
-from portable_runtime.controller import (
+from agent_kernel.controller import (
     CognitiveController,
     ControllerDecision,
     ControllerDecisionKind,
     ControllerStatus,
     RevisionDisposition,
 )
-from portable_runtime.core.models import Event, new_id
-from portable_runtime.core.runtime import Runtime
-from portable_runtime.responsibility import EffectClass
+from agent_kernel.core.models import Event, new_id
+from agent_kernel.core.runtime import Runtime
+from agent_kernel.responsibility import EffectClass
 
 from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy, classify_safety
 from control_plane.kernel_bridge import PersonalKernelBridge
@@ -893,7 +893,7 @@ async def test_non_reversible_judgment_forms_read_only_closure() -> None:
 
 
 def _capability_result(*, status: str, message: str):
-    from portable_runtime.core.capabilities import CapabilityResult
+    from agent_kernel.core.capabilities import CapabilityResult
 
     return CapabilityResult(
         request_id=new_id("request"),

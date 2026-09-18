@@ -6,13 +6,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from portable_runtime.core.capabilities import (
+from agent_kernel.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
     InvocationContext,
 )
-from portable_runtime.core.models import Event
-from portable_runtime.responsibility import ResponsibilityKernel
+from agent_kernel.core.models import Event
+from agent_kernel.responsibility import ResponsibilityKernel
 
 import control_plane.app as app_module
 from control_plane.app import (

@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from portable_runtime.controller import CognitiveController, ControllerState
-from portable_runtime.core.capabilities import CapabilityResult
-from portable_runtime.core.models import Event, Work, new_id, utcnow
-from portable_runtime.responsibility import (
+from agent_kernel.controller import CognitiveController, ControllerState
+from agent_kernel.core.capabilities import CapabilityResult
+from agent_kernel.core.models import Event, Work, new_id, utcnow
+from agent_kernel.responsibility import (
     Commitment,
     EffectClass,
     PortfolioAdmissionDecision,

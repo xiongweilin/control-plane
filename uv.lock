@@ -7,6 +7,18 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agent-kernel"
+version = "0.1.0"
+source = { git = "https://github.com/xiongweilin/agent-kernel.git?rev=17acfba8338683bdb0f3d1c93aa671778603482a#17acfba8338683bdb0f3d1c93aa671778603482a" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "prometheus-client" },
+    { name = "pydantic" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -69,10 +81,10 @@ name = "control-plane"
 version = "0.5.0"
 source = { editable = "." }
 dependencies = [
+    { name = "agent-kernel" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "meta-controller" },
-    { name = "portable-runtime" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "uvicorn", extra = ["standard"] },
@@ -89,11 +101,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-kernel", git = "https://github.com/xiongweilin/agent-kernel.git?rev=17acfba8338683bdb0f3d1c93aa671778603482a" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "meta-controller", git = "https://github.com/xiongweilin/meta-controller.git?rev=069b2d149e6c77d57b020291aad4b9b775d20e81" },
+    { name = "meta-controller", git = "https://github.com/xiongweilin/meta-controller.git?rev=7c2b18ed82e864447db0215e00175ba183baeb41" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
-    { name = "portable-runtime", git = "https://github.com/xiongweilin/agent-kernel.git?rev=dd59bc19c440ba550443e5578d9081011fd5d7c3" },
     { name = "prometheus-client", specifier = ">=0.21,<1" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<9" },
@@ -414,9 +426,9 @@ wheels = [
 [[package]]
 name = "meta-controller"
 version = "0.2.0"
-source = { git = "https://github.com/xiongweilin/meta-controller.git?rev=069b2d149e6c77d57b020291aad4b9b775d20e81#069b2d149e6c77d57b020291aad4b9b775d20e81" }
+source = { git = "https://github.com/xiongweilin/meta-controller.git?rev=7c2b18ed82e864447db0215e00175ba183baeb41#7c2b18ed82e864447db0215e00175ba183baeb41" }
 dependencies = [
-    { name = "portable-runtime" },
+    { name = "agent-kernel" },
 ]
 
 [[package]]
@@ -496,18 +508,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
-]
-
-[[package]]
-name = "portable-runtime"
-version = "0.1.0"
-source = { git = "https://github.com/xiongweilin/agent-kernel.git?rev=dd59bc19c440ba550443e5578d9081011fd5d7c3#dd59bc19c440ba550443e5578d9081011fd5d7c3" }
-dependencies = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "prometheus-client" },
-    { name = "pydantic" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [[package]]

@@ -11,11 +11,11 @@ from typing import Any, cast
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
-from portable_runtime.controller import CognitiveController, ControllerStatus
-from portable_runtime.core.capabilities import CapabilityRequest
-from portable_runtime.core.models import Event, new_id
-from portable_runtime.deployment.local import create_personal_platform_runtime
-from portable_runtime.providers.codex.provider import CodexProvider
+from agent_kernel.controller import CognitiveController, ControllerStatus
+from agent_kernel.core.capabilities import CapabilityRequest
+from agent_kernel.core.models import Event, new_id
+from agent_kernel.deployment.local import create_personal_platform_runtime
+from agent_kernel.providers.codex.provider import CodexProvider
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
@@ -319,7 +319,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     async def refresh_metrics_background() -> None:
         nonlocal metrics_content_cache
-        from portable_runtime.core import metrics as runtime_metrics
+        from agent_kernel.core import metrics as runtime_metrics
 
         kernel = await kernel_health()
         provider_health = {
@@ -953,7 +953,7 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Response:
-        from portable_runtime.core import metrics as runtime_metrics
+        from agent_kernel.core import metrics as runtime_metrics
 
         if (
             metrics_content_cache is None

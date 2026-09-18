@@ -2,7 +2,7 @@
 
 The Agent Kernel owns provider contracts, routing, and the reality boundary.
 Feishu is a personal-platform integration, so its concrete human and
-notification providers belong to this profile instead of portable-runtime.
+notification providers belong to this profile instead of agent-kernel.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-from portable_runtime.core.capabilities import (
+from agent_kernel.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
     InvocationContext,

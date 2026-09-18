@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from meta_controller import StagedMetaPolicy
-from portable_runtime.controller import CognitiveController, ControllerDecisionKind
-from portable_runtime.core.runtime import Runtime
+from agent_kernel.controller import CognitiveController, ControllerDecisionKind
+from agent_kernel.core.runtime import Runtime
 
 from control_plane.alert_policy import AutonomousRepairPolicy, ManualTaskPolicy
 from control_plane.kernel_bridge import PersonalKernelBridge

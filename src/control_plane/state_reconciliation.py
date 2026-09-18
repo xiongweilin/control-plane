@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from portable_runtime.core.models import Event, new_id, utcnow
+from agent_kernel.core.models import Event, new_id, utcnow
 
 _REPAIR_KIND = "personal-incident-repair"
 # Legacy journal compatibility only. New failed/invalid diagnosis paths never

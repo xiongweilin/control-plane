@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from portable_runtime.core.capabilities import (
+from agent_kernel.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
     InvocationContext,

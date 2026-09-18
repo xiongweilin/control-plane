@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from portable_runtime.core.capabilities import CapabilityRequest, InvocationContext
+from agent_kernel.core.capabilities import CapabilityRequest, InvocationContext
 
 import control_plane.providers.feishu as feishu_module
 from control_plane.providers.feishu import FeishuNotificationProvider

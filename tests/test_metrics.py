@@ -1,6 +1,6 @@
-from portable_runtime.core.models import Work
-from portable_runtime.core.runtime import Runtime
-from portable_runtime.records.knowledge import KnowledgeProjection
+from agent_kernel.core.models import Work
+from agent_kernel.core.runtime import Runtime
+from agent_kernel.records.knowledge import KnowledgeProjection
 from prometheus_client import CollectorRegistry, generate_latest
 
 from control_plane.environment import CheckObservation, EnvironmentSnapshot

@@ -6,7 +6,7 @@ setup and log protection. It does not own runtime, cognitive-control,
 responsibility, record, authority, recovery or verification semantics.
 
 The Python application is `control_plane`; its generic kernel is installed from
-`xiongweilin/agent-kernel` as the `portable-runtime` distribution. Interactive
+`xiongweilin/agent-kernel` as the `agent-kernel` distribution. Interactive
 repository development and repair use Codex directly and do not route through
 this background service.
 
@@ -34,5 +34,5 @@ process exits or when a liveness threshold is reached with no active Codex work.
 The supervisor and installer resolve the repository root two levels above this
 deployment directory, so the scheduled task can run from any working directory.
 
-There is intentionally no portable-runtime copy, portable-local deployment,
+There is intentionally no agent-kernel copy, portable-local deployment,
 generic task UI or migration shim in this repository.

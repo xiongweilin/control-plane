@@ -20,7 +20,7 @@ A reusable runtime should not have to know the details of one machine, one notif
 
 Those are real operational facts, but they are not universal Agent Kernel semantics.
 
-`control-plane` therefore owns the deployment-specific layer while importing generic cognitive control, persistent responsibility, Work/Run execution, records, authorization, recovery, verification, and provider routing from `agent-kernel` through its compatibility Python distribution name `portable-runtime` / namespace `portable_runtime`.
+`control-plane` therefore owns the deployment-specific layer while importing generic cognitive control, persistent responsibility, Work/Run execution, records, authorization, recovery, verification, and provider routing from `agent-kernel` through its compatibility Python distribution name `agent-kernel` / namespace `agent_kernel`.
 
 ## Example: bounded incident repair
 
@@ -100,8 +100,8 @@ The following are intentionally absent and must not return:
 
 ```text
 GUI
-src/portable_runtime/
-portable-runtime-pin.json
+src/agent_kernel/
+agent-kernel-pin.json
 legacy Store / repair DB
 RepairService
 PortableRuntimeAuthority
@@ -118,7 +118,7 @@ There is no dual core or legacy fallback. If Agent Kernel needs a semantic featu
 
 ## Agent Kernel dependency
 
-`pyproject.toml` pins `portable-runtime` directly to the Agent Kernel revision used by this deployment profile. The repository/product name is `agent-kernel`; the package/namespace remain compatibility axes owned upstream.
+`pyproject.toml` pins `agent-kernel` directly to the Agent Kernel revision used by this deployment profile. The repository/product name is `agent-kernel`; the package/namespace remain compatibility axes owned upstream.
 
 ## Public service surface
 
@@ -151,4 +151,4 @@ uv run mypy src
 uv run pytest -q
 ```
 
-Structural tests fail if an embedded `src/portable_runtime` tree or retired generic control-plane modules reappear. Cognitive-loop tests fail if execution is reachable directly from diagnosis: they require closure, proposal, materialized Work lineage, and revision before close/reopen. Route tests lock the intended public service surface in place.
+Structural tests fail if an embedded `src/agent_kernel` tree or retired generic control-plane modules reappear. Cognitive-loop tests fail if execution is reachable directly from diagnosis: they require closure, proposal, materialized Work lineage, and revision before close/reopen. Route tests lock the intended public service surface in place.

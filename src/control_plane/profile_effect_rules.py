@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from portable_runtime.core.capability_contract import CapabilityEffectRule
+from agent_kernel.core.capability_contract import CapabilityEffectRule
 
 
 def register_profile_effect_rules(runtime: Any) -> None:

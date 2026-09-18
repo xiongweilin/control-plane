@@ -1,11 +1,11 @@
-from portable_runtime.controller import (
+from agent_kernel.controller import (
     CognitiveController,
     ControllerDecision,
     ControllerDecisionKind,
     ControllerStatus,
 )
-from portable_runtime.core.models import Event, new_id
-from portable_runtime.core.runtime import Runtime
+from agent_kernel.core.models import Event, new_id
+from agent_kernel.core.runtime import Runtime
 
 from control_plane.alert_policy import ManualTaskPolicy
 from control_plane.kernel_bridge import PersonalKernelBridge

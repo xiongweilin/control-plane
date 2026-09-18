@@ -13,14 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from portable_runtime.core.capabilities import (
+from agent_kernel.core.capabilities import (
     CapabilityRequest,
     CapabilityResult,
     InvocationContext,
     ProviderDescriptor,
     ProviderHealth,
 )
-from portable_runtime.providers.codex.provider import CodexProvider
+from agent_kernel.providers.codex.provider import CodexProvider
 
 from .audit import redact_text, truncate_bytes
 from .config import ControlPlaneConfig
@@ -64,7 +64,7 @@ class _PreparedBoundary:
 class ThreadIsolatedCodexProvider:
     """Keep synchronous deployment-boundary work off the HTTP event loop.
 
-    ``portable_runtime`` invokes ``ExecutionBoundary.prepare`` and its cleanup
+    ``agent_kernel`` invokes ``ExecutionBoundary.prepare`` and its cleanup
     synchronously from ``CodexProvider.invoke``.  On Windows those methods can
     run Git subprocesses, so one Codex request could otherwise pause Uvicorn's
     accept loop long enough for ``/live`` to time out.  The provider remains the

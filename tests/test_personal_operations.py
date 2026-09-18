@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from portable_runtime.core.capabilities import CapabilityRequest, InvocationContext
+from agent_kernel.core.capabilities import CapabilityRequest, InvocationContext
 
 from control_plane.config import ControlPlaneConfig
 from control_plane.personal_operations import PersonalOperationsProvider
@@ -205,7 +205,7 @@ def test_provider_advertises_only_the_exact_synchronization_capability_names(
 
 @pytest.mark.asyncio
 async def test_known_garbage_is_moved_to_reversible_quarantine(tmp_path: Path) -> None:
-    source = tmp_path / "portable-runtime-worktrees"
+    source = tmp_path / "agent-kernel-worktrees"
     source.mkdir()
     (source / "generated.txt").write_text("generated", encoding="utf-8")
     quarantine = tmp_path / "quarantine"

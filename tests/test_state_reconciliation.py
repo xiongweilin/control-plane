@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from portable_runtime.core.models import utcnow
-from portable_runtime.core.runtime import Runtime
+from agent_kernel.core.models import utcnow
+from agent_kernel.core.runtime import Runtime
 
 from control_plane.state_reconciliation import (
     reconcile_repair_state,

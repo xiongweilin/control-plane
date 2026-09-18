@@ -4,8 +4,8 @@ from pathlib import Path
 def test_no_embedded_or_legacy_kernel_code() -> None:
     root = Path(__file__).resolve().parents[1]
     forbidden_paths = [
-        "src/portable_runtime",
-        "portable-runtime-pin.json",
+        "src/agent_kernel",
+        "agent-kernel-pin.json",
         "MIGRATION.md",
         "deployments/portable-local",
         "src/control_plane/service.py",
