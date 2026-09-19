@@ -22,6 +22,7 @@
 - Feishu transport 由 feishu-gateway 负责。
 - Git/Docker effect provider 只允许个人项目和仓库 allowlist 中的目标。
 - 项目注册：`autonomous-development` → `D:\agent\autonomous-development`；当前本机配置同时加入 `allowed_auto` 与 `project_dirs`，因此可作为 standing auto-repair project 解析。
+- 同步巡检：`D:\agent\autonomous-development` 与其他个人项目一样纳入 `environment.synchronization_paths`；该列表只描述仓库同步检查，不授权跨项目写入或跳过项目自身质量门。
 - Steam 游戏会话在明确 Docker 预期退出时负责抑制相应 readiness 告警；未知游戏状态不触发抑制。
 
 ## 安装和验证

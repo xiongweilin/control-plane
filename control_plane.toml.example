@@ -36,6 +36,7 @@ docker_build_cache_max_bytes = 5368709120
 docker_expected_exited_containers = []
 line_ending_auto_discard_repos = []
 recovery_paths = []
+# The personal profile adds D:\agent\autonomous-development here after cloning it.
 synchronization_paths = []
 # Set this in the ignored local profile when chezmoi is installed.
 # chezmoi_source_dir = "<home>/.local/share/chezmoi"
@@ -54,6 +55,7 @@ restore_grace_seconds = 600
 [projects]
 # `allowed_auto` is the standing local auto-repair scope.
 # `project_dirs` is the exact path registry used for labels and target resolution; Docker and remote Git stay denied to Codex.
+# The personal profile registers autonomous-development in both lists.
 allowed_auto = []
 allowed_repo_roots = []
 
